@@ -4,7 +4,7 @@
  * @brief   PEO Rover - STM32F407VGT6 pin assignment header
  *          (single source of truth for all pin/peripheral macros)
  *
- * @version v2.3.0  (2026-11-11)
+ * @version v2.4.0  (2026-11-11)
  * @board   DevEBox STM32F4XX-M (MCUDev), LQFP100, on-board 8 MHz HSE
  * @basedon PEO_ROVER_F407_PinMap.md v2.2 (same folder, authoritative doc)
  *
@@ -49,7 +49,7 @@
  *  v1.7  Second HARDWARE I2C recovered (v1.5 "impossible" superseded):
  *        M4 motor moved from TIM4 PB6-PB9 to TIM4 PD12-PD15 (all FT, same
  *        AF2, same timer/time-base - a pure pin move). Frees PB6/PB7 for a
- *        DEDICATED I2C1 serving the 3x VL53L0X; I2C2 keeps MPU6050+INA3221.
+ *        DEDICATED I2C1 serving the 3x VL53L1X; I2C2 keeps MPU6050+INA3221.
  *        Software-I2C spare (PE0/PE1) removed.
  *  v1.8  Encoders and PWM fully separated onto 8 timers (4 enc + 4 PWM):
  *        - ALL encoders are PURE (ARR=0xFFFF, 16-bit delta, no Update IRQ).
@@ -65,8 +65,8 @@
  *          (TIM2/5/9 + TIM10 + TIM11).
  *        - TFT (J4) macro block restored: CS=PB12 SCK=PB13 MISO=PB14
  *          MOSI=PB15 DC=PC5 BLK=PB1 RST=PE12.
- *        - XSHUT x3 (PC0/PC1/PC2) removed - VL53L0X addressing TBD.
- *  v2.0  XSHUT x3 RESTORED (VL53L0X re-addressing is mandatory - see 10):
+ *        - XSHUT x3 (PC0/PC1/PC2) removed - VL53L1X addressing TBD.
+ *  v2.0  XSHUT x3 RESTORED (VL53L1X re-addressing is mandatory - see 10):
  *        PC0 = front, PC1 = left, PC2 = right (AN4846 sequential power-up ->
  *        addresses 0x52/0x54/0x56).
  *        Comment clean-up: SD-socket "reused" board fact (section 2) and every
@@ -75,13 +75,17 @@
  *        I2C2 stays unavailable: M1 PWM sits on TIM2 PB10/11 and the encoder
  *        timers (SMS slave-mode counter) cannot co-host a constant-freq PWM
  *        (RM0090 S18.3.12 "external clock with direction selection").
- *  v2.2  INA3221 moved OFF I2C3 onto I2C1 (shares with 3x VL53L0X, 0x40-43).
+ *  v2.2  INA3221 moved OFF I2C3 onto I2C1 (shares with 3x VL53L1X, 0x40-43).
  *        I2C3 is now DEDICATED to MPU6050 alone - the IMU may sample faster
  *        than the current monitor, so it gets a clean bus with no other
  *        traffic.
  *  v2.3  SWAPPED the two I2C buses (per user): I2C1 (PB6/PB7) is now the
- *        MPU6050 DEDICATED bus; I2C3 (PA8/PC9) carries 3x VL53L0X + INA3221.
+ *        MPU6050 DEDICATED bus; I2C3 (PA8/PC9) carries 3x VL53L1X + INA3221.
  *        Addresses unchanged (0x68 vs 0x52/54/56 + 0x40-43).
+ *  v2.4  CHIP CHANGE VL53L0X -> VL53L1X (per user). XSHUT x3 KEPT: VL53L1X
+ *        multi-sensor re-addressing also needs XSHUT sequential power-up
+ *        (default 0x29; VL53L1X_SetI2CAddress() writes reg 0x0001, the L1X
+ *        equivalent of the L0X 0x8A). Address plan unchanged (0x52/54/56).
  ******************************************************************************
  */
 #ifndef __PEO_PINMAP_H__
@@ -333,14 +337,14 @@
 #define PEO_PM_MPU6050_ADDR     (0x68U)         /* whole-vehicle vibration */
 
 /* ============================================================================
-   8b. I2C BUS - I2C3 (PA8/PC9, AF4, 400 kHz) - VL53L0X x3 + INA3221 (v2.3)
+   8b. I2C BUS - I2C3 (PA8/PC9, AF4, 400 kHz) - VL53L1X x3 + INA3221 (v2.3)
    ----------------------------------------------------------------------------
-   Shared bus for the 3x VL53L0X rangefinders + the INA3221 current monitor:
-     VL53L0X front    0x52
-     VL53L0X left     0x54
-     VL53L0X right    0x56
+   Shared bus for the 3x VL53L1X rangefinders + the INA3221 current monitor:
+     VL53L1X front    0x52
+     VL53L1X left     0x54
+     VL53L1X right    0x56
      INA3221          0x40-0x43  (path B current monitor, low sample rate)
-   Re-addressing (AN4846): all three VL53L0X ship at factory default 0x29.
+   Re-addressing (AN4846): all three VL53L1X ship at factory default 0x29.
    XSHUT (section 10) is held LOW at power-up, then released one sensor at a
    time to assign the address above before the next sensor is released.
    NOTES:
@@ -349,7 +353,7 @@
        free because TIM1/TIM8 use their CH1/CH2 pins (PE9/11, PC6/7).
    ============================================================================ */
 
-/** I2C3 - VL53L0X + INA3221 bus (PA8/PC9, AF4) **/
+/** I2C3 - VL53L1X + INA3221 bus (PA8/PC9, AF4) **/
 #define PEO_PM_VL53_I2C          I2C3
 #define PEO_PM_VL53_I2C_CLKSPEED (400000U)
 #define PEO_PM_VL53_SCL_PORT     GPIOA
@@ -386,16 +390,16 @@
 #define PEO_PM_ACS_MV_PER_A     (185U)          /* ACS712-05B sensitivity */
 
 /* ============================================================================
-   10. VL53L0X XSHUT x3  (restored v2.0)
+   10. VL53L1X XSHUT x3  (restored v2.0)
    ----------------------------------------------------------------------------
    GPIO outputs, active-low reset per sensor. Held LOW at power-up to keep all
    three at the factory default 0x29, then released one at a time (AN4846) so
    each can be re-addressed (see section 8) before the next is released.
      XSHUT front = PC0    XSHUT left = PC1    XSHUT right = PC2
-   Push-pull output, no pull-up needed (VL53L0X has an internal XSHUT pull-up).
+   Push-pull output, no pull-up needed (VL53L1X has an internal XSHUT pull-up).
    ============================================================================ */
 
-/** VL53L0X XSHUT (active-low; low = held in reset) **/
+/** VL53L1X XSHUT (active-low; low = held in reset) **/
 #define PEO_PM_VL53_FRONT_XSHUT_PORT   GPIOC
 #define PEO_PM_VL53_FRONT_XSHUT_PIN    GPIO_Pin_0
 #define PEO_PM_VL53_LEFT_XSHUT_PORT    GPIOC
@@ -508,7 +512,7 @@
        then TIM_ICInit for CH1 and CH2 (IC1F filter e.g. 0x0F); ARR = 0xFFFF
    [ ] PWM timers (TIM2/5/9/10/11) ARR set for 20 kHz (8400/4200 per bus)
    [ ] XSHUT x3 (PC0/1/2) held LOW at power-up, released one at a time (AN4846)
-       to re-address the three VL53L0X (0x52/0x54/0x56) before first ranging
+       to re-address the three VL53L1X (0x52/0x54/0x56) before first ranging
    [ ] Battery output fused (2 A-class) - BMS is not a fuse
    [ ] Never sustain motor stall (stall ~1.5 A per motor, 18 W heat)
    ============================================================================ */
