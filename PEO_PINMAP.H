@@ -67,7 +67,7 @@
  *          MOSI=PB15 DC=PC5 BLK=PB1 RST=PE12.
  *        - XSHUT x3 (PC0/PC1/PC2) removed - VL53L1X addressing TBD.
  *  v2.0  XSHUT x3 RESTORED (VL53L1X re-addressing is mandatory - see 10):
- *        PC0 = front, PC1 = left, PC2 = right (AN4846 sequential power-up ->
+ *        PC0 = front, PC1 = left, PC2 = right (XSHUT sequential power-up ->
  *        addresses 0x52/0x54/0x56).
  *        Comment clean-up: SD-socket "reused" board fact (section 2) and every
  *        stale "TIM2/5/9/12" PWM-timer reference corrected to TIM2/5/9/10/11.
@@ -84,7 +84,7 @@
  *        Addresses unchanged (0x68 vs 0x52/54/56 + 0x40-43).
  *  v2.4  CHIP CHANGE VL53L0X -> VL53L1X (per user). XSHUT x3 KEPT: VL53L1X
  *        multi-sensor re-addressing also needs XSHUT sequential power-up
- *        (default 0x29; VL53L1X_SetI2CAddress() writes reg 0x0001, the L1X
+ *        (default 0x52; VL53L1X_SetI2CAddress() writes reg 0x0001, the L1X
  *        equivalent of the L0X 0x8A). Address plan unchanged (0x52/54/56).
  ******************************************************************************
  */
@@ -344,7 +344,7 @@
      VL53L1X left     0x54
      VL53L1X right    0x56
      INA3221          0x40-0x43  (path B current monitor, low sample rate)
-   Re-addressing (AN4846): all three VL53L1X ship at factory default 0x29.
+   Re-addressing (XSHUT sequential): all three VL53L1X ship at factory default 0x52.
    XSHUT (section 10) is held LOW at power-up, then released one sensor at a
    time to assign the address above before the next sensor is released.
    NOTES:
@@ -393,7 +393,7 @@
    10. VL53L1X XSHUT x3  (restored v2.0)
    ----------------------------------------------------------------------------
    GPIO outputs, active-low reset per sensor. Held LOW at power-up to keep all
-   three at the factory default 0x29, then released one at a time (AN4846) so
+   three at the factory default 0x52, then released one at a time so
    each can be re-addressed (see section 8) before the next is released.
      XSHUT front = PC0    XSHUT left = PC1    XSHUT right = PC2
    Push-pull output, no pull-up needed (VL53L1X has an internal XSHUT pull-up).
@@ -511,7 +511,7 @@
    [ ] Encoder mode: TIM_EncoderInterfaceConfig(TI12, Rising, Rising),
        then TIM_ICInit for CH1 and CH2 (IC1F filter e.g. 0x0F); ARR = 0xFFFF
    [ ] PWM timers (TIM2/5/9/10/11) ARR set for 20 kHz (8400/4200 per bus)
-   [ ] XSHUT x3 (PC0/1/2) held LOW at power-up, released one at a time (AN4846)
+   [ ] XSHUT x3 (PC0/1/2) held LOW at power-up, released one at a time
        to re-address the three VL53L1X (0x52/0x54/0x56) before first ranging
    [ ] Battery output fused (2 A-class) - BMS is not a fuse
    [ ] Never sustain motor stall (stall ~1.5 A per motor, 18 W heat)
