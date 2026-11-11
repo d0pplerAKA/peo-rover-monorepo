@@ -4,7 +4,7 @@
  * @brief   PEO Rover - STM32F407VGT6 pin assignment header
  *          (single source of truth for all pin/peripheral macros)
  *
- * @version v2.2.0  (2026-11-11)
+ * @version v2.3.0  (2026-11-11)
  * @board   DevEBox STM32F4XX-M (MCUDev), LQFP100, on-board 8 MHz HSE
  * @basedon PEO_ROVER_F407_PinMap.md v2.2 (same folder, authoritative doc)
  *
@@ -79,6 +79,9 @@
  *        I2C3 is now DEDICATED to MPU6050 alone - the IMU may sample faster
  *        than the current monitor, so it gets a clean bus with no other
  *        traffic.
+ *  v2.3  SWAPPED the two I2C buses (per user): I2C1 (PB6/PB7) is now the
+ *        MPU6050 DEDICATED bus; I2C3 (PA8/PC9) carries 3x VL53L0X + INA3221.
+ *        Addresses unchanged (0x68 vs 0x52/54/56 + 0x40-43).
  ******************************************************************************
  */
 #ifndef __PEO_PINMAP_H__
@@ -306,7 +309,31 @@
    ============================================================================ */
 
 /* ============================================================================
-   8. I2C BUS - I2C1 (PB6/PB7, AF4, 400 kHz) - VL53L0X x3 + INA3221 (v2.2)
+   8. I2C BUS - I2C1 (PB6/PB7, AF4, 400 kHz) - MPU6050 DEDICATED (v2.3)
+   ----------------------------------------------------------------------------
+   DEDICATED to the MPU6050 alone (whole-vehicle vibration). The IMU may
+   sample faster than the rangefinders/current monitor, so it gets a clean
+   bus with no other traffic.
+     MPU6050   0x68 (or 0x69 via AD0)
+   NOTE: I2C2 (PB10/PB11) is unavailable (M1 PWM on TIM2).
+   ============================================================================ */
+
+/** I2C1 - MPU6050 dedicated bus (PB6/PB7, AF4) **/
+#define PEO_PM_MPU6050_I2C          I2C1
+#define PEO_PM_MPU6050_I2C_CLKSPEED (400000U)
+#define PEO_PM_MPU6050_SCL_PORT     GPIOB
+#define PEO_PM_MPU6050_SCL_PIN      GPIO_Pin_6
+#define PEO_PM_MPU6050_SCL_SRC      GPIO_PinSource6
+#define PEO_PM_MPU6050_SDA_PORT     GPIOB
+#define PEO_PM_MPU6050_SDA_PIN      GPIO_Pin_7
+#define PEO_PM_MPU6050_SDA_SRC      GPIO_PinSource7
+#define PEO_PM_MPU6050_I2C_AF       GPIO_AF_I2C1
+
+/** I2C1 slave address (7-bit) **/
+#define PEO_PM_MPU6050_ADDR     (0x68U)         /* whole-vehicle vibration */
+
+/* ============================================================================
+   8b. I2C BUS - I2C3 (PA8/PC9, AF4, 400 kHz) - VL53L0X x3 + INA3221 (v2.3)
    ----------------------------------------------------------------------------
    Shared bus for the 3x VL53L0X rangefinders + the INA3221 current monitor:
      VL53L0X front    0x52
@@ -316,54 +343,28 @@
    Re-addressing (AN4846): all three VL53L0X ship at factory default 0x29.
    XSHUT (section 10) is held LOW at power-up, then released one sensor at a
    time to assign the address above before the next sensor is released.
-   NOTE: I2C2 (PB10/PB11) is unavailable (M1 PWM on TIM2). MPU6050 gets its
-   OWN dedicated bus on I2C3 - see section 8b.
-   ============================================================================ */
-
-/** I2C1 - VL53L0X rangefinder bus (PB6/PB7, AF4) **/
-#define PEO_PM_VL53_I2C          I2C1
-#define PEO_PM_VL53_I2C_CLKSPEED (400000U)
-#define PEO_PM_VL53_SCL_PORT     GPIOB
-#define PEO_PM_VL53_SCL_PIN      GPIO_Pin_6
-#define PEO_PM_VL53_SCL_SRC      GPIO_PinSource6
-#define PEO_PM_VL53_SDA_PORT     GPIOB
-#define PEO_PM_VL53_SDA_PIN      GPIO_Pin_7
-#define PEO_PM_VL53_SDA_SRC      GPIO_PinSource7
-#define PEO_PM_VL53_I2C_AF       GPIO_AF_I2C1
-
-/** I2C slave addresses (7-bit) **/
-#define PEO_PM_VL53_FRONT_ADDR  (0x52U)          /* I2C1 */
-#define PEO_PM_VL53_LEFT_ADDR   (0x54U)          /* I2C1 */
-#define PEO_PM_VL53_RIGHT_ADDR  (0x56U)          /* I2C1 */
-#define PEO_PM_INA3221_ADDR     (0x40U)          /* I2C1, path B (low rate) */
-
-/* ============================================================================
-   8b. I2C BUS - I2C3 (PA8/PC9, AF4, 400 kHz) - MPU6050 DEDICATED (v2.2)
-   ----------------------------------------------------------------------------
-   DEDICATED to the MPU6050 alone (whole-vehicle vibration). The IMU may
-   sample faster than the current monitor, so it gets a clean bus with no
-   other traffic. INA3221 was moved to I2C1 (section 8) to share with the
-   3x VL53L0X.
-     MPU6050   0x68 (or 0x69 via AD0)
    NOTES:
      - I2C3 alternate pins PH7/PH8 are NOT broken out on LQFP100, so PA8/PC9
        are the only option. PA8 (also TIM1_CH1) and PC9 (also TIM8_CH4) are
        free because TIM1/TIM8 use their CH1/CH2 pins (PE9/11, PC6/7).
    ============================================================================ */
 
-/** I2C3 - MPU6050 dedicated bus (PA8/PC9, AF4) **/
-#define PEO_PM_I2C3              I2C3
-#define PEO_PM_I2C3_CLKSPEED     (400000U)
-#define PEO_PM_I2C3_SCL_PORT     GPIOA
-#define PEO_PM_I2C3_SCL_PIN      GPIO_Pin_8
-#define PEO_PM_I2C3_SCL_SRC      GPIO_PinSource8
-#define PEO_PM_I2C3_SDA_PORT     GPIOC
-#define PEO_PM_I2C3_SDA_PIN      GPIO_Pin_9
-#define PEO_PM_I2C3_SDA_SRC      GPIO_PinSource9
-#define PEO_PM_I2C3_AF           GPIO_AF_I2C3
+/** I2C3 - VL53L0X + INA3221 bus (PA8/PC9, AF4) **/
+#define PEO_PM_VL53_I2C          I2C3
+#define PEO_PM_VL53_I2C_CLKSPEED (400000U)
+#define PEO_PM_VL53_SCL_PORT     GPIOA
+#define PEO_PM_VL53_SCL_PIN      GPIO_Pin_8
+#define PEO_PM_VL53_SCL_SRC      GPIO_PinSource8
+#define PEO_PM_VL53_SDA_PORT     GPIOC
+#define PEO_PM_VL53_SDA_PIN      GPIO_Pin_9
+#define PEO_PM_VL53_SDA_SRC      GPIO_PinSource9
+#define PEO_PM_VL53_I2C_AF       GPIO_AF_I2C3
 
 /** I2C3 slave addresses (7-bit) **/
-#define PEO_PM_MPU6050_ADDR      (0x68U)         /* whole-vehicle vibration */
+#define PEO_PM_VL53_FRONT_ADDR  (0x52U)          /* I2C3 */
+#define PEO_PM_VL53_LEFT_ADDR   (0x54U)          /* I2C3 */
+#define PEO_PM_VL53_RIGHT_ADDR  (0x56U)          /* I2C3 */
+#define PEO_PM_INA3221_ADDR     (0x40U)          /* I2C3, path B (low rate) */
 
 /* ============================================================================
    9. CURRENT SENSING - PATH A: ACS712 (ADC1_IN4, PA4, 12-bit)

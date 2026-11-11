@@ -37,7 +37,7 @@
    | Priority | Function                                          |
    |----------|---------------------------------------------------|
    | 0x02     | ESP32 comms (USART2 + DMA1 Stream5/6)             |
-   | 0x03     | I2C1 event/error (VL53L0X bus)                    |
+   | 0x03     | I2C1 event/error (MPU6050 bus)                    |
    | 0x04     | ADC1 (ACS712 current sampling, if interrupt-driven)|
    | 0x07     | USART1 debug console (RX interrupt, optional)     |
    ============================================================================ */
@@ -55,10 +55,10 @@
    | ESP32 RX done          | DMA1_Stream5_IRQn       | DMA1_Stream5_IRQHandler | 0x02 |
    | ESP32 TX done          | DMA1_Stream6_IRQn       | DMA1_Stream6_IRQHandler | 0x02 |
    | ESP32 frame boundary   | USART2_IRQn (IDLE flag) | USART2_IRQHandler       | 0x02 |
-   | VL53L0X bus event      | I2C1_EV_IRQn            | I2C1_EV_IRQHandler      | 0x03 |
-   | VL53L0X bus error      | I2C1_ER_IRQn            | I2C1_ER_IRQHandler      | 0x03 |
-   | MPU6050/INA3221 event  | I2C3_EV_IRQn            | I2C3_EV_IRQHandler      | 0x03 |
-   | MPU6050/INA3221 error  | I2C3_ER_IRQn            | I2C3_ER_IRQHandler      | 0x03 |
+   | MPU6050 event          | I2C1_EV_IRQn            | I2C1_EV_IRQHandler      | 0x03 |
+   | MPU6050 error          | I2C1_ER_IRQn            | I2C1_ER_IRQHandler      | 0x03 |
+   | VL53L0X/INA3221 event  | I2C3_EV_IRQn            | I2C3_EV_IRQHandler      | 0x03 |
+   | VL53L0X/INA3221 error  | I2C3_ER_IRQn            | I2C3_ER_IRQHandler      | 0x03 |
    | ADC1 (optional)        | ADC_IRQn                | ADC_IRQHandler          | 0x04 |
    | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | 0x07 |
    ----------------------------------------------------------------------------

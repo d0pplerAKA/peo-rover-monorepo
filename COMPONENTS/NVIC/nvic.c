@@ -25,11 +25,11 @@ void NVIC_InitAll(void)
     PEO_NVIC_Enable(PEO_NVIC_COMM_TX_IRQ, PEO_NVIC_PRIO_COMM);      /* DMA1_Stream6 */
     PEO_NVIC_Enable(PEO_NVIC_COMM_IRQ,    PEO_NVIC_PRIO_COMM);      /* USART2       */
 
-    /* VL53L0X rangefinder bus (I2C1) */
+    /* MPU6050 IMU bus (I2C1) */
     PEO_NVIC_Enable(PEO_NVIC_I2C1_EV_IRQ, PEO_NVIC_PRIO_I2C);
     PEO_NVIC_Enable(PEO_NVIC_I2C1_ER_IRQ, PEO_NVIC_PRIO_I2C);
 
-    /* MPU6050 + INA3221 bus (I2C3) */
+    /* VL53L0X + INA3221 bus (I2C3) */
     PEO_NVIC_Enable(PEO_NVIC_I2C3_EV_IRQ, PEO_NVIC_PRIO_I2C);
     PEO_NVIC_Enable(PEO_NVIC_I2C3_ER_IRQ, PEO_NVIC_PRIO_I2C);
 
