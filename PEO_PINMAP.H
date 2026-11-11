@@ -4,7 +4,7 @@
  * @brief   PEO Rover - STM32F407VGT6 pin assignment header
  *          (single source of truth for all pin/peripheral macros)
  *
- * @version v2.4.0  (2026-11-11)
+ * @version v2.5.0  (2026-11-11)
  * @board   DevEBox STM32F4XX-M (MCUDev), LQFP100, on-board 8 MHz HSE
  * @basedon PEO_ROVER_F407_PinMap.md v2.2 (same folder, authoritative doc)
  *
@@ -86,6 +86,8 @@
  *        multi-sensor re-addressing also needs XSHUT sequential power-up
  *        (default 0x52; VL53L1X_SetI2CAddress() writes reg 0x0001, the L1X
  *        equivalent of the L0X 0x8A). Address plan unchanged (0x52/54/56).
+ *  v2.5  VL53L1X INT x3 ADDED (GPIO1 data-ready interrupt): PC3/PC4/PC8 ->
+ *        EXTI3/4/8 (section 10b). XSHUT x3 unchanged (PC0/1/2).
  ******************************************************************************
  */
 #ifndef __PEO_PINMAP_H__
@@ -408,6 +410,35 @@
 #define PEO_PM_VL53_RIGHT_XSHUT_PIN    GPIO_Pin_2
 
 /* ============================================================================
+   10b. VL53L1X INT x3  (GPIO1 data-ready interrupt outputs)   [added v2.5]
+   ----------------------------------------------------------------------------
+   The VL53L1X GPIO1 pin asserts when a ranging result is ready (polarity
+   configurable via VL53L1X_SetInterruptPolarity; default active-high). Each
+   sensor's INT is wired to a dedicated MCU input + EXTI line so the host can
+   read results interrupt-driven instead of polling CheckForDataReady().
+     INT front = PC3 (EXTI3)   INT left = PC4 (EXTI4)   INT right = PC8 (EXTI9_5)
+   MCU side: floating input (VL53L1X drives push-pull); EXTI rising edge.
+   NOTE: EXTI5-9 share one IRQ vector (EXTI9_5_IRQn) - the right sensor's
+   handler must check the EXTI8 pending bit.
+   ============================================================================ */
+
+/** VL53L1X INT (GPIO1, active-high data-ready) **/
+#define PEO_PM_VL53_FRONT_INT_PORT    GPIOC
+#define PEO_PM_VL53_FRONT_INT_PIN     GPIO_Pin_3
+#define PEO_PM_VL53_LEFT_INT_PORT     GPIOC
+#define PEO_PM_VL53_LEFT_INT_PIN      GPIO_Pin_4
+#define PEO_PM_VL53_RIGHT_INT_PORT    GPIOC
+#define PEO_PM_VL53_RIGHT_INT_PIN     GPIO_Pin_8
+
+/** EXTI lines / pin sources (RM0090 sec.10.2) **/
+#define PEO_PM_VL53_FRONT_INT_EXTI_LINE   EXTI_Line3
+#define PEO_PM_VL53_FRONT_INT_EXTI_SRC    EXTI_PinSource3
+#define PEO_PM_VL53_LEFT_INT_EXTI_LINE    EXTI_Line4
+#define PEO_PM_VL53_LEFT_INT_EXTI_SRC     EXTI_PinSource4
+#define PEO_PM_VL53_RIGHT_INT_EXTI_LINE   EXTI_Line8
+#define PEO_PM_VL53_RIGHT_INT_EXTI_SRC    EXTI_PinSource8
+
+/* ============================================================================
    11. TFT DISPLAY (board socket J4, 8x1 female, SPI2)  [restored v1.9]
    ----------------------------------------------------------------------------
    J4 pinout: 1=3V3  2=GND  3=SDI/PB15  4=SCL/PB13  5=CS/PB12
@@ -499,8 +530,8 @@
 /* ============================================================================
    16. EXTI LINES
    ----------------------------------------------------------------------------
-   v1.8: none - the simplified DRV8871 modules have no nFAULT pin, so no EXTI
-   fault inputs exist. (Reserved for future use.)
+   v2.5: VL53L1X INT x3 (data-ready) -> EXTI3 (PC3), EXTI4 (PC4), EXTI8 (PC8).
+   Pin/source macros live in section 10b. EXTI5-9 share EXTI9_5_IRQn.
    ============================================================================ */
 
 /* ============================================================================

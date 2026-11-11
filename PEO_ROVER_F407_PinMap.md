@@ -1,6 +1,6 @@
 # PEO Rover — STM32F407VGT6 引脚分配总表（Pin Map）
 
-> 版本 v2.4 · 2026-11-11（VL53L0X → VL53L1X，XSHUT 保留版）
+> 版本 v2.5 · 2026-11-11（VL53L1X + INT×3 版）
 > 芯片：STM32F407VGT6（LQFP100）· 开发板：**DevEBox STM32F4XX-M**（板载 8MHz HSE → 168MHz）
 > 依据：RM0090 Rev 21 + stm32-base.org 板卡资料（J4 TFT 座 = 8×1 排母：1=3V3 2=GND 3=SDI/PB15 4=SCL/PB13 5=CS/PB12 6=SDO/PB14 7=D/C/PC5 8=BLK/PB1，**无 RST 脚**）
 > v1.3 变更：M2 PWM 从 TIM3_CH3/CH4(PB0/PB1) 挪至 TIM9_CH1/CH2(PA2/PA3)，PB1 归还 TFT BLK
@@ -14,6 +14,7 @@
 > **v2.2 变更：INA3221 从 I2C3 挪到 I2C1（与 3×VL53L1X 共享，0x40-43 vs 0x52/54/56 零冲突）；I2C3 改为 MPU6050 独占——IMU 采样率高需干净总线。**
 > **v2.3 变更：交换两条 I2C 总线——I2C1(PB6/7) 改为 MPU6050 独占；I2C3(PA8/PC9) 承载 3×VL53L1X + INA3221。地址不变（0x68 vs 0x52/54/56 + 0x40-43）。**
 > **v2.4 变更：测距芯片 VL53L0X → VL53L1X。XSHUT×3 保留——VL53L1X 多片同总线同样需 XSHUT 分时上电改址（默认 0x52，写寄存器 0x0001 改址，对应 L0X 的 0x8A）。地址方案不变（0x52/54/56）。**
+> **v2.5 变更：VL53L1X 补上 INT×3（GPIO1 测距就绪中断）——前=PC3(EXTI3)、左=PC4(EXTI4)、右=PC8(EXTI9_5)；XSHUT×3 不变。功能脚 35→38。**
 
 ---
 
@@ -131,6 +132,7 @@ PA4 = ADC1_IN4，12bit；前级 RC。ACS712-05B：电流 = (V − 2.5) / 0.185�
 
 PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 - **VL53L1X ×3**：地址 0x52/0x54/0x56，靠 **XSHUT 分时上电改址**——三片出厂默认 0x52，上电时 XSHUT 全部拉低，再逐个释放改址。
+- **INT（GPIO1）×3**：测距就绪中断——PC3(EXTI3) / PC4(EXTI4) / PC8(EXTI9_5)，默认高有效、EXTI 上升沿触发，免轮询 CheckForDataReady。
 - **INA3221**（路径 B）：地址 0x40-0x43，与 VL53 零冲突（低采样率，共享无压力）。
 - I2C3 备用脚 PH7/PH8 在 LQFP100 未引出，只能用 PA8/PC9。
 
@@ -187,11 +189,12 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 | PC0 | XSHUT_前（VL53L1X） | GPIO 输出，低有效复位 |
 | PC1 | XSHUT_左（VL53L1X） | GPIO 输出，低有效复位 |
 | PC2 | XSHUT_右（VL53L1X） | GPIO 输出，低有效复位 |
-| PC3~PC4 | 空闲 | — |
+| PC3 | INT_前（VL53L1X） | GPIO 输入，EXTI3 上升沿 |
+| PC4 | INT_左（VL53L1X） | GPIO 输入，EXTI4 上升沿 |
 | PC5 | TFT D/C | GPIO 输出 |
 | PC6 | TIM8_CH1（编码器 M3） | AF3 |
 | PC7 | TIM8_CH2（编码器 M3） | AF3 |
-| PC8 | 空闲 | — |
+| PC8 | INT_右（VL53L1X） | GPIO 输入，EXTI8（EXTI9_5）上升沿 |
 | PC9 | I2C3_SDA（VL53×3 + INA3221） | AF4 |
 | PC10~PC13 | 空闲 | — |
 | PC14~PC15 | 未引出 | — |
@@ -233,7 +236,7 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 | I2C | I2C1（MPU6050 独占）+ I2C3（VL53×3 + INA3221） | I2C2 不可用（M1 PWM 占 PB10/11） |
 | SPI | SPI1 板载 FLASH 占；SPI2 → TFT | SPI3 空闲 |
 | ADC | ADC1_IN4（1 路） | 大量 |
-| GPIO | 35 个（含 XSHUT×3 + I2C3） | 34 个 |
+| GPIO | 38 个（含 XSHUT×3 + INT×3 + I2C3） | 31 个 |
 
 ---
 
@@ -261,6 +264,7 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 6. **TFT RST**：飞线 PE12，软件上电复位（低 10ms → 高）。
 7. **SD 卡槽弃用**：PC8-12/PD2 现空闲。
 8. **VL53L1X XSHUT**：PC0/1/2 上电先全拉低，逐个释放改址，改址完成前不发测距命令。
+8b. **VL53L1X INT**：PC3/4/8 配 EXTI 上升沿（GPIO1 默认高有效）；右片走共享 EXTI9_5 向量，处理时判 EXTI8 挂起位。
 9. **I2C 分配**：I2C1=MPU6050 独占（0x68）；I2C3=VL53×3 + INA3221（0x52/54/56 + 0x40-43）；I2C2 不恢复（M1 PWM 占）。
 
 ---

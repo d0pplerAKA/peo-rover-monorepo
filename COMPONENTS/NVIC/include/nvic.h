@@ -39,6 +39,7 @@
    | 0x02     | ESP32 comms (USART2 + DMA1 Stream5/6)             |
    | 0x03     | I2C1 event/error (MPU6050 bus)                    |
    | 0x04     | ADC1 (ACS712 current sampling, if interrupt-driven)|
+   | 0x05     | VL53L1X INT x3 (EXTI3/4/8 data-ready)             |
    | 0x07     | USART1 debug console (RX interrupt, optional)     |
    ============================================================================ */
 #define PEO_NVIC_PRIO_GROUP    NVIC_PriorityGroup_4
@@ -46,6 +47,7 @@
 #define PEO_NVIC_PRIO_I2C      (0x03U)
 #define PEO_NVIC_PRIO_ADC      (0x04U)
 #define PEO_NVIC_PRIO_DBG      (0x07U)
+#define PEO_NVIC_PRIO_VL53_INT  (0x05U)
 
 /* ============================================================================
    2. IRQ CHANNEL MAP
@@ -57,8 +59,11 @@
    | ESP32 frame boundary   | USART2_IRQn (IDLE flag) | USART2_IRQHandler       | 0x02 |
    | MPU6050 event          | I2C1_EV_IRQn            | I2C1_EV_IRQHandler      | 0x03 |
    | MPU6050 error          | I2C1_ER_IRQn            | I2C1_ER_IRQHandler      | 0x03 |
-   | VL53L0X/INA3221 event  | I2C3_EV_IRQn            | I2C3_EV_IRQHandler      | 0x03 |
-   | VL53L0X/INA3221 error  | I2C3_ER_IRQn            | I2C3_ER_IRQHandler      | 0x03 |
+   | VL53L1X/INA3221 event  | I2C3_EV_IRQn            | I2C3_EV_IRQHandler      | 0x03 |
+   | VL53L1X/INA3221 error  | I2C3_ER_IRQn            | I2C3_ER_IRQHandler      | 0x03 |
+   | VL53L1X front ready    | EXTI3_IRQn              | EXTI3_IRQHandler        | 0x05 |
+   | VL53L1X left ready     | EXTI4_IRQn              | EXTI4_IRQHandler        | 0x05 |
+   | VL53L1X right ready    | EXTI9_5_IRQn            | EXTI9_5_IRQHandler      | 0x05 |
    | ADC1 (optional)        | ADC_IRQn                | ADC_IRQHandler          | 0x04 |
    | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | 0x07 |
    ----------------------------------------------------------------------------
@@ -81,6 +86,10 @@
 #define PEO_NVIC_ADC_IRQ        ADC_IRQn              /* optional */
 #define PEO_NVIC_DBG_IRQ        USART1_IRQn           /* optional */
 
+#define PEO_NVIC_VL53_FRONT_INT_IRQ   EXTI3_IRQn      /* VL53L1X data-ready */
+#define PEO_NVIC_VL53_LEFT_INT_IRQ    EXTI4_IRQn      /* VL53L1X data-ready */
+#define PEO_NVIC_VL53_RIGHT_INT_IRQ   EXTI9_5_IRQn    /* VL53L1X data-ready */
+
 /* ============================================================================
    3. DMA STREAM / CHANNEL MAP  (RM0090 Table 43 - DMA1 request mapping)
    ----------------------------------------------------------------------------
@@ -99,7 +108,8 @@
 /* ============================================================================
    4. EXTI MAP
    ----------------------------------------------------------------------------
-   v1.8: none - no nFAULT (simplified DRV8871). Reserved for future use.
+   v2.5: VL53L1X data-ready INT x3 -> EXTI3 (PC3), EXTI4 (PC4), EXTI8 (PC8).
+   EXTI8 is served by the shared EXTI9_5_IRQn handler (check pending bit).
    ============================================================================ */
 
 /* ============================================================================
