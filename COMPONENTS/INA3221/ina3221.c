@@ -99,7 +99,8 @@ void INA3221_Init(void)
  */
 float INA3221_GetShuntVoltage_mV(uint8_t motor)
 {
-    const INA3221_ChMap_t *m = &g_ina_map[motor & 0x03];
+    if (motor >= SENSOR_WHEEL_COUNT) return 0.0f;
+    const INA3221_ChMap_t *m = &g_ina_map[motor];
     uint8_t buf[2] = {0, 0};
     int16_t raw;
 
@@ -115,7 +116,8 @@ float INA3221_GetShuntVoltage_mV(uint8_t motor)
  */
 float INA3221_GetBusVoltage_V(uint8_t motor)
 {
-    const INA3221_ChMap_t *m = &g_ina_map[motor & 0x03];
+    if (motor >= SENSOR_WHEEL_COUNT) return 0.0f;
+    const INA3221_ChMap_t *m = &g_ina_map[motor];
     uint8_t buf[2] = {0, 0};
     uint16_t raw, bus;
 

@@ -330,8 +330,8 @@
    The DRV8871 modules in use expose ONLY: IN1, IN2 (PWM inputs) and
    OUT1, OUT2 (to motor), plus VM/GND. They do NOT bring out nSLEEP or
    nFAULT - so this design has no sleep control and no per-motor fault pin.
-   Consequence: stall/over-current detection relies on the whole-vehicle
-   current monitor (ACS712, section 8) - it cannot localize which motor.
+   Consequence: stall/over-current detection relies on the per-motor
+   INA3221 current monitor (I2C2, section 7c).
    ============================================================================ */
 
 /* ============================================================================
@@ -414,25 +414,6 @@
 /** I2C2 slave addresses (7-bit) — two INA3221 share the bus **/
 #define PEO_PM_INA3221_ADDR_A   (0x40U)   /* 片A：A0=GND，测 M1/M2 */
 #define PEO_PM_INA3221_ADDR_B   (0x41U)   /* 片B：A0=VS，测 M3/M4 */
-
-/* ============================================================================
-   8. CURRENT SENSING - PATH A: ACS712 (ADC1_IN4, PA4, 12-bit)
-   ----------------------------------------------------------------------------
-   ACS712-05B: Vout = 2.5 V + I * 0.185 V/A.
-   With a 3.3 V ADC reference the readable range is (3.3-2.5)/0.185
-   = +4.3 A (and -4.3 A) before clipping - the 5 A full scale saturates
-   the ADC first. 4 motors stalled simultaneously (~6 A) read as rail -
-   for anomaly detection this saturation IS a usable stall flag.
-   Front-end RC: 1 kOhm + 100 nF (cutoff ~1.6 kHz) before PA4.
-   If path B (INA3221) is chosen instead, PA4 stays unused as spare ADC.
-   ============================================================================ */
-
-/** ACS712 current sense - path A (if path B is chosen, PA4 stays spare) **/
-#define PEO_PM_ACS_ADC          ADC1
-#define PEO_PM_ACS_CH           ADC_Channel_4
-#define PEO_PM_ACS_PORT         GPIOA
-#define PEO_PM_ACS_PIN          GPIO_Pin_4
-#define PEO_PM_ACS_MV_PER_A     (185U)          /* ACS712-05B sensitivity */
 
 /* ============================================================================
    9. VL53L1X XSHUT x3  (restored v2.0)
@@ -559,7 +540,6 @@
    |------------|-----------|------------------|--------------------------|
    | SPI2 (TFT) | RX (opt.) | DMA1_Stream3 Ch0 | DMA1_Stream3_IRQn        |
    | SPI2 (TFT) | TX (opt.) | DMA1_Stream4 Ch0 | DMA1_Stream4_IRQn        |
-   | ADC1 (opt.)| RX        | DMA2_Stream0 Ch0 | DMA2_Stream0_IRQn        |
    ----------------------------------------------------------------------------
    ============================================================================ */
 
@@ -568,10 +548,6 @@
 #define PEO_DMA_TFT_RX_CH       DMA_Channel_0
 #define PEO_DMA_TFT_TX_STREAM   DMA1_Stream4
 #define PEO_DMA_TFT_TX_CH       DMA_Channel_0
-
-/** ACS712 ADC1 DMA (optional; default is polling) **/
-#define PEO_DMA_ADC_STREAM      DMA2_Stream0
-#define PEO_DMA_ADC_CH          DMA_Channel_0
 
 /** ESP32 link USART2 DMA (RM0090 Table 43 - DMA1 request mapping) **/
 #define PEO_DMA_ESP_RX_STREAM   DMA1_Stream5

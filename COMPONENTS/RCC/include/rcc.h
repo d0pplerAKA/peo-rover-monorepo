@@ -42,7 +42,6 @@
    | TIM10, TIM11      | APB2 | RCC_APB2Periph_TIMx       | PWM M4            |
    | USART1            | APB2 | RCC_APB2Periph_USART1     | debug console     |
    | USART2            | APB1 | RCC_APB1Periph_USART2     | ESP32 link (PD5/6) |
-   | ADC1              | APB2 | RCC_APB2Periph_ADC1       | ACS712 (path A)   |
    | SYSCFG            | APB2 | RCC_APB2Periph_SYSCFG     | (reserved)        |
    ----------------------------------------------------------------------------
    NOT enabled (and why):
@@ -81,22 +80,7 @@
                             RCC_APB2Periph_TIM10  | \
                             RCC_APB2Periph_TIM11  | \
                             RCC_APB2Periph_USART1 | \
-                            RCC_APB2Periph_ADC1   | \
                             RCC_APB2Periph_SYSCFG)
-
-/* ----------------------------------------------------------------------------
-   ADC CLOCK PRESCALER (F4-family fact, RM0090 section 13.13.16)
-   ----------------------------------------------------------------------------
-   On STM32F4 the ADC clock divider is NOT an RCC field. It is the
-   ADCPRE[1:0] field (bits 17:16) of the ADC common control register
-   ADC_CCR, programmed through ADC_CommonInit() with the standard library
-   keyword ADC_Prescaler_Div6 (stm32f4xx_adc.h).
-     ADCPRE: 00 = PCLK2/2, 01 = PCLK2/4, 10 = PCLK2/6, 11 = PCLK2/8
-     PCLK2 = 84 MHz  ->  /6 = 14 MHz  (datasheet limit: fADC <= 36 MHz)
-   The F1-family keyword RCC_ADCCLKConfig(RCC_PCLK2_Div6) does NOT exist
-   in this FWLIB (stm32f4xx_rcc.h has no ADCCLKConfig at all).
-   -------------------------------------------------------------------------- */
-#define PEO_RCC_ADC_PRESCALER   ADC_Prescaler_Div6
 
 /* ============================================================================
    PUBLIC API

@@ -10,7 +10,7 @@
 #include "include/nvic.h"
 
 /**
- * @brief  Set the priority group (Group 4) and enable every interrupt
+ * @brief  Set the priority group (Group 2) and enable every interrupt
  *         channel in the design map with its assigned priority.
  * @note   Must run AFTER RCC_Clock_Init() (clocks first) and BEFORE any
  *         module init that arms peripheral interrupt bits.
@@ -31,7 +31,6 @@ void NVIC_InitAll(void)
     PEO_NVIC_Enable(PEO_NVIC_ESP_TX_IRQ,            3,  3);   /* sensorhub report (TIM14) */
 
     /* Optional (uncomment when the driver lands):
-       PEO_NVIC_Enable(PEO_NVIC_ADC_IRQ, PEO_NVIC_PRIO_ADC);   // ACS712 ADC
        PEO_NVIC_Enable(PEO_NVIC_DBG_IRQ, PEO_NVIC_PRIO_DBG);   // debug console RX
     */
 }

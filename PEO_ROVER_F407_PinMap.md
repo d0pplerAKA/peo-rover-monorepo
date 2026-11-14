@@ -46,7 +46,6 @@
 
 | 功能 | 数量 | 接口 | 硬件型号 |
 |---|---|---|---|
-| ACS712 总电流 | 1 | 模拟 → ADC | ACS712-05B（185mV/A） |
 | VL53L1X 障碍物测距（前/左/右） | 3 | I2C3 | VL53L1X |
 | 电机编码器 | 4 | 定时器正交（A/B） | 霍尔编码器 PPR 11 |
 | 电机驱动 | 4 | DRV8871（每电机 1 片） | **简化模组：IN1/IN2 + OUT1/OUT2（无 nSLEEP/nFAULT）** |
@@ -54,9 +53,9 @@
 | 调试串口 | 1 | USART1（外部 USB-TTL） | 115200 |
 | TFT 屏 | 1 | SPI2 引脚组 | 板载 J4 排座 |
 | MPU6050 整车震动（预留） | 1 | I2C1（独占） | MPU6050（0x68） |
-| INA3221 多路电流（预留，路径 B） | 1 | I2C3（与 VL53 共享） | INA3221（0x40-43，与 ACS712 二选一待定） |
+| INA3221 多路电流 | 2 | I2C2（PF1/PF0 备用脚） | INA3221（0x40/0x41，测 M1-M4 电机电流） |
 
-> MPU6050 独占 I2C1（IMU 采样率高、需干净带宽）；INA3221 与 3×VL53L1X 共享 I2C3（0x40-43 vs 0x52/54/56 零冲突）。I2C2 因 M1 PWM 占用不恢复。
+> MPU6050 独占 I2C1（IMU 采样率高、需干净带宽）；INA3221 独占 I2C2 备用脚（PF1=SCL/PF0=SDA，绕开被 M1 PWM 占的 PB10/11）。
 
 ---
 
@@ -106,10 +105,6 @@ PB6 = I2C1_SCL、PB7 = I2C1_SDA（AF4，4.7kΩ 上拉），400kHz。
 - **MPU6050**（整车震动）@ 0x68（AD0 可选 0x69）——**独占总线**：IMU 采样率高、需干净带宽，不与其它设备共享。
 - **MPU6050 INT** = PE3（EXTI3，数据就绪中断，上升沿触发）。
 
-### 2.5 电流监测路径 A：ACS712 —— ADC1_IN4（PA4）
-
-PA4 = ADC1_IN4，12bit；前级 RC。ACS712-05B：电流 = (V − 2.5) / 0.185。3.3V ADC 有效 ±4.3A。
-
 ### 2.6 TFT 屏接口（板载 J4，已恢复 v1.9）
 
 | 槽位引脚 | 信号 | STM32 引脚 | 说明 |
@@ -126,12 +121,11 @@ PA4 = ADC1_IN4，12bit；前级 RC。ACS712-05B：电流 = (V − 2.5) / 0.185�
 驱动方式：硬件 SPI2（21Mbps）或模拟 SPI。**RST 无座脚，模块 RST 飞线接 PE12**。
 屏兼容：ST7789/ST7735 可用；LCD12864 不兼容。
 
-### 2.7 I2C3 —— VL53L1X ×3 + INA3221（PA8/PC9）
+### 2.7 I2C3 —— VL53L1X ×3（PA8/PC9）
 
 PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 - **VL53L1X ×3**：地址 0x52/0x54/0x56，靠 **XSHUT 分时上电改址**——三片出厂默认 0x52，上电时 XSHUT 全部拉低，再逐个释放改址。
 - **INT（GPIO1）×3**：测距就绪中断——前=PE0(EXTI0) / 左=PE1(EXTI1) / 右=PE2(EXTI2)，默认高有效、EXTI 上升沿触发，免轮询 CheckForDataReady。
-- **INA3221**（路径 B）：地址 0x40-0x43，与 VL53 零冲突（低采样率，共享无压力）。
 - I2C3 备用脚 PH7/PH8 在 LQFP100 未引出，只能用 PA8/PC9。
 
 ---
@@ -146,11 +140,11 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 | PA1 | 板载 LED D2 | 保留 |
 | PA2 | TIM5_CH3（PWM3, M2-IN1） | AF2 |
 | PA3 | TIM5_CH4（PWM4, M2-IN2） | AF2 |
-| PA4 | ADC1_IN4（ACS712） | 模拟 |
+| PA4 | 空闲 | — |
 | PA5 | 空闲 | — |
 | PA6 | TIM3_CH1（编码器 M2） | AF2 |
 | PA7 | TIM3_CH2（编码器 M2） | AF2 |
-| PA8 | I2C3_SCL（VL53×3 + INA3221） | AF4 |
+| PA8 | I2C3_SCL（VL53×3） | AF4 |
 | PA9 | USART1_TX（调试） | AF7 |
 | PA10 | USART1_RX（调试） | AF7 |
 | PA11 | 空闲（USB_D-） | — |
@@ -163,7 +157,7 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 
 | 引脚 | 分配 | 备注 |
 |---|---|---|
-| PB0 | 空闲 | ADC_IN8 备用 |
+| PB0 | 空闲 | — |
 | PB1 | TFT BLK（背光） | GPIO 输出 |
 | PB2 | BOOT1 | 保留（未引出） |
 | PB3 | 板载 FLASH CLK | 保留 |
@@ -193,7 +187,7 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 | PC6 | TIM8_CH1（编码器 M3） | AF3 |
 | PC7 | TIM8_CH2（编码器 M3） | AF3 |
 | PC8 | 空闲（原 INT_右） | — |
-| PC9 | I2C3_SDA（VL53×3 + INA3221） | AF4 |
+| PC9 | I2C3_SDA（VL53×3） | AF4 |
 | PC10~PC13 | 空闲 | — |
 | PC14~PC15 | 未引出 | — |
 
@@ -233,9 +227,8 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 |---|---|---|
 | 定时器 | TIM1/3/4/8（编码器）+ TIM2/5/9/10/11（PWM）= **9 个** | TIM6/7/12/13/14（TIM12 引脚被 TFT 占） |
 | USART | USART1 | USART2/UART4/5/6 |
-| I2C | I2C1（MPU6050 独占）+ I2C3（VL53×3 + INA3221） | I2C2 不可用（M1 PWM 占 PB10/11） |
+| I2C | I2C1（MPU6050 独占）+ I2C3（VL53×3）+ I2C2（INA3221，PF1/PF0 备用脚） | 无（I2C1/2/3 全用） |
 | SPI | SPI1 板载 FLASH 占；SPI2 → TFT | SPI3 空闲 |
-| ADC | ADC1_IN4（1 路） | 大量 |
 | GPIO | 39 个（含 XSHUT×3 + INT×4 + I2C3） | 30 个 |
 
 ---
@@ -259,13 +252,13 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 1. **板载避让**：PA0/PA1/PA15+PB3~5 绝不初始化。
 2. **编码器全纯编码器**：ARR=0xFFFF，读 16 位差分，无中断。
 3. **PWM 独立时基**：TIM2/5/9/10/11 各自 ARR 锁 20kHz。
-4. **DRV8871 简化模组**：无 nSLEEP/nFAULT；堵转/过流靠 ACS712 整车电流兜底。
+4. **DRV8871 简化模组**：无 nSLEEP/nFAULT；堵转/过流靠 INA3221 逐电机电流监测。
 5. **编码器电源 5V**：PA6/7、PC6/7、PE9/11、PD12/13 均 FT，直连安全。
 6. **TFT RST**：飞线 PE12，软件上电复位（低 10ms → 高）。
 7. **SD 卡槽弃用**：PC8-12/PD2 现空闲。
 8. **VL53L1X XSHUT**：PC0/1/2 上电先全拉低，逐个释放改址，改址完成前不发测距命令。
 8b. **VL53L1X INT**：PE0/1/2 配 EXTI0/1/2 上升沿（GPIO1 默认高有效）；MPU6050 INT = PE3 配 EXTI3。4 个 INT 全独立 EXTI 线（无共享向量）。
-9. **I2C 分配**：I2C1=MPU6050 独占（0x68）；I2C3=VL53×3 + INA3221（0x52/54/56 + 0x40-43）；I2C2 不恢复（M1 PWM 占）。
+9. **I2C 分配**：I2C1=MPU6050 独占（0x68）；I2C2=INA3221×2（0x40/0x41，PF1/PF0 备用脚）；I2C3=VL53×3（0x52/54/56）。
 
 ---
 
@@ -276,5 +269,5 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 - [x] TFT 屏 → 恢复 J4 座 6 信号脚（SPI2），RST 飞线 PE12
 - [x] **VL53L1X 多片寻址方案**：恢复 XSHUT×3（PC0/1/2），XSHUT 分时上电改址到 0x52/54/56
 - [x] **MPU6050 引脚**：I2C1（0x68，AD0 可选 0x69），独占；INT=PE3(EXTI3)
-- [x] **INA3221 引脚**：I2C3（0x40-0x43），与 VL53 共享——是否采用待定
-- [ ] 电流监测最终定案（ACS712 vs INA3221）
+- [x] **INA3221 引脚**：I2C2 备用脚（PF1=SCL/PF0=SDA），2 片（0x40/0x41）测 M1-M4
+- [x] 电流监测 → INA3221（I2C2 备用脚，2 片测 4 电机）

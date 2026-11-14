@@ -32,14 +32,14 @@
    1. NVIC PRIORITY SCHEME
    ----------------------------------------------------------------------------
    Group 2: 2 bits PREEMPTION priority (0..3) + 2 bits sub-priority (0..3).
-   Sensor data-ready INTs outrank optional ADC/debug; the three VL53L1X INTs
+   Sensor data-ready INTs outrank optional debug; the three VL53L1X INTs
    share one preemption level and are ordered by sub-priority.
    ----------------------------------------------------------------------------
    | Preempt (sub) | Function                                    |
    |---------------|---------------------------------------------|
    | 1 (0)         | MPU6050 data-ready (EXTI3)                  |
    | 2 (0/1/2)     | VL53L1X data-ready x3 (EXTI0/1/2)           |
-   | optional      | ADC1, USART1 debug RX (commented in nvic.c) |
+   | optional      | USART1 debug RX (commented in nvic.c)      |
    ============================================================================ */
 #define PEO_NVIC_PRIO_GROUP         NVIC_PriorityGroup_2
 
@@ -55,17 +55,15 @@
    | MPU6050 data-ready     | EXTI3_IRQn              | EXTI3_IRQHandler        | 1 (0)   |
    | 1 kHz control loop     | TIM6_DAC_IRQn           | TIM6_DAC_IRQHandler     | 3 (0)   |
    | INA3221 电流/电压轮询  | TIM7_IRQn               | TIM7_IRQHandler         | 3 (1)   |
-   | ADC1 (optional)        | ADC_IRQn                | ADC_IRQHandler          | -       |
    | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | -       |
    ----------------------------------------------------------------------------
    NO interrupt: all 4 encoders are pure (16-bit delta), all PWM timers
    (TIM2/5/9/10/11) edge-aligned; no nFAULT (simplified DRV8871); no I2C2.
-   Optional entries (ADC, debug RX) are commented out in nvic.c until their
+   Optional entries (debug RX) are commented out in nvic.c until their
    drivers land - uncomment when the corresponding component is added.
    ============================================================================ */
 
 /** IRQ channel macros **/
-#define PEO_NVIC_ADC_IRQ        ADC_IRQn              /* optional */
 #define PEO_NVIC_DBG_IRQ        USART1_IRQn           /* optional */
 
 #define PEO_NVIC_VL53_FRONT_INT_IRQ   EXTI0_IRQn      /* VL53L1X data-ready */
@@ -84,7 +82,6 @@
    |------------|-----------|------------------|----------------------|
    | SPI2 (TFT) | RX (opt.) | DMA1_Stream3 Ch0 | DMA1_Stream3_IRQn    |
    | SPI2 (TFT) | TX (opt.) | DMA1_Stream4 Ch0 | DMA1_Stream4_IRQn    |
-   | ADC1 (opt.)| RX        | DMA2_Stream0 Ch0 | DMA2_Stream0_IRQn    |
    ============================================================================ */
 
 /* DMA stream/channel macros (PEO_DMA_*) live in PEO_PINMAP.H section 13 -

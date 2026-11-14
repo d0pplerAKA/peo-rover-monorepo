@@ -55,19 +55,31 @@ void TOF400C_Init(void)
 
     GPIO_SetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_RIGHT_XSHUT_PIN);
     delay_ms(10);
-    TOF400C_BOOT_Init((uint8_t) PEO_PM_VL53_RIGHT_ADDR);
+    if (TOF400C_BOOT_Init((uint8_t) PEO_PM_VL53_RIGHT_ADDR) != 0)
+    {
+        printf("[VL53] RIGHT init failed -> offline\n");
+        GPIO_ResetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_RIGHT_XSHUT_PIN);
+    }
 
     GPIO_SetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_LEFT_XSHUT_PIN);
     delay_ms(10);
-    TOF400C_BOOT_Init((uint8_t) PEO_PM_VL53_LEFT_ADDR);
+    if (TOF400C_BOOT_Init((uint8_t) PEO_PM_VL53_LEFT_ADDR) != 0)
+    {
+        printf("[VL53] LEFT init failed -> offline\n");
+        GPIO_ResetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_LEFT_XSHUT_PIN);
+    }
 
     GPIO_SetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_FRONT_XSHUT_PIN);
     delay_ms(10);
-    TOF400C_BOOT_Init((uint8_t) PEO_PM_VL53_FRONT_ADDR);
+    if (TOF400C_BOOT_Init((uint8_t) PEO_PM_VL53_FRONT_ADDR) != 0)
+    {
+        printf("[VL53] FRONT init failed -> offline\n");
+        GPIO_ResetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_FRONT_XSHUT_PIN);
+    }
 }
 
 
-void TOF400C_BOOT_Init(uint8_t assigned_addr)
+uint8_t TOF400C_BOOT_Init(uint8_t assigned_addr)
 {    
     int8_t status = 0;
     uint8_t sensor_state = 0;
@@ -77,11 +89,8 @@ void TOF400C_BOOT_Init(uint8_t assigned_addr)
     {
         if(counter == 0 || status != 0)
         {
-            while(1)
-            {
-                printf("[%x] Boot failed!\n", assigned_addr);
-                delay_ms(800);
-            }
+            printf("[%x] Boot failed!\n", assigned_addr);
+            return 1;
         }
         
         status = VL53L1X_BootState((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, &sensor_state);
@@ -94,11 +103,8 @@ void TOF400C_BOOT_Init(uint8_t assigned_addr)
     status = VL53L1X_SensorInit((uint16_t) PEO_PM_VL53_DEFAULT_ADDR);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor init failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor init failed!\n", assigned_addr);
+        return 2;
     }
 
     delay_ms(5);
@@ -106,44 +112,32 @@ void TOF400C_BOOT_Init(uint8_t assigned_addr)
     if(status)
     {
        
-        while(1)
-        {
-            printf("[%x] sensor set irq polarity failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set irq polarity failed!\n", assigned_addr);
+        return 3;
     }
 
     delay_ms(5);
     status = VL53L1X_SetROI((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, 4, 4);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor set ROI failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set ROI failed!\n", assigned_addr);
+        return 4;
     }
 
     delay_ms(5);
     status = VL53L1X_SetDistanceThreshold((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, 50, 3000, 3, 1);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor set Threshold failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set Threshold failed!\n", assigned_addr);
+        return 5;
     }
     
     delay_ms(5);
     status = VL53L1X_SetDistanceMode((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, PEO_PM_VL53_DISTANCE_MODE);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor set Ranging Mode failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set Ranging Mode failed!\n", assigned_addr);
+        return 6;
     }
 
     /*
@@ -154,11 +148,8 @@ void TOF400C_BOOT_Init(uint8_t assigned_addr)
     status = VL53L1X_SetTimingBudgetInMs((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, PEO_PM_VL53_TIMING_BUDGET_MS);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor set sampling time failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set sampling time failed!\n", assigned_addr);
+        return 7;
     }
 
     /*
@@ -169,34 +160,27 @@ void TOF400C_BOOT_Init(uint8_t assigned_addr)
     status = VL53L1X_SetInterMeasurementInMs((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, PEO_PM_VL53_INTER_MEAS_MS);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor set Sampling interval failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set Sampling interval failed!\n", assigned_addr);
+        return 8;
     }
 
     delay_ms(5);
-    status = VL53L1X_SetI2CAddress((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, assigned_addr << 1);
+    status = VL53L1X_SetI2CAddress((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, assigned_addr);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor set new addr failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor set new addr failed!\n", assigned_addr);
+        return 9;
     }
 
     delay_ms(5);
     status = VL53L1X_ClearInterrupt((uint16_t) assigned_addr);
     if(status)
     {
-        while(1)
-        {
-            printf("[%x] sensor clear interrupt flag failed!\n", assigned_addr);
-            delay_ms(800);
-        }
+        printf("[%x] sensor clear interrupt flag failed!\n", assigned_addr);
+        return 10;
     }
+
+    return 0;
 }
 
 

@@ -84,6 +84,11 @@ static void ESP_LINK_SendHub(void)
     buf[3 + len]     = (uint8_t)(crc & 0xFFU);       /* CRC 低字节在前 */
     buf[3 + len + 1] = (uint8_t)(crc >> 8);
 
+    /* 若上一次 DMA 发送未完成（Normal 模式发完 EN 位自动清），跳过本次，
+       避免打断/截断上一帧。 */
+    if (DMA_GetCmdStatus(PEO_DMA_ESP_TX_STREAM) != DISABLE)
+        return;
+
     /* 启动 DMA 发送（单次模式，发 flen 字节后自动停） */
     DMA_Cmd(PEO_DMA_ESP_TX_STREAM, DISABLE);
     DMA_SetCurrDataCounter(PEO_DMA_ESP_TX_STREAM, flen);
