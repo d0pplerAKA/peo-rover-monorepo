@@ -141,6 +141,21 @@ int32_t CONTROL_GetOdometer(uint8_t motor)
 }
 
 /**
+ * @brief  Reset all four wheel odometers to zero.
+ * @note   Called from the main loop; the 1 kHz TIM6 ISR also writes
+ *         g_odometer[], so this runs inside a brief critical section.
+ */
+void CONTROL_ResetOdometer(void)
+{
+    uint8_t  m;
+    uint32_t primask = __disable_irq();      /* 临界区：与 1kHz 中断竞争保护 */
+    for (m = 0; m < 4; m++)
+        g_odometer[m] = 0;
+    if (!primask)
+        __enable_irq();
+}
+
+/**
  * @brief  Number of 1 kHz loop ticks since CONTROL_Init().
  */
 uint32_t CONTROL_GetLoopTick(void)

@@ -79,7 +79,7 @@ int main(void)
     MPU6050_Init();          /* MPU6050 DMP (PE3/EXTI3, start via MPU6050_Start()) */
 #endif
 
-    /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 手柄/命令接收 */
+    /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 命令接收 */
     ESP_LINK_Init();
     ESP_LINK_StartReport();  /* TIM14 定时器触发 sensorhub 上报（DMA 发送） */
 
@@ -90,20 +90,9 @@ int main(void)
 
     while (1)
     {
-        /* ── 部分1：Xbox 手柄遥控（周期读手柄状态 → 映射闭环目标速度）── */
-        GamepadData_t pad;
-        ESP_LINK_GetGamepad(&pad);
-        if (ESP_LINK_IsGamepadConnected())
-        {
-            /* TODO 实测标定后填映射（摇杆中值 32768，满速 4424 = 0.01cm/s）：
-             *   int16_t y = (int16_t)(pad.joy_ly - 32768);   // 前进/后退
-             *   int16_t x = (int16_t)(pad.joy_lx - 32768);   // 转向
-             *   // 死区、速度/转向系数、左右轮差速分配...
-             *   // 调好后用 CONTROL_SetTargetSpeed(电机, 目标 0.01cm/s) 闭环驱动
-             */
-        }
-
-        /* ── 部分2：上位机指令（命令队列消费：中断只入队，这里出队执行）── */
+        /* ── 命令消费：中断只入队，这里出队执行 ──
+           命令来源：① 上位机（WiFi -> ESP32 -> USART2）② ESP32 端手柄映射
+           （Xbox 手柄在 ESP32 本地解析，映射成命令帧后下发，不再传原始手柄数据）。 */
         ESP_Cmd_t cmd;
         if (ESP_LINK_PopCommand(&cmd))
         {

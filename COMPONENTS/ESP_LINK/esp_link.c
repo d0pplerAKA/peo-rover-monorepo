@@ -6,13 +6,12 @@
  * 方向1（F407 -> ESP32）：ESP_LINK_Task() 按 SENSOR_RATE_REPORT_HZ 打包上报
  *                         sensorhub（SensorData_t 112B）。
  * 方向2（ESP32 -> F407）：USART2_RX -> DMA1_Stream5 循环接收 + USART IDLE 中断，
- *                         整帧解析「手柄20B + 命令可选」，命令执行后回显 ACK。
+ *                         整帧解析「命令帧（cmd_id + param）」，执行后回显 ACK。
  ******************************************************************************
  */
 #include "include/esp_link.h"
 
 #include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
-#include "COMPONENTS/TIMER/include/timer.h"
 #include "COMPONENTS/BUILTIN_LED/builtin_led.h"
 #include "COMPONENTS/CONTROL/include/control.h"
 #include "COMPONENTS/MOTOR/include/motor.h"
@@ -96,7 +95,7 @@ static void ESP_LINK_SendHub(void)
 }
 
 /* ============================================================================
-   3. DMA 循环接收（方向2：手柄 + 命令）
+   3. DMA 循环接收（方向2：命令帧）
    ----------------------------------------------------------------------------
    USART2_RX -> DMA1_Stream5(Ch4) 循环搬运字节到 g_rx_dma_buf；USART IDLE
    中断（总线空闲 = 一帧结束）里读 NDTR 算长度，一次性处理整帧。
@@ -107,35 +106,22 @@ static void ESP_LINK_SendHub(void)
 /* uint32 数组保证 4 字节对齐（DMA Memory0 地址要求） */
 static uint32_t g_rx_dma_buf[ESP_LINK_RX_BUF_SIZE / 4];
 
-/* 最新手柄状态 + 最后收到时间戳（上层经 ESP_LINK_GetGamepad* 读取） */
-static volatile GamepadData_t g_gamepad;
-static volatile uint32_t     g_gamepad_timestamp_ms;
-
 /* 前置声明：HandleCmd 定义在 ProcessFrame 之后 */
 static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len);
 
 /**
- * @brief  处理一帧完整 payload：前 20B 手柄，剩余字节命令（可选）。
+ * @brief  处理一帧完整 payload：整帧 = 一条命令（cmd_id + param）。
  */
 static void ESP_LINK_ProcessFrame(const uint8_t *payload, uint8_t len)
 {
-    uint8_t cmd_len;
+    if (len < 1)
+        return;   /* 空帧：无命令，忽略 */
 
-    if (len < sizeof(GamepadData_t))
-        return;   /* 连手柄都不完整，丢弃 */
-
-    /* 前 20 字节 = 手柄 */
-    memcpy((void *)&g_gamepad, payload, sizeof(GamepadData_t));
-    g_gamepad_timestamp_ms = TIMER_GetTick();
-
-    /* 剩余 = 命令（0 字节 = 无命令） */
-    cmd_len = (uint8_t)(len - sizeof(GamepadData_t));
-    if (cmd_len > 0)
-        ESP_LINK_HandleCmd(payload + sizeof(GamepadData_t), cmd_len);
+    ESP_LINK_HandleCmd(payload, len);
 }
 
 /**
- * @brief  校验并处理一整帧（IDLE 中断里调）：SOF + LEN + CRC -> 手柄 + 命令。
+ * @brief  校验并处理一整帧（IDLE 中断里调）：SOF + LEN + CRC -> 命令。
  * @note   len 为 DMA 本帧已搬运到缓冲的字节数。
  */
 static void ESP_LINK_ProcessRx(uint16_t len)
@@ -259,6 +245,14 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             CONTROL_SetTargetSpeed(motor, speed_d100);
             break;
         }
+
+        case ESP_CMD_STOP_ALL:
+            CONTROL_StopAll();   /* 急停：清目标速度 + 复位 PI 积分 + 四轮 coast */
+            break;
+
+        case ESP_CMD_ODOMETER_RESET:
+            CONTROL_ResetOdometer();   /* 清零四轮里程 */
+            break;
 
         default:
             status = ESP_CMD_ERR_INVALID;
@@ -407,29 +401,4 @@ void TIM8_TRG_COM_TIM14_IRQHandler(void)
     }
 }
 
-/* ============================================================================
-   7. 手柄读取接口（上层遥控 / 决策逻辑用）
-   ============================================================================ */
 
-void ESP_LINK_GetGamepad(GamepadData_t *out)
-{
-    uint32_t primask;
-
-    if (out == 0)
-        return;
-
-    primask = __get_PRIMASK();
-    __disable_irq();
-    *out = g_gamepad;                 /* 关中断拷贝，保证字段间一致 */
-    __set_PRIMASK(primask);
-}
-
-uint8_t ESP_LINK_IsGamepadConnected(void)
-{
-    return g_gamepad.connected;
-}
-
-uint32_t ESP_LINK_GetGamepadTimestamp(void)
-{
-    return g_gamepad_timestamp_ms;
-}

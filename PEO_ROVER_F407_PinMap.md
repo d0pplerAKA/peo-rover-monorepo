@@ -1,6 +1,6 @@
 # PEO Rover — STM32F407VGT6 引脚分配总表（Pin Map）
 
-> 版本 v2.20 · 2026-11-14（boot banner 迁入 SENSOR_HUB + 版本追平）
+> 版本 v2.26 · 2026-11-14（esp_link 方向2 协议：手柄数据包移除，改纯命令帧）
 > 芯片：STM32F407VGT6（LQFP100）· 开发板：**DevEBox STM32F4XX-M**（板载 8MHz HSE → 168MHz）
 > 依据：RM0090 Rev 21 + stm32-base.org 板卡资料（J4 TFT 座 = 8×1 排母：1=3V3 2=GND 3=SDI/PB15 4=SCL/PB13 5=CS/PB12 6=SDO/PB14 7=D/C/PC5 8=BLK/PB1，**无 RST 脚**）
 > v1.3 变更：M2 PWM 从 TIM3_CH3/CH4(PB0/PB1) 挪至 TIM9_CH1/CH2(PA2/PA3)，PB1 归还 TFT BLK
@@ -23,6 +23,7 @@
 > **v2.18 变更：ESP32 通讯重新接入（USART2 PD5/PD6 + TIM14 上报定时器）。**
 > **v2.19 变更：main.c 模块启用开关（PEO_ENABLE_*）+ boot banner。**
 > **v2.20 变更：boot banner/dbg_f3 迁入 SENSOR_HUB；PEO_ENABLE_* 宏迁到 sensor_hub.h；main.c 只做接线。**
+**v2.26 变更：esp_link 方向2 协议——移除 GamepadData_t（20B 手柄数据不再下发 F407），payload 改为纯命令帧（cmd_id+param，每帧一条）；手柄由 ESP32 端本地解析后映射为命令。**
 
 ---
 

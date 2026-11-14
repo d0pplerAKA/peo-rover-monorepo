@@ -115,6 +115,7 @@ int32_t CONTROL_GetSpeedD100(uint8_t motor);
  * @param  motor  0..3 (M1..M4).
  */
 int32_t CONTROL_GetOdometer(uint8_t motor);
+void    CONTROL_ResetOdometer(void);
 
 /**
  * @brief  Return the number of 1 kHz loop ticks since CONTROL_Init().

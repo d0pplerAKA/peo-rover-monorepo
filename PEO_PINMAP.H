@@ -4,9 +4,9 @@
  * @brief   PEO Rover - STM32F407VGT6 pin assignment header
  *          (single source of truth for all pin/peripheral macros)
  *
- * @version v2.20.0  (2026-11-14)
+ * @version v2.26.0  (2026-11-14)
  * @board   DevEBox STM32F4XX-M (MCUDev), LQFP100, on-board 8 MHz HSE
- * @basedon PEO_ROVER_F407_PinMap.md v2.20 (same folder, authoritative doc)
+ * @basedon PEO_ROVER_F407_PinMap.md v2.26 (same folder, authoritative doc)
  *
  * ----------------------------------------------------------------------------
  * BOARD FACTS THAT SHAPED THIS FILE (from stm32-base.org + datasheet):
@@ -104,6 +104,9 @@
  *  v2.19  main.c module-enable switches (PEO_ENABLE_*) + boot banner.
  *  v2.20  boot banner/dbg_f3 moved into SENSOR_HUB; PEO_ENABLE_* macros
  *         moved to sensor_hub.h; main.c is now wiring-only.
+ *  v2.26  esp_link direction2 protocol: GamepadData_t removed; payload is
+ *         command frames only (cmd_id + param, one per frame). Gamepad is
+ *         decoded on the ESP32 side and mapped into commands.
  ******************************************************************************
  */
 #ifndef __PEO_PINMAP_H__
@@ -172,8 +175,8 @@
    ----------------------------------------------------------------------------
    F407 <-> ESP32-S3 全双工通信链路（一套 RX/TX）。
      PD5 = USART2_TX -> ESP32 RX   （方向1：sensorhub 上报）
-     PD6 = USART2_RX <- ESP32 TX   （方向2：手柄 + 命令）
-   波特率见 PEO_PM_ESP_BAUDRATE；数据量小（50Hz x ~117B），中断收发足够，不用 DMA。
+     PD6 = USART2_RX <- ESP32 TX   （方向2：命令帧）
+   波特率见 PEO_PM_ESP_BAUDRATE。收发均走 DMA：方向1 上报 DMA 发送，方向2 接收 DMA 循环缓冲 + USART IDLE 中断组帧。
    ============================================================================ */
 /** ESP32 LINK USART **/
 #define PEO_PM_ESP_USART        USART2

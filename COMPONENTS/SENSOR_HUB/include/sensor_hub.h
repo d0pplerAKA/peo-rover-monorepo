@@ -45,7 +45,7 @@
    | INA3221 电流电压  | TIM7 轮询        | SENSOR_RATE_INA_HZ (本文件)  | 10 Hz   |
    ============================================================================ */
 #define SENSOR_RATE_INA_HZ     (10U)   /* INA3221 电流/电压轮询速率（TIM7） */
-#define SENSOR_RATE_REPORT_HZ  (50U)   /* sensorhub 上报周期（与手柄 BLE 同频） */
+#define SENSOR_RATE_REPORT_HZ  (50U)   /* sensorhub 上报周期 */
 
 /* ============================================================================
    模块启用开关（0 = 禁用，1 = 启用）
