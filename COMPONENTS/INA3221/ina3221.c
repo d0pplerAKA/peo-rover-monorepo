@@ -178,22 +178,43 @@ void INA3221_PollInit(void)
  *         读 4 路电流/电压（8 次 I2C，约 0.8ms @ 400kHz），转定点后
  *         推送给 sensor hub。运行在最低抢占优先级，可被传感器 EXTI 抢占。
  */
+/* 突发读一片 INA3221 的 0x01 起 8 字节（SHUNT_CH1,BUS_CH1,SHUNT_CH2,BUS_CH2，
+   寄存器自动增量），解析出 2 个电机的电流 mA + 电压 mV。
+   替代原来「每寄存器单独读」的 8 次事务 -> 2 次（~920µs -> ~500µs @400kHz）。 */
+static void ina_read_two_motors(uint8_t addr, int16_t *cur0, uint16_t *vol0,
+                                int16_t *cur1, uint16_t *vol1)
+{
+    uint8_t  raw[8];
+    int16_t  shunt0, shunt1;
+    uint16_t bus0, bus1;
+
+    I2C_INA_ReadBytes(addr, INA3221_REG_SHUNT_CH1, raw, 8);
+
+    shunt0 = (int16_t)(((uint16_t)raw[0] << 8) | raw[1]);   /* CH1 分流电压 */
+    bus0   = (uint16_t)(((uint16_t)raw[2] << 8) | raw[3]);  /* CH1 总线电压 */
+    shunt1 = (int16_t)(((uint16_t)raw[4] << 8) | raw[5]);   /* CH2 分流电压 */
+    bus1   = (uint16_t)(((uint16_t)raw[6] << 8) | raw[7]);  /* CH2 总线电压 */
+
+    /* 电流 mA = shunt_raw * 40uV / 100mOhm = shunt_raw * 0.4 */
+    *cur0 = (int16_t)((float)shunt0 * INA3221_SHUNT_LSB_UV / PEO_PM_INA3221_RSHUNT_MOHM);
+    *vol0 = (uint16_t)((bus0 >> 3) * INA3221_BUS_LSB_MV);   /* (raw>>3)*8 mV */
+    *cur1 = (int16_t)((float)shunt1 * INA3221_SHUNT_LSB_UV / PEO_PM_INA3221_RSHUNT_MOHM);
+    *vol1 = (uint16_t)((bus1 >> 3) * INA3221_BUS_LSB_MV);
+}
+
 void TIM7_IRQHandler(void)
 {
     int16_t  cur[4];
     uint16_t vol[4];
-    uint8_t  m;
 
     if (TIM_GetITStatus(INA3221_TIM, TIM_IT_Update) == RESET)
         return;
 
     TIM_ClearITPendingBit(INA3221_TIM, TIM_IT_Update);
 
-    for (m = 0; m < SENSOR_WHEEL_COUNT; m++)
-    {
-        cur[m] = (int16_t)INA3221_GetCurrent_mA(m);              /* mA 定点 */
-        vol[m] = (uint16_t)(INA3221_GetBusVoltage_V(m) * 1000.0f); /* V -> mV */
-    }
+    /* 2 次突发读（每片 8 字节）替代 8 次单寄存器读 */
+    ina_read_two_motors(PEO_PM_INA3221_ADDR_A, &cur[0], &vol[0], &cur[1], &vol[1]);  /* M1/M2 */
+    ina_read_two_motors(PEO_PM_INA3221_ADDR_B, &cur[2], &vol[2], &cur[3], &vol[3]);  /* M3/M4 */
 
     SENSOR_PushIna(cur, vol);
 }
