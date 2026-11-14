@@ -100,6 +100,21 @@ typedef struct
 #define GAMEPAD_DPAD_RIGHT     ((uint16_t)(1U << 14))
 
 /* ============================================================================
+   命令结构体（命令队列元素）
+   ----------------------------------------------------------------------------
+   上位机指令经 ESP32 转成「cmd_id + param」追加在手柄数据之后发来，F407 在
+   USART2 IDLE 中断里解析后入队，main 主循环出队执行（中断不执行业务）。
+   ============================================================================ */
+#define ESP_CMD_MAX_PARAM       8   /* 最大参数长度（PID 的 kp+ki = 8B） */
+
+typedef struct
+{
+    uint8_t id;              /* 命令 ID（ESP_CMD_*） */
+    uint8_t param_len;       /* 参数长度（字节）    */
+    uint8_t param[ESP_CMD_MAX_PARAM];
+} ESP_Cmd_t;
+
+/* ============================================================================
    PUBLIC API
    ============================================================================ */
 
@@ -145,5 +160,31 @@ uint8_t ESP_LINK_IsGamepadConnected(void);
  *         说明 ESP32 链路断或手柄停发。
  */
 uint32_t ESP_LINK_GetGamepadTimestamp(void);
+
+/* ============================================================================
+   命令队列 API（中断入队，主循环出队执行）
+   ============================================================================ */
+
+/**
+ * @brief  命令入队（在 USART2 IDLE 中断里调，不执行业务）。
+ * @param  id         命令 ID（ESP_CMD_*）。
+ * @param  param      参数指针（可为 NULL 当 param_len=0）。
+ * @param  param_len  参数字节数（<= ESP_CMD_MAX_PARAM）。
+ * @return 1 = 入队成功；0 = 队满或参数超长（丢弃）。
+ */
+uint8_t ESP_LINK_PushCommand(uint8_t id, const uint8_t *param, uint8_t param_len);
+
+/**
+ * @brief  命令出队（在 main 主循环调）。
+ * @param  out  输出命令结构体。
+ * @return 1 = 取到一条命令；0 = 队列空。
+ */
+uint8_t ESP_LINK_PopCommand(ESP_Cmd_t *out);
+
+/**
+ * @brief  执行一条命令并回显 ACK（在 main 主循环调）。
+ * @param  cmd  要执行的命令（来自 ESP_LINK_PopCommand）。
+ */
+void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd);
 
 #endif /* __ESP_LINK_H__ */

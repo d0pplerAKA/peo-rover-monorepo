@@ -166,14 +166,57 @@ static void ESP_LINK_ProcessRx(uint16_t len)
 /* ============================================================================
    4. 命令分发
    ============================================================================ */
+/* 命令队列：中断入队，主循环出队执行（中断不执行业务逻辑） */
+#define ESP_CMD_QUEUE_SIZE  8   /* 环形队列，牺牲 1 槽判满，实际容量 7 */
+
+static ESP_Cmd_t          g_cmd_queue[ESP_CMD_QUEUE_SIZE];
+static volatile uint8_t   g_cmd_head = 0;   /* 写指针（IDLE 中断） */
+static volatile uint8_t   g_cmd_tail = 0;   /* 读指针（主循环）   */
+
+/** 中断里调：解析一条命令并入队（只入队，不执行）。 */
 static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len)
 {
-    uint8_t  cmd_id    = cmd[0];
-    const uint8_t *param = &cmd[1];
-    uint8_t  param_len = (uint8_t)(len - 1);
-    uint8_t  status    = ESP_CMD_OK;
+    uint8_t cmd_id    = cmd[0];
+    uint8_t param_len = (uint8_t)(len - 1);
 
-    switch (cmd_id)
+    /* 入队失败（队满 / 参数超长）才在中断里回显错误 */
+    if (!ESP_LINK_PushCommand(cmd_id, &cmd[1], param_len))
+        SENSOR_SetCmdAck(cmd_id, ESP_CMD_ERR_INVALID);
+}
+
+uint8_t ESP_LINK_PushCommand(uint8_t id, const uint8_t *param, uint8_t param_len)
+{
+    uint8_t next = (uint8_t)((g_cmd_head + 1) % ESP_CMD_QUEUE_SIZE);
+
+    if (next == g_cmd_tail)
+        return 0;                              /* 队满 */
+    if (param_len > ESP_CMD_MAX_PARAM)
+        return 0;                              /* 参数超长 */
+
+    g_cmd_queue[g_cmd_head].id        = id;
+    g_cmd_queue[g_cmd_head].param_len = param_len;
+    if (param_len > 0 && param != 0)
+        memcpy(g_cmd_queue[g_cmd_head].param, param, param_len);
+    g_cmd_head = next;
+    return 1;
+}
+
+uint8_t ESP_LINK_PopCommand(ESP_Cmd_t *out)
+{
+    if (g_cmd_head == g_cmd_tail)
+        return 0;                              /* 空 */
+
+    *out = g_cmd_queue[g_cmd_tail];
+    g_cmd_tail = (uint8_t)((g_cmd_tail + 1) % ESP_CMD_QUEUE_SIZE);
+    return 1;
+}
+
+/** 主循环调：执行一条命令并回显 ACK。 */
+void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
+{
+    uint8_t status = ESP_CMD_OK;
+
+    switch (cmd->id)
     {
         case ESP_CMD_LED_TOGGLE:
             BUILTIN_LED_Toggle();
@@ -181,16 +224,15 @@ static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len)
 
         case ESP_CMD_SENSOR_RESET:
             /* TODO: 传感器复位（VL53L1X / MPU6050 复位流程） */
-            status = ESP_CMD_OK;
             break;
 
         case ESP_CMD_MOTOR:
         {
             uint8_t motor;
             int16_t speed;
-            if (param_len < 3) { status = ESP_CMD_ERR_BADLEN; break; }
-            motor = param[0];
-            speed = (int16_t)(param[1] | ((uint16_t)param[2] << 8));
+            if (cmd->param_len < 3) { status = ESP_CMD_ERR_BADLEN; break; }
+            motor = cmd->param[0];
+            speed = (int16_t)(cmd->param[1] | ((uint16_t)cmd->param[2] << 8));
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
             MOTOR_SetSpeed(motor, speed);
             break;
@@ -199,9 +241,9 @@ static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len)
         case ESP_CMD_PID:
         {
             float kp, ki;
-            if (param_len < 8) { status = ESP_CMD_ERR_BADLEN; break; }
-            memcpy(&kp, param,     4);
-            memcpy(&ki, param + 4, 4);
+            if (cmd->param_len < 8) { status = ESP_CMD_ERR_BADLEN; break; }
+            memcpy(&kp, cmd->param,     4);
+            memcpy(&ki, cmd->param + 4, 4);
             CONTROL_SetGains(kp, ki);
             break;
         }
@@ -210,9 +252,9 @@ static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len)
         {
             uint8_t motor;
             int32_t speed_d100;
-            if (param_len < 5) { status = ESP_CMD_ERR_BADLEN; break; }
-            motor = param[0];
-            memcpy(&speed_d100, param + 1, 4);
+            if (cmd->param_len < 5) { status = ESP_CMD_ERR_BADLEN; break; }
+            motor = cmd->param[0];
+            memcpy(&speed_d100, cmd->param + 1, 4);
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
             CONTROL_SetTargetSpeed(motor, speed_d100);
             break;
@@ -223,7 +265,7 @@ static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len)
             break;
     }
 
-    SENSOR_SetCmdAck(cmd_id, status);
+    SENSOR_SetCmdAck(cmd->id, status);
 }
 
 /* ============================================================================

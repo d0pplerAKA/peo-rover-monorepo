@@ -90,6 +90,26 @@ int main(void)
 
     while (1)
     {
+        /* ── 部分1：Xbox 手柄遥控（周期读手柄状态 → 映射闭环目标速度）── */
+        GamepadData_t pad;
+        ESP_LINK_GetGamepad(&pad);
+        if (ESP_LINK_IsGamepadConnected())
+        {
+            /* TODO 实测标定后填映射（摇杆中值 32768，满速 4424 = 0.01cm/s）：
+             *   int16_t y = (int16_t)(pad.joy_ly - 32768);   // 前进/后退
+             *   int16_t x = (int16_t)(pad.joy_lx - 32768);   // 转向
+             *   // 死区、速度/转向系数、左右轮差速分配...
+             *   // 调好后用 CONTROL_SetTargetSpeed(电机, 目标 0.01cm/s) 闭环驱动
+             */
+        }
 
+        /* ── 部分2：上位机指令（命令队列消费：中断只入队，这里出队执行）── */
+        ESP_Cmd_t cmd;
+        if (ESP_LINK_PopCommand(&cmd))
+        {
+            ESP_LINK_ExecCommand(&cmd);
+        }
+
+        mdelay(10);   /* 10 ms 调度节拍 */
     }
 }
