@@ -37,22 +37,6 @@
 #define INA3221_CONFIG_CONTINUOUS (0x0038U)
 
 
-/* 每路电机的 (芯片地址, 分流寄存器, 总线寄存器) 映射 */
-typedef struct
-{
-    uint8_t addr;        /* 7-bit I2C 地址 */
-    uint8_t shunt_reg;   /* 分流电压寄存器 */
-    uint8_t bus_reg;     /* 总线电压寄存器 */
-} INA3221_ChMap_t;
-
-static const INA3221_ChMap_t g_ina_map[4] =
-{
-    { PEO_PM_INA3221_ADDR_A, INA3221_REG_SHUNT_CH1, INA3221_REG_BUS_CH1 },   /* M1: 片A CH1 */
-    { PEO_PM_INA3221_ADDR_A, INA3221_REG_SHUNT_CH2, INA3221_REG_BUS_CH2 },   /* M2: 片A CH2 */
-    { PEO_PM_INA3221_ADDR_B, INA3221_REG_SHUNT_CH1, INA3221_REG_BUS_CH1 },   /* M3: 片B CH1 */
-    { PEO_PM_INA3221_ADDR_B, INA3221_REG_SHUNT_CH2, INA3221_REG_BUS_CH2 },   /* M4: 片B CH2 */
-};
-
 
 /** 单芯片配置：写连续测量模式（分流 + 总线电压） */
 static void INA3221_Config(uint8_t addr)
@@ -94,51 +78,6 @@ void INA3221_Init(void)
 }
 
 
-/**
- * @brief  读某电机通道的分流电压（mV，有符号）。
- */
-float INA3221_GetShuntVoltage_mV(uint8_t motor)
-{
-    if (motor >= SENSOR_WHEEL_COUNT) return 0.0f;
-    const INA3221_ChMap_t *m = &g_ina_map[motor];
-    uint8_t buf[2] = {0, 0};
-    int16_t raw;
-
-    I2C_INA_ReadBytes(m->addr, m->shunt_reg, buf, 2);
-    raw = (int16_t)(((uint16_t)buf[0] << 8) | buf[1]);
-
-    return (float)raw * INA3221_SHUNT_LSB_UV / 1000.0f;   /* uV -> mV */
-}
-
-
-/**
- * @brief  读某电机通道的总线电压（V）。低 3 位是标志位，需右移 3。
- */
-float INA3221_GetBusVoltage_V(uint8_t motor)
-{
-    if (motor >= SENSOR_WHEEL_COUNT) return 0.0f;
-    const INA3221_ChMap_t *m = &g_ina_map[motor];
-    uint8_t buf[2] = {0, 0};
-    uint16_t raw, bus;
-
-    I2C_INA_ReadBytes(m->addr, m->bus_reg, buf, 2);
-    raw = ((uint16_t)buf[0] << 8) | buf[1];
-    bus = raw >> 3;                                      /* 去掉低 3 位标志 */
-
-    return (float)bus * INA3221_BUS_LSB_MV / 1000.0f;    /* mV -> V */
-}
-
-
-/**
- * @brief  读某电机通道的电流（mA）。I = Vshunt / Rshunt；mV / mΩ = A。
- */
-float INA3221_GetCurrent_mA(uint8_t motor)
-{
-    float shunt_mV = INA3221_GetShuntVoltage_mV(motor);
-
-    return shunt_mV / (float)PEO_PM_INA3221_RSHUNT_MOHM * 1000.0f;
-}
-
 /* ============================================================================
    TIM7 轮询：按 SENSOR_RATE_INA_HZ 频率读 4 路电流/电压，推送 sensorhub
    ----------------------------------------------------------------------------
@@ -175,8 +114,8 @@ void INA3221_PollInit(void)
 /**
  * @brief  TIM7 update interrupt = INA3221 轮询（SENSOR_RATE_INA_HZ）。
  * @note   覆盖 startup_stm32f40xx.s 的 [WEAK] TIM7_IRQHandler。
- *         读 4 路电流/电压（8 次 I2C，约 0.8ms @ 400kHz），转定点后
- *         推送给 sensor hub。运行在最低抢占优先级，可被传感器 EXTI 抢占。
+ *         2 次突发读（每片 8 字节）读 4 路电流/电压，转定点后推送给
+ *         sensor hub。运行在最低抢占优先级，可被传感器 EXTI 抢占。
  */
 /* 突发读一片 INA3221 的 0x01 起 8 字节（SHUNT_CH1,BUS_CH1,SHUNT_CH2,BUS_CH2，
    寄存器自动增量），解析出 2 个电机的电流 mA + 电压 mV。
