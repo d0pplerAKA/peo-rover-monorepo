@@ -12,6 +12,14 @@
  *   方向2（ESP32 -> F407）：PAYLOAD = GamepadData_t(20B 固定) + 命令(可选变长)。
  *
  * CRC16-CCITT：多项式 0x1021，初始 0xFFFF，覆盖 SOF~PAYLOAD 全部字节。
+ *
+ * ESP32 端（发送方）打包约定：
+ *   1. 每帧固定带 20B 手柄 GamepadData_t（小端）；即使手柄未连接也整包发，
+ *      connected=0、其余字段 0/默认值。
+ *   2. 手柄之后可追加 0~多个命令；命令体 = cmd_id(1B) + param(变长)。
+ *   3. 全帧 payload 后算 CRC16-CCITT（覆盖 SOF~PAYLOAD，不含 CRC 本身），
+ *      低字节在前附在末尾。
+ *   4. 发完一帧后停顿（>= 1 字节时间）触发 F407 的 USART2 IDLE 中断组帧。
  ******************************************************************************
  */
 #ifndef __ESP_LINK_H__
@@ -110,5 +118,32 @@ void ESP_LINK_StartReport(void);
  * @brief  计算 CRC16-CCITT（多项式 0x1021，初始 0xFFFF）。供两端共用。
  */
 uint16_t ESP_LINK_CRC16(const uint8_t *data, uint16_t len);
+
+/* ============================================================================
+   手柄读取接口（上层遥控 / 决策逻辑用）
+   ----------------------------------------------------------------------------
+   ESP32 端每 ~20ms 发一帧手柄数据，ESP_LINK 在 USART2 IDLE 中断里更新内部
+   快照。上层通过这些接口读取，不直接访问内部静态缓冲。
+   ============================================================================ */
+
+/**
+ * @brief  读取最新手柄状态（GamepadData_t 快照）。
+ * @param  out  输出缓冲区，函数把整个 GamepadData_t 拷到这里。
+ * @note   关中断拷贝保证字段间一致（接收在 USART2 IDLE 中断里写）。
+ */
+void ESP_LINK_GetGamepad(GamepadData_t *out);
+
+/**
+ * @brief  手柄是否已连接。
+ * @return 0 = 未连接，1 = 已连接。
+ */
+uint8_t ESP_LINK_IsGamepadConnected(void);
+
+/**
+ * @brief  最后收到手柄数据的时间戳（SysTick ms）。
+ * @note   与 TIMER_GetTick() 当前值相减即得「数据新鲜度」；差值长期偏大
+ *         说明 ESP32 链路断或手柄停发。
+ */
+uint32_t ESP_LINK_GetGamepadTimestamp(void);
 
 #endif /* __ESP_LINK_H__ */

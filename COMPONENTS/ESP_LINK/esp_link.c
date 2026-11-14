@@ -107,8 +107,9 @@ static void ESP_LINK_SendHub(void)
 /* uint32 数组保证 4 字节对齐（DMA Memory0 地址要求） */
 static uint32_t g_rx_dma_buf[ESP_LINK_RX_BUF_SIZE / 4];
 
-/* 最新手柄状态（供 CONTROL 读，遥控用） */
+/* 最新手柄状态 + 最后收到时间戳（上层经 ESP_LINK_GetGamepad* 读取） */
 static volatile GamepadData_t g_gamepad;
+static volatile uint32_t     g_gamepad_timestamp_ms;
 
 /* 前置声明：HandleCmd 定义在 ProcessFrame 之后 */
 static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len);
@@ -125,6 +126,7 @@ static void ESP_LINK_ProcessFrame(const uint8_t *payload, uint8_t len)
 
     /* 前 20 字节 = 手柄 */
     memcpy((void *)&g_gamepad, payload, sizeof(GamepadData_t));
+    g_gamepad_timestamp_ms = TIMER_GetTick();
 
     /* 剩余 = 命令（0 字节 = 无命令） */
     cmd_len = (uint8_t)(len - sizeof(GamepadData_t));
@@ -361,4 +363,31 @@ void TIM8_TRG_COM_TIM14_IRQHandler(void)
         TIM_ClearITPendingBit(ESP_REPORT_TIM, TIM_IT_Update);
         ESP_LINK_SendHub();   /* 打包 + 启动 DMA 发送（非阻塞） */
     }
+}
+
+/* ============================================================================
+   7. 手柄读取接口（上层遥控 / 决策逻辑用）
+   ============================================================================ */
+
+void ESP_LINK_GetGamepad(GamepadData_t *out)
+{
+    uint32_t primask;
+
+    if (out == 0)
+        return;
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    *out = g_gamepad;                 /* 关中断拷贝，保证字段间一致 */
+    __set_PRIMASK(primask);
+}
+
+uint8_t ESP_LINK_IsGamepadConnected(void)
+{
+    return g_gamepad.connected;
+}
+
+uint32_t ESP_LINK_GetGamepadTimestamp(void)
+{
+    return g_gamepad_timestamp_ms;
 }
