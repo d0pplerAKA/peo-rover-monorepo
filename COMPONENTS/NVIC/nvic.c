@@ -20,23 +20,15 @@ void NVIC_InitAll(void)
     /* Priority group FIRST - must precede every NVIC_Init() */
     NVIC_PriorityGroupConfig(PEO_NVIC_PRIO_GROUP);
 
-    /* ESP32 link: DMA RX/TX + USART2 IDLE framing */
-    PEO_NVIC_Enable(PEO_NVIC_COMM_RX_IRQ, PEO_NVIC_PRIO_COMM);      /* DMA1_Stream5 */
-    PEO_NVIC_Enable(PEO_NVIC_COMM_TX_IRQ, PEO_NVIC_PRIO_COMM);      /* DMA1_Stream6 */
-    PEO_NVIC_Enable(PEO_NVIC_COMM_IRQ,    PEO_NVIC_PRIO_COMM);      /* USART2       */
-
-    /* MPU6050 IMU bus (I2C1) */
-    PEO_NVIC_Enable(PEO_NVIC_I2C1_EV_IRQ, PEO_NVIC_PRIO_I2C);
-    PEO_NVIC_Enable(PEO_NVIC_I2C1_ER_IRQ, PEO_NVIC_PRIO_I2C);
-
-    /* VL53L1X + INA3221 bus (I2C3) */
-    PEO_NVIC_Enable(PEO_NVIC_I2C3_EV_IRQ, PEO_NVIC_PRIO_I2C);
-    PEO_NVIC_Enable(PEO_NVIC_I2C3_ER_IRQ, PEO_NVIC_PRIO_I2C);
-
-    /* VL53L1X data-ready INT (EXTI3/4/8) */
-    PEO_NVIC_Enable(PEO_NVIC_VL53_FRONT_INT_IRQ, PEO_NVIC_PRIO_VL53_INT);
-    PEO_NVIC_Enable(PEO_NVIC_VL53_LEFT_INT_IRQ,  PEO_NVIC_PRIO_VL53_INT);
-    PEO_NVIC_Enable(PEO_NVIC_VL53_RIGHT_INT_IRQ, PEO_NVIC_PRIO_VL53_INT);
+    /* VL53L1X data-ready INT (EXTI0/1/2) + MPU6050 data-ready INT (EXTI3) */
+    PEO_NVIC_Enable(PEO_NVIC_VL53_FRONT_INT_IRQ,    2,  0);
+    PEO_NVIC_Enable(PEO_NVIC_VL53_LEFT_INT_IRQ,     2,  1);
+    PEO_NVIC_Enable(PEO_NVIC_VL53_RIGHT_INT_IRQ,    2,  2);
+    PEO_NVIC_Enable(PEO_NVIC_MPU_INT_IRQ,           1,  0);
+    PEO_NVIC_Enable(PEO_NVIC_CTRL_IRQ,              3,  0);   /* 1 kHz control loop (TIM6) */
+    PEO_NVIC_Enable(PEO_NVIC_INA_IRQ,               3,  1);   /* INA3221 poll (TIM7) */
+    PEO_NVIC_Enable(PEO_NVIC_ESP_IRQ,               3,  2);   /* ESP32 link RX (USART2) */
+    PEO_NVIC_Enable(PEO_NVIC_ESP_TX_IRQ,            3,  3);   /* sensorhub report (TIM14) */
 
     /* Optional (uncomment when the driver lands):
        PEO_NVIC_Enable(PEO_NVIC_ADC_IRQ, PEO_NVIC_PRIO_ADC);   // ACS712 ADC

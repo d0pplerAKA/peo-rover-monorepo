@@ -27,45 +27,36 @@
 
 #include "stm32f4xx.h"
 
+
 /* ============================================================================
    1. NVIC PRIORITY SCHEME
    ----------------------------------------------------------------------------
-   Group 4: all 4 priority bits are PREEMPTION priority (0..15), no sub-
-   priority. Rationale: odometry integrity (encoder 32-bit accumulation)
-   outranks everything; debug output is the most expendable.
+   Group 2: 2 bits PREEMPTION priority (0..3) + 2 bits sub-priority (0..3).
+   Sensor data-ready INTs outrank optional ADC/debug; the three VL53L1X INTs
+   share one preemption level and are ordered by sub-priority.
    ----------------------------------------------------------------------------
-   | Priority | Function                                          |
-   |----------|---------------------------------------------------|
-   | 0x02     | ESP32 comms (USART2 + DMA1 Stream5/6)             |
-   | 0x03     | I2C1 event/error (MPU6050 bus)                    |
-   | 0x04     | ADC1 (ACS712 current sampling, if interrupt-driven)|
-   | 0x05     | VL53L1X INT x3 (EXTI3/4/8 data-ready)             |
-   | 0x07     | USART1 debug console (RX interrupt, optional)     |
+   | Preempt (sub) | Function                                    |
+   |---------------|---------------------------------------------|
+   | 1 (0)         | MPU6050 data-ready (EXTI3)                  |
+   | 2 (0/1/2)     | VL53L1X data-ready x3 (EXTI0/1/2)           |
+   | optional      | ADC1, USART1 debug RX (commented in nvic.c) |
    ============================================================================ */
-#define PEO_NVIC_PRIO_GROUP    NVIC_PriorityGroup_4
-#define PEO_NVIC_PRIO_COMM     (0x02U)
-#define PEO_NVIC_PRIO_I2C      (0x03U)
-#define PEO_NVIC_PRIO_ADC      (0x04U)
-#define PEO_NVIC_PRIO_DBG      (0x07U)
-#define PEO_NVIC_PRIO_VL53_INT  (0x05U)
+#define PEO_NVIC_PRIO_GROUP         NVIC_PriorityGroup_2
+
 
 /* ============================================================================
    2. IRQ CHANNEL MAP
    ----------------------------------------------------------------------------
-   | Function               | IRQ channel macro       | Handler (startup .s)    | Prio |
-   |------------------------|-------------------------|-------------------------|------|
-   | ESP32 RX done          | DMA1_Stream5_IRQn       | DMA1_Stream5_IRQHandler | 0x02 |
-   | ESP32 TX done          | DMA1_Stream6_IRQn       | DMA1_Stream6_IRQHandler | 0x02 |
-   | ESP32 frame boundary   | USART2_IRQn (IDLE flag) | USART2_IRQHandler       | 0x02 |
-   | MPU6050 event          | I2C1_EV_IRQn            | I2C1_EV_IRQHandler      | 0x03 |
-   | MPU6050 error          | I2C1_ER_IRQn            | I2C1_ER_IRQHandler      | 0x03 |
-   | VL53L1X/INA3221 event  | I2C3_EV_IRQn            | I2C3_EV_IRQHandler      | 0x03 |
-   | VL53L1X/INA3221 error  | I2C3_ER_IRQn            | I2C3_ER_IRQHandler      | 0x03 |
-   | VL53L1X front ready    | EXTI3_IRQn              | EXTI3_IRQHandler        | 0x05 |
-   | VL53L1X left ready     | EXTI4_IRQn              | EXTI4_IRQHandler        | 0x05 |
-   | VL53L1X right ready    | EXTI9_5_IRQn            | EXTI9_5_IRQHandler      | 0x05 |
-   | ADC1 (optional)        | ADC_IRQn                | ADC_IRQHandler          | 0x04 |
-   | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | 0x07 |
+   | Function               | IRQ channel macro       | Handler (startup .s)    | Preempt |
+   |------------------------|-------------------------|-------------------------|---------|
+   | VL53L1X front ready    | EXTI0_IRQn              | EXTI0_IRQHandler        | 2 (0)   |
+   | VL53L1X left ready     | EXTI1_IRQn              | EXTI1_IRQHandler        | 2 (1)   |
+   | VL53L1X right ready    | EXTI2_IRQn              | EXTI2_IRQHandler        | 2 (2)   |
+   | MPU6050 data-ready     | EXTI3_IRQn              | EXTI3_IRQHandler        | 1 (0)   |
+   | 1 kHz control loop     | TIM6_DAC_IRQn           | TIM6_DAC_IRQHandler     | 3 (0)   |
+   | INA3221 电流/电压轮询  | TIM7_IRQn               | TIM7_IRQHandler         | 3 (1)   |
+   | ADC1 (optional)        | ADC_IRQn                | ADC_IRQHandler          | -       |
+   | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | -       |
    ----------------------------------------------------------------------------
    NO interrupt: all 4 encoders are pure (16-bit delta), all PWM timers
    (TIM2/5/9/10/11) edge-aligned; no nFAULT (simplified DRV8871); no I2C2.
@@ -74,42 +65,36 @@
    ============================================================================ */
 
 /** IRQ channel macros **/
-#define PEO_NVIC_COMM_RX_IRQ    DMA1_Stream5_IRQn     /* USART2 RX */
-#define PEO_NVIC_COMM_TX_IRQ    DMA1_Stream6_IRQn     /* USART2 TX */
-#define PEO_NVIC_COMM_IRQ       USART2_IRQn           /* IDLE-line frame detect */
-
-#define PEO_NVIC_I2C1_EV_IRQ    I2C1_EV_IRQn
-#define PEO_NVIC_I2C1_ER_IRQ    I2C1_ER_IRQn
-#define PEO_NVIC_I2C3_EV_IRQ    I2C3_EV_IRQn
-#define PEO_NVIC_I2C3_ER_IRQ    I2C3_ER_IRQn
-
 #define PEO_NVIC_ADC_IRQ        ADC_IRQn              /* optional */
 #define PEO_NVIC_DBG_IRQ        USART1_IRQn           /* optional */
 
-#define PEO_NVIC_VL53_FRONT_INT_IRQ   EXTI3_IRQn      /* VL53L1X data-ready */
-#define PEO_NVIC_VL53_LEFT_INT_IRQ    EXTI4_IRQn      /* VL53L1X data-ready */
-#define PEO_NVIC_VL53_RIGHT_INT_IRQ   EXTI9_5_IRQn    /* VL53L1X data-ready */
+#define PEO_NVIC_VL53_FRONT_INT_IRQ   EXTI0_IRQn      /* VL53L1X data-ready */
+#define PEO_NVIC_VL53_LEFT_INT_IRQ    EXTI1_IRQn      /* VL53L1X data-ready */
+#define PEO_NVIC_VL53_RIGHT_INT_IRQ   EXTI2_IRQn      /* VL53L1X data-ready */
+#define PEO_NVIC_MPU_INT_IRQ          EXTI3_IRQn      /* MPU6050 data-ready  */
+#define PEO_NVIC_CTRL_IRQ             TIM6_DAC_IRQn   /* 1 kHz control loop  */
+#define PEO_NVIC_INA_IRQ              TIM7_IRQn       /* INA3221 电流/电压轮询 */
+#define PEO_NVIC_ESP_IRQ              USART2_IRQn     /* ESP32 link RX          */
+#define PEO_NVIC_ESP_TX_IRQ           TIM8_TRG_COM_TIM14_IRQn  /* sensorhub 上报 (TIM14) */
 
 /* ============================================================================
    3. DMA STREAM / CHANNEL MAP  (RM0090 Table 43 - DMA1 request mapping)
    ----------------------------------------------------------------------------
    | Peripheral | Direction | Stream / Channel | IRQ channel          |
    |------------|-----------|------------------|----------------------|
-   | USART2     | RX        | DMA1_Stream5 Ch4 | DMA1_Stream5_IRQn    |
-   | USART2     | TX        | DMA1_Stream6 Ch4 | DMA1_Stream6_IRQn    |
    | SPI2 (TFT) | RX (opt.) | DMA1_Stream3 Ch0 | DMA1_Stream3_IRQn    |
    | SPI2 (TFT) | TX (opt.) | DMA1_Stream4 Ch0 | DMA1_Stream4_IRQn    |
    | ADC1 (opt.)| RX        | DMA2_Stream0 Ch0 | DMA2_Stream0_IRQn    |
    ============================================================================ */
 
-/* DMA stream/channel macros (PEO_DMA_*) live in PEO_PINMAP.H section 15 -
+/* DMA stream/channel macros (PEO_DMA_*) live in PEO_PINMAP.H section 13 -
    hardware routing facts must be visible to every component. */
 
 /* ============================================================================
    4. EXTI MAP
    ----------------------------------------------------------------------------
-   v2.5: VL53L1X data-ready INT x3 -> EXTI3 (PC3), EXTI4 (PC4), EXTI8 (PC8).
-   EXTI8 is served by the shared EXTI9_5_IRQn handler (check pending bit).
+   v2.6: INT x4 -> VL53L1X front/left/right = EXTI0/1/2 (PE0/1/2); MPU6050 =
+   EXTI3 (PE3). All on independent EXTI lines (EXTI0-3 own IRQ vectors).
    ============================================================================ */
 
 /* ============================================================================
@@ -126,12 +111,12 @@
 void NVIC_InitAll(void);
 
 /** Internal helper: enable one IRQ channel with a preemption priority. **/
-static inline void PEO_NVIC_Enable(uint8_t irq_channel, uint8_t preempt_prio)
+static inline void PEO_NVIC_Enable(uint8_t irq_channel, uint8_t preempt_prio, uint8_t sub_prio)
 {
     NVIC_InitTypeDef nvic;
     nvic.NVIC_IRQChannel                   = irq_channel;
     nvic.NVIC_IRQChannelPreemptionPriority = preempt_prio;
-    nvic.NVIC_IRQChannelSubPriority        = 0;
+    nvic.NVIC_IRQChannelSubPriority        = sub_prio;
     nvic.NVIC_IRQChannelCmd                = ENABLE;
     NVIC_Init(&nvic);
 }

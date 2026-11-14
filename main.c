@@ -10,9 +10,11 @@
  *   2. RCC_Clock_Init()  - ALL peripheral clocks in one shot
  *                          (COMPONENTS/RCC, includes ADC prescaler).
  *   3. NVIC_InitAll()    - priority group + ALL IRQ channels in one shot
- *                          (COMPONENTS/IRQ).
+ *                          (COMPONENTS/NVIC).
  *   4. Component inits   - each module only configures its own peripheral
  *                          (GPIO/timers/USART/DMA/EXTI...), never RCC/NVIC.
+ *      Sensors (I2C3/VL53L1X, MPU6050 DMP) come LAST: they start EXTI
+ *      interrupts, so they must not fire into later init code.
  ******************************************************************************
  */
 #include "stm32f4xx.h"
@@ -20,9 +22,19 @@
 
 #include "COMPONENTS/RCC/include/rcc.h"
 #include "COMPONENTS/NVIC/include/nvic.h"
+#include "COMPONENTS/DELAY/include/delay.h"
 #include "COMPONENTS/USART/include/usart.h"
-
-#include <stdio.h>
+#include "COMPONENTS/I2C/include/i2c.h"
+#include "COMPONENTS/TIMER/include/timer.h"
+#include "COMPONENTS/MPU6050/include/mpu6050.h"
+#include "COMPONENTS/CONTROL/include/control.h"
+#include "COMPONENTS/ENCODER/include/encoder.h"
+#include "COMPONENTS/MOTOR/include/motor.h"
+#include "COMPONENTS/TOF400C/include/tof400c.h"
+#include "COMPONENTS/BUILTIN_LED/builtin_led.h"
+#include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
+#include "COMPONENTS/INA3221/include/ina3221.h"
+#include "COMPONENTS/ESP_LINK/include/esp_link.h"
 
 int main(void)
 {
@@ -30,25 +42,54 @@ int main(void)
     RCC_Clock_Init();
     NVIC_InitAll();
 
-    /* 3. Communication components */
-    USART_DBG_Init(PEO_PM_DBG_BAUDRATE);     /* 115200, PA9/PA10 USB-TTL */
-    USART_COMM_Init();                       /* 4.2 Mbps ESP32 link      */
+    /* 3. SysTick 1 ms timebase (get_tick / mdelay for the motion driver) */
+    TIMER_Init();
 
-    /* 4. Boot banner (printf goes through fputc -> USART1) */
-    printf("PEO Rover boot\r\n");
-    printf("SYSCLK = %lu Hz | gear %u:1 | %u counts/output-rev | %u um/count\r\n",
-           PEO_PM_SYSCLK_HZ,
-           PEO_PM_GEAR_RATIO,
-           PEO_PM_CNT_PER_OUT_REV,
-           PEO_PM_UM_PER_CNT);
+    /* 4. Debug console */
+    USART_DBG_Init(PEO_PM_DBG_BAUDRATE);     /* 115200, PA9/PA10 USB-TTL */
+
+    /* 4b. On-board LED D2 (PA1) */
+    BUILTIN_LED_Init();
+
+    /* 5. Quadrature encoders (TIM1/3/4/8, 16-bit delta read) */
+#if PEO_ENABLE_ENCODER
+    ENCODER_Init();
+#endif
+
+    /* 6. Motor PWM (8 channels -> 4x DRV8871 IN1/IN2) */
+#if PEO_ENABLE_MOTOR
+    MOTOR_Init();
+#endif
+
+    /* 7. 1 kHz control loop (TIM6 - after encoders/motors, ISR reads them) */
+#if PEO_ENABLE_CONTROL
+    CONTROL_Init();
+#endif
+
+    /* 8-9. Sensors (LAST: they configure EXTI channels; interrupts are
+       started later via MPU6050_Start() / TOF400C_StartRanging_Interrupt()) */
+#if PEO_ENABLE_TOF400C
+    TOF400C_Init();          /* 3x VL53L1X (EXTI0/1/2, I2C3 init implicit) */
+#endif
+#if PEO_ENABLE_INA3221
+    INA3221_Init();          /* INA3221 current monitor (I2C2, PF1=SCL/PF0=SDA) */
+    INA3221_PollInit();      /* TIM7 轮询读电流电压 -> sensorhub（SENSOR_RATE_INA_HZ） */
+#endif
+#if PEO_ENABLE_MPU6050
+    MPU6050_Init();          /* MPU6050 DMP (PE3/EXTI3, start via MPU6050_Start()) */
+#endif
+
+    /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 手柄/命令接收 */
+    ESP_LINK_Init();
+    ESP_LINK_StartReport();  /* TIM14 定时器触发 sensorhub 上报（DMA 发送） */
+
+    /* 9. Boot banner：全面的诊断信息（时钟/构建/参数/传感器/模块状态） */
+    print_boot_banner();
+
+    BUILTIN_LED_On();        /* 运行指示：系统启动完成，点亮 LED */
 
     while (1)
     {
-        /* TODO: 1 kHz control loop
-           - read 4 encoders (TIM1/3/8/4 CNT + update accumulation)
-           - run motor PWM (TIM1/9/8/4, DRV8871 direction logic)
-           - current sensing path A/B, MPU6050, 3x VL53L0X
-           - ESP32 frame handling: USART_COMM_FramePending() -> parse
-        */
+
     }
 }

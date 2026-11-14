@@ -33,3 +33,7 @@ TEMP/
 # --- 操作系统杂物 ---
 Thumbs.db
 Desktop.ini
+
+# --- 构建日志（build.bat 每次编译重写）---
+build_log.txt
+build_vl53.log

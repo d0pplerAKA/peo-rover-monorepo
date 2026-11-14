@@ -27,19 +27,21 @@
    ----------------------------------------------------------------------------
    | Peripheral        | Bus  | StdPeriph macro            | Used by           |
    |-------------------|------|----------------------------|-------------------|
-   | GPIOA-E           | AHB1 | RCC_AHB1Periph_GPIOx      | all pins          |
-   | DMA1              | AHB1 | RCC_AHB1Periph_DMA1       | USART2 TX/RX      |
+   | GPIOA-F           | AHB1 | RCC_AHB1Periph_GPIOx      | all pins          |
    | TIM2              | APB1 | RCC_APB1Periph_TIM2       | PWM M1            |
    | TIM3, TIM4        | APB1 | RCC_APB1Periph_TIMx       | encoders M2/M4    |
    | TIM5              | APB1 | RCC_APB1Periph_TIM5       | PWM M2            |
-   | USART2            | APB1 | RCC_APB1Periph_USART2     | ESP32 link        |
-   | I2C1              | APB1 | RCC_APB1Periph_I2C1       | 3x VL53L0X        |
-| I2C3              | APB1 | RCC_APB1Periph_I2C3       | MPU6050 + INA3221 |
+   | TIM6              | APB1 | RCC_APB1Periph_TIM6       | 1 kHz control loop|
+   | TIM7              | APB1 | RCC_APB1Periph_TIM7       | INA3221 轮询      |
+   | I2C1              | APB1 | RCC_APB1Periph_I2C1       | MPU6050 (dedicated)|
+   | I2C3              | APB1 | RCC_APB1Periph_I2C3       | 3x VL53L1X         |
+   | I2C2              | APB1 | RCC_APB1Periph_I2C2       | INA3221 (dedicated)|
    | SPI2              | APB1 | RCC_APB1Periph_SPI2       | TFT (J4)          |
    | TIM1, TIM8        | APB2 | RCC_APB2Periph_TIMx       | encoders M1/M3    |
    | TIM9              | APB2 | RCC_APB2Periph_TIM9       | PWM M3            |
    | TIM10, TIM11      | APB2 | RCC_APB2Periph_TIMx       | PWM M4            |
    | USART1            | APB2 | RCC_APB2Periph_USART1     | debug console     |
+   | USART2            | APB1 | RCC_APB1Periph_USART2     | ESP32 link (PD5/6) |
    | ADC1              | APB2 | RCC_APB2Periph_ADC1       | ACS712 (path A)   |
    | SYSCFG            | APB2 | RCC_APB2Periph_SYSCFG     | (reserved)        |
    ----------------------------------------------------------------------------
@@ -55,6 +57,7 @@
                             RCC_AHB1Periph_GPIOC | \
                             RCC_AHB1Periph_GPIOD | \
                             RCC_AHB1Periph_GPIOE | \
+                            RCC_AHB1Periph_GPIOF | \
                             RCC_AHB1Periph_DMA1)
 
 /** Aggregate: every APB1 peripheral this design needs **/
@@ -62,10 +65,14 @@
                             RCC_APB1Periph_TIM3   | \
                             RCC_APB1Periph_TIM4   | \
                             RCC_APB1Periph_TIM5   | \
-                            RCC_APB1Periph_USART2 | \
+                            RCC_APB1Periph_TIM6   | \
+                            RCC_APB1Periph_TIM7   | \
+                            RCC_APB1Periph_TIM14  | \
                             RCC_APB1Periph_I2C1   | \
+                            RCC_APB1Periph_I2C2   | \
                             RCC_APB1Periph_I2C3   | \
-                            RCC_APB1Periph_SPI2)
+                            RCC_APB1Periph_SPI2   | \
+                            RCC_APB1Periph_USART2)
 
 /** Aggregate: every APB2 peripheral this design needs **/
 #define PEO_RCC_APB2_EN    (RCC_APB2Periph_TIM1   | \

@@ -4,9 +4,9 @@
  * @brief   PEO Rover - STM32F407VGT6 pin assignment header
  *          (single source of truth for all pin/peripheral macros)
  *
- * @version v2.5.0  (2026-11-11)
+ * @version v2.20.0  (2026-11-14)
  * @board   DevEBox STM32F4XX-M (MCUDev), LQFP100, on-board 8 MHz HSE
- * @basedon PEO_ROVER_F407_PinMap.md v2.2 (same folder, authoritative doc)
+ * @basedon PEO_ROVER_F407_PinMap.md v2.20 (same folder, authoritative doc)
  *
  * ----------------------------------------------------------------------------
  * BOARD FACTS THAT SHAPED THIS FILE (from stm32-base.org + datasheet):
@@ -18,7 +18,7 @@
  *     all these pins are FREE and may be repurposed. Leave the socket empty -
  *     do not insert a card while this design runs on the board.
  *  3. TFT socket J4 (8x1) has NO RST pin. ST7789/ST7735 modules need one:
- *     wire module RST to PE12 (flywire) - see section 11.
+ *     wire module RST to PE12 (flywire) - see section 10.
  *     LCD12864 is NOT compatible with J4 (parallel bus / no D/C concept /
  *     usually 5 V powered) - do not buy one.
  *  4. Hall encoder modules are 5 V powered with built-in bus pull-ups.
@@ -43,7 +43,7 @@
  *        LQFP100 (I2C1 pins PB6-PB9 are taken by M4 encoder/PWM; I2C3
  *        needs PC9 which is M3 PWM; no PF pins on 100-pin package).
  *        -> spare software-I2C pin pair reserved: PE0 (SCL) / PE1 (SDA).
- *  v1.6  DMA stream/channel map (section 15) and EXTI line map (section 16)
+ *  v1.6  DMA stream/channel map (section 13) and EXTI line map (section 14)
  *        moved HERE from the NVIC component header: hardware routing facts
  *        must be visible to every component (fixes usart_comm.c build).
  *  v1.7  Second HARDWARE I2C recovered (v1.5 "impossible" superseded):
@@ -66,7 +66,7 @@
  *        - TFT (J4) macro block restored: CS=PB12 SCK=PB13 MISO=PB14
  *          MOSI=PB15 DC=PC5 BLK=PB1 RST=PE12.
  *        - XSHUT x3 (PC0/PC1/PC2) removed - VL53L1X addressing TBD.
- *  v2.0  XSHUT x3 RESTORED (VL53L1X re-addressing is mandatory - see 10):
+ *  v2.0  XSHUT x3 RESTORED (VL53L1X re-addressing is mandatory - see 9):
  *        PC0 = front, PC1 = left, PC2 = right (XSHUT sequential power-up ->
  *        addresses 0x52/0x54/0x56).
  *        Comment clean-up: SD-socket "reused" board fact (section 2) and every
@@ -87,7 +87,23 @@
  *        (default 0x52; VL53L1X_SetI2CAddress() writes reg 0x0001, the L1X
  *        equivalent of the L0X 0x8A). Address plan unchanged (0x52/54/56).
  *  v2.5  VL53L1X INT x3 ADDED (GPIO1 data-ready interrupt): PC3/PC4/PC8 ->
- *        EXTI3/4/8 (section 10b). XSHUT x3 unchanged (PC0/1/2).
+ *        EXTI3/4/8 (section 9b). XSHUT x3 unchanged (PC0/1/2).
+ *  v2.6  INT pins RELOCATED to GPIOE (per user): VL53L1X INT front/left/right
+ *        PC3/PC4/PC8 -> PE0/PE1/PE2 (EXTI0/1/2); MPU6050 INT ADDED -> PE3
+ *        (EXTI3). All four INTs on independent EXTI lines (no shared
+ *        EXTI9_5 vector). PC3/PC4/PC8 released back to free.
+ *  v2.7  ESP32 link (USART2 PD5/PD6) REMOVED (deferred); NVIC -> Group2;
+ *        DELAY/I2C/TOF400C/VL53L1X/TIMER components landed.
+ *  v2.8..v2.15  Component-only work (MOTOR/ENCODER/CONTROL/SENSOR_HUB +
+ *        eMPL motion driver DMP), no pin/peripheral map changes.
+ *  v2.16  BUILTIN_LED added on PA1 (on-board LED D2).
+ *  v2.17  I2C2 RE-ENABLED on alternate pins PF1=SCL / PF0=SDA (default
+ *        PB10/11 taken by M1 PWM): 2x INA3221 (0x40/0x41) current monitor.
+ *        FINAL I2C split: I2C1=MPU6050, I2C2=INA3221 x2, I2C3=VL53L1X x3.
+ *  v2.18  ESP32 link RE-ADDED (USART2 PD5/PD6 + TIM14 report timer).
+ *  v2.19  main.c module-enable switches (PEO_ENABLE_*) + boot banner.
+ *  v2.20  boot banner/dbg_f3 moved into SENSOR_HUB; PEO_ENABLE_* macros
+ *         moved to sensor_hub.h; main.c is now wiring-only.
  ******************************************************************************
  */
 #ifndef __PEO_PINMAP_H__
@@ -137,8 +153,7 @@
 /* ============================================================================
    3. DEBUG USART (USART1, PA9/PA10, AF7, 115200)
    ----------------------------------------------------------------------------
-   Connected to an EXTERNAL USB-TTL adapter (3V3 logic). Do not confuse
-   with the ESP32 link on USART2 (section 4).
+   Connected to an EXTERNAL USB-TTL adapter (3V3 logic).
    ============================================================================ */
 /** DEBUG USART **/
 #define PEO_PM_DBG_USART        USART1
@@ -153,31 +168,36 @@
 #define PEO_PM_DBG_RX_SRC       GPIO_PinSource10
 
 /* ============================================================================
-   4. ESP32-S3 HIGH-SPEED LINK (USART2, PD5/PD6, AF7, 4.2 Mbps, DMA)
+   3b. ESP32 LINK USART (USART2, PD5/PD6, AF7)  [v1.4 定案 / v2.7 移除 / 重新接入]
    ----------------------------------------------------------------------------
-   Frame protocol, DMA TX/RX recommended. At 1 kHz control rate the
-   payload is ~27 KB/s = 7% of the 4.2 Mbps line - large headroom.
+   F407 <-> ESP32-S3 全双工通信链路（一套 RX/TX）。
+     PD5 = USART2_TX -> ESP32 RX   （方向1：sensorhub 上报）
+     PD6 = USART2_RX <- ESP32 TX   （方向2：手柄 + 命令）
+   波特率见 PEO_PM_ESP_BAUDRATE；数据量小（50Hz x ~117B），中断收发足够，不用 DMA。
    ============================================================================ */
-/** ESP32 COMM USART **/
-#define PEO_PM_COMM_USART       USART2
-#define PEO_PM_COMM_BAUDRATE    (4200000U)
+/** ESP32 LINK USART **/
+#define PEO_PM_ESP_USART        USART2
+#define PEO_PM_ESP_BAUDRATE     (921600U)
 
-#define PEO_PM_COMM_AF          GPIO_AF_USART2
-#define PEO_PM_COMM_TX_PORT     GPIOD
-#define PEO_PM_COMM_TX_PIN      GPIO_Pin_5
-#define PEO_PM_COMM_TX_SRC      GPIO_PinSource5
-#define PEO_PM_COMM_RX_PORT     GPIOD
-#define PEO_PM_COMM_RX_PIN      GPIO_Pin_6
-#define PEO_PM_COMM_RX_SRC      GPIO_PinSource6
+#define PEO_PM_ESP_AF           GPIO_AF_USART2
+#define PEO_PM_ESP_TX_PORT      GPIOD
+#define PEO_PM_ESP_TX_PIN       GPIO_Pin_5
+#define PEO_PM_ESP_TX_SRC       GPIO_PinSource5
+#define PEO_PM_ESP_RX_PORT      GPIOD
+#define PEO_PM_ESP_RX_PIN       GPIO_Pin_6
+#define PEO_PM_ESP_RX_SRC       GPIO_PinSource6
+
+/** ESP32 link sensorhub 上报定时器（TIM14 Update 中断，频率 = SENSOR_RATE_REPORT_HZ） **/
+#define PEO_PM_ESP_REPORT_TIM   TIM14
 
 /* ============================================================================
-   5. QUADRATURE ENCODERS x4  (TIMx CH1 = A, CH2 = B)
+   4. QUADRATURE ENCODERS x4  (TIMx CH1 = A, CH2 = B)
    ----------------------------------------------------------------------------
    All four encoder timers are PURE (v1.8): encoder interface mode
    (TIM_EncoderMode_TI12, rising/rising) with ARR = 0xFFFF full 16-bit range.
    Read as 16-bit DELTA (int16_t)(now - last) which self-handles wraparound
    -> NO overflow interrupt on ANY encoder timer.
-   PWM was split onto its own timers in v1.8/v1.9 (TIM2/5/9/10/11, section 6).
+   PWM was split onto its own timers in v1.8/v1.9 (TIM2/5/9/10/11, section 5).
 
    M1 (TIM1, PE9/PE11)  - pure encoder, ARR = 0xFFFF
    M2 (TIM3, PA6/PA7)   - pure encoder, ARR = 0xFFFF
@@ -233,7 +253,7 @@
 #define PEO_PM_ENC4_CH2_SRC     GPIO_PinSource13
 
 /* ============================================================================
-   6. MOTOR PWM x8  ->  4x DRV8871 (IN1/IN2 per motor)
+   5. MOTOR PWM x8  ->  4x DRV8871 (IN1/IN2 per motor)
    ----------------------------------------------------------------------------
    v1.8/v1.9: PWM fully split onto its OWN timers (M1/M2/M3 = one timer each
    with 2 adjacent channels; M4 = two single-channel timers TIM10 + TIM11),
@@ -305,17 +325,17 @@
 #define PEO_PM_PWM7_8_AF        GPIO_AF_TIM10
 
 /* ============================================================================
-   7. DRV8871 MOTOR DRIVER MODULES (simplified, v1.8)
+   6. DRV8871 MOTOR DRIVER MODULES (simplified, v1.8)
    ----------------------------------------------------------------------------
    The DRV8871 modules in use expose ONLY: IN1, IN2 (PWM inputs) and
    OUT1, OUT2 (to motor), plus VM/GND. They do NOT bring out nSLEEP or
    nFAULT - so this design has no sleep control and no per-motor fault pin.
    Consequence: stall/over-current detection relies on the whole-vehicle
-   current monitor (ACS712, section 9) - it cannot localize which motor.
+   current monitor (ACS712, section 8) - it cannot localize which motor.
    ============================================================================ */
 
 /* ============================================================================
-   8. I2C BUS - I2C1 (PB6/PB7, AF4, 400 kHz) - MPU6050 DEDICATED (v2.3)
+   7. I2C BUS - I2C1 (PB6/PB7, AF4, 400 kHz) - MPU6050 DEDICATED (v2.3)
    ----------------------------------------------------------------------------
    DEDICATED to the MPU6050 alone (whole-vehicle vibration). The IMU may
    sample faster than the rangefinders/current monitor, so it gets a clean
@@ -339,15 +359,14 @@
 #define PEO_PM_MPU6050_ADDR     (0x68U)         /* whole-vehicle vibration */
 
 /* ============================================================================
-   8b. I2C BUS - I2C3 (PA8/PC9, AF4, 400 kHz) - VL53L1X x3 + INA3221 (v2.3)
+   7b. I2C BUS - I2C3 (PA8/PC9, AF4, 400 kHz) - VL53L1X x3 (INA3221 moved to I2C2)
    ----------------------------------------------------------------------------
-   Shared bus for the 3x VL53L1X rangefinders + the INA3221 current monitor:
+   Dedicated bus for the 3x VL53L1X rangefinders only:
      VL53L1X front    0x52
      VL53L1X left     0x54
      VL53L1X right    0x56
-     INA3221          0x40-0x43  (path B current monitor, low sample rate)
    Re-addressing (XSHUT sequential): all three VL53L1X ship at factory default 0x52.
-   XSHUT (section 10) is held LOW at power-up, then released one sensor at a
+   XSHUT (section 9) is held LOW at power-up, then released one sensor at a
    time to assign the address above before the next sensor is released.
    NOTES:
      - I2C3 alternate pins PH7/PH8 are NOT broken out on LQFP100, so PA8/PC9
@@ -367,13 +386,37 @@
 #define PEO_PM_VL53_I2C_AF       GPIO_AF_I2C3
 
 /** I2C3 slave addresses (7-bit) **/
-#define PEO_PM_VL53_FRONT_ADDR  (0x52U)          /* I2C3 */
-#define PEO_PM_VL53_LEFT_ADDR   (0x54U)          /* I2C3 */
-#define PEO_PM_VL53_RIGHT_ADDR  (0x56U)          /* I2C3 */
-#define PEO_PM_INA3221_ADDR     (0x40U)          /* I2C3, path B (low rate) */
+#define PEO_PM_VL53_DEFAULT_ADDR        (0x52U)
+#define PEO_PM_VL53_FRONT_ADDR          (0x52U)          /* I2C3 */
+#define PEO_PM_VL53_LEFT_ADDR           (0x54U)          /* I2C3 */
+#define PEO_PM_VL53_RIGHT_ADDR          (0x56U)          /* I2C3 */
+/* ============================================================================
+   7c. I2C BUS - I2C2 (PF1=SCL/PF0=SDA, AF4, 400 kHz) - INA3221
+   ----------------------------------------------------------------------------
+   Dedicated bus for the INA3221 current monitor (moved OFF I2C3 so the
+   rangefinder bus stays clean):
+     INA3221          0x40  (3-channel current/voltage monitor, low rate)
+   NOTE: I2C2 default pins PB10/PB11 are taken by M1 PWM (TIM2), so the
+         alternate pins PF1(SCL)/PF0(SDA) are used here.
+   ============================================================================ */
+
+/** I2C2 - INA3221 dedicated bus (PF1=SCL/PF0=SDA, AF4) **/
+#define PEO_PM_INA_I2C          I2C2
+#define PEO_PM_INA_I2C_CLKSPEED (400000U)
+#define PEO_PM_INA_SCL_PORT     GPIOF
+#define PEO_PM_INA_SCL_PIN      GPIO_Pin_1
+#define PEO_PM_INA_SCL_SRC      GPIO_PinSource1
+#define PEO_PM_INA_SDA_PORT     GPIOF
+#define PEO_PM_INA_SDA_PIN      GPIO_Pin_0
+#define PEO_PM_INA_SDA_SRC      GPIO_PinSource0
+#define PEO_PM_INA_I2C_AF       GPIO_AF_I2C2
+
+/** I2C2 slave addresses (7-bit) — two INA3221 share the bus **/
+#define PEO_PM_INA3221_ADDR_A   (0x40U)   /* 片A：A0=GND，测 M1/M2 */
+#define PEO_PM_INA3221_ADDR_B   (0x41U)   /* 片B：A0=VS，测 M3/M4 */
 
 /* ============================================================================
-   9. CURRENT SENSING - PATH A: ACS712 (ADC1_IN4, PA4, 12-bit)
+   8. CURRENT SENSING - PATH A: ACS712 (ADC1_IN4, PA4, 12-bit)
    ----------------------------------------------------------------------------
    ACS712-05B: Vout = 2.5 V + I * 0.185 V/A.
    With a 3.3 V ADC reference the readable range is (3.3-2.5)/0.185
@@ -392,54 +435,62 @@
 #define PEO_PM_ACS_MV_PER_A     (185U)          /* ACS712-05B sensitivity */
 
 /* ============================================================================
-   10. VL53L1X XSHUT x3  (restored v2.0)
+   9. VL53L1X XSHUT x3  (restored v2.0)
    ----------------------------------------------------------------------------
    GPIO outputs, active-low reset per sensor. Held LOW at power-up to keep all
    three at the factory default 0x52, then released one at a time so
-   each can be re-addressed (see section 8) before the next is released.
+   each can be re-addressed (see section 7) before the next is released.
      XSHUT front = PC0    XSHUT left = PC1    XSHUT right = PC2
    Push-pull output, no pull-up needed (VL53L1X has an internal XSHUT pull-up).
    ============================================================================ */
 
 /** VL53L1X XSHUT (active-low; low = held in reset) **/
-#define PEO_PM_VL53_FRONT_XSHUT_PORT   GPIOC
-#define PEO_PM_VL53_FRONT_XSHUT_PIN    GPIO_Pin_0
-#define PEO_PM_VL53_LEFT_XSHUT_PORT    GPIOC
-#define PEO_PM_VL53_LEFT_XSHUT_PIN     GPIO_Pin_1
-#define PEO_PM_VL53_RIGHT_XSHUT_PORT   GPIOC
-#define PEO_PM_VL53_RIGHT_XSHUT_PIN    GPIO_Pin_2
+#define PEO_PM_VL53_XSHUT_PORT              GPIOC
+#define PEO_PM_VL53_FRONT_XSHUT_PIN         GPIO_Pin_0
+#define PEO_PM_VL53_LEFT_XSHUT_PIN          GPIO_Pin_1
+#define PEO_PM_VL53_RIGHT_XSHUT_PIN         GPIO_Pin_2
 
 /* ============================================================================
-   10b. VL53L1X INT x3  (GPIO1 data-ready interrupt outputs)   [added v2.5]
+   9b. VL53L1X INT x3 + MPU6050 INT  (data-ready interrupt outputs)  [v2.6]
    ----------------------------------------------------------------------------
-   The VL53L1X GPIO1 pin asserts when a ranging result is ready (polarity
-   configurable via VL53L1X_SetInterruptPolarity; default active-high). Each
-   sensor's INT is wired to a dedicated MCU input + EXTI line so the host can
-   read results interrupt-driven instead of polling CheckForDataReady().
-     INT front = PC3 (EXTI3)   INT left = PC4 (EXTI4)   INT right = PC8 (EXTI9_5)
-   MCU side: floating input (VL53L1X drives push-pull); EXTI rising edge.
-   NOTE: EXTI5-9 share one IRQ vector (EXTI9_5_IRQn) - the right sensor's
-   handler must check the EXTI8 pending bit.
+   VL53L1X GPIO1 asserts when a ranging result is ready (active-high default).
+   MPU6050 INT asserts on data-ready (or FIFO/motion, per MPU6050_Config).
+   Each sensor INT is wired to a dedicated MCU input + EXTI line so the host
+   reads results interrupt-driven instead of polling.
+     VL53L1X INT front = PE0 (EXTI0)   left = PE1 (EXTI1)   right = PE2 (EXTI2)
+     MPU6050 INT      = PE3 (EXTI3)
+   MCU side: floating input (sensor drives push-pull); EXTI rising edge.
+   All four on INDEPENDENT EXTI lines - no shared EXTI9_5 vector.
    ============================================================================ */
 
 /** VL53L1X INT (GPIO1, active-high data-ready) **/
-#define PEO_PM_VL53_FRONT_INT_PORT    GPIOC
-#define PEO_PM_VL53_FRONT_INT_PIN     GPIO_Pin_3
-#define PEO_PM_VL53_LEFT_INT_PORT     GPIOC
-#define PEO_PM_VL53_LEFT_INT_PIN      GPIO_Pin_4
-#define PEO_PM_VL53_RIGHT_INT_PORT    GPIOC
-#define PEO_PM_VL53_RIGHT_INT_PIN     GPIO_Pin_8
+#define PEO_PM_VL53_INT_PORT                GPIOE
+#define PEO_PM_VL53_FRONT_INT_PIN           GPIO_Pin_0
+#define PEO_PM_VL53_LEFT_INT_PIN            GPIO_Pin_1
+#define PEO_PM_VL53_RIGHT_INT_PIN           GPIO_Pin_2
+
+/** MPU6050 INT (data-ready / FIFO / motion, per config) **/
+#define PEO_PM_MPU_INT_PORT           GPIOE
+#define PEO_PM_MPU_INT_PIN            GPIO_Pin_3
 
 /** EXTI lines / pin sources (RM0090 sec.10.2) **/
-#define PEO_PM_VL53_FRONT_INT_EXTI_LINE   EXTI_Line3
-#define PEO_PM_VL53_FRONT_INT_EXTI_SRC    EXTI_PinSource3
-#define PEO_PM_VL53_LEFT_INT_EXTI_LINE    EXTI_Line4
-#define PEO_PM_VL53_LEFT_INT_EXTI_SRC     EXTI_PinSource4
-#define PEO_PM_VL53_RIGHT_INT_EXTI_LINE   EXTI_Line8
-#define PEO_PM_VL53_RIGHT_INT_EXTI_SRC    EXTI_PinSource8
+#define PEO_PM_VL53_FRONT_INT_EXTI_LINE     EXTI_Line0
+#define PEO_PM_VL53_FRONT_INT_EXTI_PSRC     EXTI_PortSourceGPIOE
+#define PEO_PM_VL53_FRONT_INT_EXTI_SRC      EXTI_PinSource0
+
+#define PEO_PM_VL53_LEFT_INT_EXTI_LINE      EXTI_Line1
+#define PEO_PM_VL53_LEFT_INT_EXTI_PSRC      EXTI_PortSourceGPIOE
+#define PEO_PM_VL53_LEFT_INT_EXTI_SRC       EXTI_PinSource1
+
+#define PEO_PM_VL53_RIGHT_INT_EXTI_LINE     EXTI_Line2
+#define PEO_PM_VL53_RIGHT_INT_EXTI_PSRC     EXTI_PortSourceGPIOE
+#define PEO_PM_VL53_RIGHT_INT_EXTI_SRC      EXTI_PinSource2
+
+#define PEO_PM_MPU_INT_EXTI_LINE            EXTI_Line3
+#define PEO_PM_MPU_INT_EXTI_SRC             EXTI_PinSource3
 
 /* ============================================================================
-   11. TFT DISPLAY (board socket J4, 8x1 female, SPI2)  [restored v1.9]
+   10. TFT DISPLAY (board socket J4, 8x1 female, SPI2)  [restored v1.9]
    ----------------------------------------------------------------------------
    J4 pinout: 1=3V3  2=GND  3=SDI/PB15  4=SCL/PB13  5=CS/PB12
               6=SDO/PB14  7=D/C/PC5  8=BLK/PB1      (NO RST pin!)
@@ -471,7 +522,7 @@
 #define PEO_PM_TFT_RST_PIN      GPIO_Pin_12
 
 /* ============================================================================
-   12. BOARD-RESERVED PINS - NEVER INITIALIZE, NEVER TOUCH
+   11. BOARD-RESERVED PINS - NEVER INITIALIZE, NEVER TOUCH
    ----------------------------------------------------------------------------
    K1 button     PA0                     (active high)
    LED D2        PA1                     (sink)
@@ -484,8 +535,13 @@
    Not broken out: PB2 (BOOT1), PC14, PC15, PH0, PH1
    ============================================================================ */
 
+/* On-board LED D2 (PA1, sink: low = ON) - BUILTIN_LED component */
+#define PEO_PM_LED_PORT         GPIOA
+#define PEO_PM_LED_PIN          GPIO_Pin_1
+#define PEO_PM_LED_ON_LEVEL     Bit_RESET   /* sink：低电平点亮 */
+
 /* ============================================================================
-   13. INTERRUPT HANDLER NAMES (StdPeriph, startup_stm32f40xx.s)
+   12. INTERRUPT HANDLER NAMES (StdPeriph, startup_stm32f40xx.s)
    ----------------------------------------------------------------------------
    ALL four encoders are pure (ARR = 0xFFFF), read as 16-bit DELTA - no
    encoder timer needs an Update interrupt. The PWM timers (TIM2/5/9/10/11)
@@ -494,28 +550,18 @@
    ============================================================================ */
 
 /* ============================================================================
-   15. DMA STREAM / CHANNEL MAP  (RM0090 Table 43 - DMA1 request mapping)
+   13. DMA STREAM / CHANNEL MAP  (RM0090 Table 43 - DMA1 request mapping)
    ----------------------------------------------------------------------------
    Hardware routing facts - they live HERE (not in a component header) so
    every component can see them through the PEO_PINMAP.H include chain.
    ----------------------------------------------------------------------------
    | Peripheral | Direction | Stream / Channel | IRQ channel (see nvic.h) |
    |------------|-----------|------------------|--------------------------|
-   | USART2     | RX        | DMA1_Stream5 Ch4 | DMA1_Stream5_IRQn        |
-   | USART2     | TX        | DMA1_Stream6 Ch4 | DMA1_Stream6_IRQn        |
    | SPI2 (TFT) | RX (opt.) | DMA1_Stream3 Ch0 | DMA1_Stream3_IRQn        |
    | SPI2 (TFT) | TX (opt.) | DMA1_Stream4 Ch0 | DMA1_Stream4_IRQn        |
    | ADC1 (opt.)| RX        | DMA2_Stream0 Ch0 | DMA2_Stream0_IRQn        |
    ----------------------------------------------------------------------------
-   Recommended USART2 setup: RX CIRCULAR mode (fixed ring buffer), IDLE-line
-   interrupt marks frame boundaries; TX normal mode on demand.
    ============================================================================ */
-
-/** ESP32 link DMA (USART2) **/
-#define PEO_DMA_COMM_RX_STREAM  DMA1_Stream5
-#define PEO_DMA_COMM_RX_CH      DMA_Channel_4
-#define PEO_DMA_COMM_TX_STREAM  DMA1_Stream6
-#define PEO_DMA_COMM_TX_CH      DMA_Channel_4
 
 /** TFT SPI2 DMA (optional; zero if bit-banged SPI) **/
 #define PEO_DMA_TFT_RX_STREAM   DMA1_Stream3
@@ -527,15 +573,22 @@
 #define PEO_DMA_ADC_STREAM      DMA2_Stream0
 #define PEO_DMA_ADC_CH          DMA_Channel_0
 
+/** ESP32 link USART2 DMA (RM0090 Table 43 - DMA1 request mapping) **/
+#define PEO_DMA_ESP_RX_STREAM   DMA1_Stream5
+#define PEO_DMA_ESP_RX_CH       DMA_Channel_4
+#define PEO_DMA_ESP_TX_STREAM   DMA1_Stream6
+#define PEO_DMA_ESP_TX_CH       DMA_Channel_4
+
 /* ============================================================================
-   16. EXTI LINES
+   14. EXTI LINES
    ----------------------------------------------------------------------------
-   v2.5: VL53L1X INT x3 (data-ready) -> EXTI3 (PC3), EXTI4 (PC4), EXTI8 (PC8).
-   Pin/source macros live in section 10b. EXTI5-9 share EXTI9_5_IRQn.
+   v2.6: INT x4 -> VL53L1X front/left/right = EXTI0/1/2 (PE0/1/2); MPU6050 =
+   EXTI3 (PE3). All four on INDEPENDENT EXTI lines (EXTI0-3 each have their
+   own IRQ vector). Pin/source macros live in section 9b.
    ============================================================================ */
 
 /* ============================================================================
-   17. POWER-UP AND USAGE CHECKLIST
+   15. POWER-UP AND USAGE CHECKLIST
    ----------------------------------------------------------------------------
    [ ] HSE_VALUE set to 8000000 (StdPeriph default is 25 MHz - wrong!)
    [ ] No SD card inserted (PC8-12/PD2 no longer used, but keep socket empty)

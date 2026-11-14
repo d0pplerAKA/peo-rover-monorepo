@@ -17,8 +17,8 @@
  */
 void RCC_Clock_Init(void)
 {
-    RCC_AHB1PeriphClockCmd(PEO_RCC_AHB1_EN, ENABLE);   /* GPIOA-E, DMA1   */
-    RCC_APB1PeriphClockCmd(PEO_RCC_APB1_EN, ENABLE);   /* TIM2/3/4/5, USART2, I2C1/3, SPI2 */
+    RCC_AHB1PeriphClockCmd(PEO_RCC_AHB1_EN, ENABLE);   /* GPIOA-E         */
+    RCC_APB1PeriphClockCmd(PEO_RCC_APB1_EN, ENABLE);   /* TIM2/3/4/5, I2C1/3, SPI2 */
     RCC_APB2PeriphClockCmd(PEO_RCC_APB2_EN, ENABLE);   /* TIM1/8/9/10/11, USART1, ADC1, SYSCFG */
 
     /* ADC clock: PCLK2 / 6 = 14 MHz.
@@ -26,12 +26,14 @@ void RCC_Clock_Init(void)
        via ADC_CommonInit() with ADC_Prescaler_Div6 - NOT via RCC (the
        F1-style RCC_ADCCLKConfig does not exist in this library).
        Datasheet: fADC <= 36 MHz, so /2 (42 MHz) would be out of spec. */
-    {
-        ADC_CommonInitTypeDef adc_common;
-        adc_common.ADC_Mode             = ADC_Mode_Independent;
-        adc_common.ADC_Prescaler        = PEO_RCC_ADC_PRESCALER;
-        adc_common.ADC_DMAAccessMode    = ADC_DMAAccessMode_Disabled;
-        adc_common.ADC_TwoSamplingDelay = ADC_TwoSamplingDelay_5Cycles;
-        ADC_CommonInit(&adc_common);
-    }
+    /*
+        {
+            ADC_CommonInitTypeDef adc_common;
+            adc_common.ADC_Mode             = ADC_Mode_Independent;
+            adc_common.ADC_Prescaler        = PEO_RCC_ADC_PRESCALER;
+            adc_common.ADC_DMAAccessMode    = ADC_DMAAccessMode_Disabled;
+            adc_common.ADC_TwoSamplingDelay = ADC_TwoSamplingDelay_5Cycles;
+            ADC_CommonInit(&adc_common);
+        }
+    */
 }
