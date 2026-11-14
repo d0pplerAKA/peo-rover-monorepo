@@ -42,9 +42,6 @@ int _MLPrintLog(int priority, const char *tag, const char *fmt, ...);
 void    MPU6050_Init(void);                                     /* I2C + DMP 配置（不启动） */
 uint8_t MPU6050_DMP_Init(void);                                 /* 0 = 配置成功             */
 uint8_t MPU6050_Start(void);                                    /* 0 = 启动成功，开始触发中断 */
-uint8_t MPU6050_DataReady(void);                                /* 1 = 有新姿态   */
-void    MPU6050_GetQuaternion(float *qw, float *qx, float *qy, float *qz);
-void    MPU6050_GetAccel(float *ax, float *ay, float *az);      /* 单位 g        */
 uint8_t run_self_test(void);                                   /* 自检 + 偏置校准 */
 
 #endif /* __MPU6050_H__ */

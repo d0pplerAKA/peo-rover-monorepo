@@ -20,15 +20,22 @@ void NVIC_InitAll(void)
     /* Priority group FIRST - must precede every NVIC_Init() */
     NVIC_PriorityGroupConfig(PEO_NVIC_PRIO_GROUP);
 
-    /* VL53L1X data-ready INT (EXTI0/1/2) + MPU6050 data-ready INT (EXTI3) */
-    PEO_NVIC_Enable(PEO_NVIC_VL53_FRONT_INT_IRQ,    2,  0);
-    PEO_NVIC_Enable(PEO_NVIC_VL53_LEFT_INT_IRQ,     2,  1);
-    PEO_NVIC_Enable(PEO_NVIC_VL53_RIGHT_INT_IRQ,    2,  2);
-    PEO_NVIC_Enable(PEO_NVIC_MPU_INT_IRQ,           1,  0);
-    PEO_NVIC_Enable(PEO_NVIC_CTRL_IRQ,              3,  0);   /* 1 kHz control loop (TIM6) */
-    PEO_NVIC_Enable(PEO_NVIC_INA_IRQ,               3,  1);   /* INA3221 poll (TIM7) */
-    PEO_NVIC_Enable(PEO_NVIC_ESP_IRQ,               3,  2);   /* ESP32 link RX (USART2) */
-    PEO_NVIC_Enable(PEO_NVIC_ESP_TX_IRQ,            3,  3);   /* sensorhub report (TIM14) */
+    /* 1 kHz control loop (TIM6) - HIGHEST: it must not be preempted by the
+       sensor I2C reads (MPU6050 DMP FIFO / VL53L1X result), otherwise the
+       loop sample period jitters and the fixed-1 ms speed scaling breaks. */
+    PEO_NVIC_Enable(PEO_NVIC_CTRL_IRQ,              1,  0);
+
+    /* Sensor data-ready INTs: MPU6050 (EXTI3) + VL53L1X (EXTI0/1/2).
+       They do blocking I2C reads, so they sit BELOW the control loop. */
+    PEO_NVIC_Enable(PEO_NVIC_MPU_INT_IRQ,           2,  0);
+    PEO_NVIC_Enable(PEO_NVIC_VL53_FRONT_INT_IRQ,    2,  1);
+    PEO_NVIC_Enable(PEO_NVIC_VL53_LEFT_INT_IRQ,     2,  2);
+    PEO_NVIC_Enable(PEO_NVIC_VL53_RIGHT_INT_IRQ,    2,  3);
+
+    /* Lowest: INA3221 poll (TIM7), ESP32 link RX (USART2), report (TIM14). */
+    PEO_NVIC_Enable(PEO_NVIC_INA_IRQ,               3,  0);
+    PEO_NVIC_Enable(PEO_NVIC_ESP_IRQ,               3,  1);
+    PEO_NVIC_Enable(PEO_NVIC_ESP_TX_IRQ,            3,  2);
 
     /* Optional (uncomment when the driver lands):
        PEO_NVIC_Enable(PEO_NVIC_DBG_IRQ, PEO_NVIC_PRIO_DBG);   // debug console RX

@@ -32,13 +32,16 @@
    1. NVIC PRIORITY SCHEME
    ----------------------------------------------------------------------------
    Group 2: 2 bits PREEMPTION priority (0..3) + 2 bits sub-priority (0..3).
-   Sensor data-ready INTs outrank optional debug; the three VL53L1X INTs
-   share one preemption level and are ordered by sub-priority.
+   The 1 kHz control loop (TIM6) is the HIGHEST priority: it must not be
+   preempted by the sensor I2C reads, otherwise the fixed-1 ms speed scaling
+   breaks. Sensor data-ready INTs sit one level below it.
    ----------------------------------------------------------------------------
    | Preempt (sub) | Function                                    |
    |---------------|---------------------------------------------|
-   | 1 (0)         | MPU6050 data-ready (EXTI3)                  |
-   | 2 (0/1/2)     | VL53L1X data-ready x3 (EXTI0/1/2)           |
+   | 1 (0)         | 1 kHz control loop (TIM6)                  |
+   | 2 (0)         | MPU6050 data-ready (EXTI3)                 |
+   | 2 (1/2/3)     | VL53L1X data-ready x3 (EXTI0/1/2)          |
+   | 3 (0/1/2)     | INA3221 poll + ESP32 RX + report (TIM14)   |
    | optional      | USART1 debug RX (commented in nvic.c)      |
    ============================================================================ */
 #define PEO_NVIC_PRIO_GROUP         NVIC_PriorityGroup_2
@@ -49,12 +52,14 @@
    ----------------------------------------------------------------------------
    | Function               | IRQ channel macro       | Handler (startup .s)    | Preempt |
    |------------------------|-------------------------|-------------------------|---------|
-   | VL53L1X front ready    | EXTI0_IRQn              | EXTI0_IRQHandler        | 2 (0)   |
-   | VL53L1X left ready     | EXTI1_IRQn              | EXTI1_IRQHandler        | 2 (1)   |
-   | VL53L1X right ready    | EXTI2_IRQn              | EXTI2_IRQHandler        | 2 (2)   |
-   | MPU6050 data-ready     | EXTI3_IRQn              | EXTI3_IRQHandler        | 1 (0)   |
-   | 1 kHz control loop     | TIM6_DAC_IRQn           | TIM6_DAC_IRQHandler     | 3 (0)   |
-   | INA3221 电流/电压轮询  | TIM7_IRQn               | TIM7_IRQHandler         | 3 (1)   |
+   | 1 kHz control loop     | TIM6_DAC_IRQn           | TIM6_DAC_IRQHandler     | 1 (0)   |
+   | MPU6050 data-ready     | EXTI3_IRQn              | EXTI3_IRQHandler        | 2 (0)   |
+   | VL53L1X front ready    | EXTI0_IRQn              | EXTI0_IRQHandler        | 2 (1)   |
+   | VL53L1X left ready     | EXTI1_IRQn              | EXTI1_IRQHandler        | 2 (2)   |
+   | VL53L1X right ready    | EXTI2_IRQn              | EXTI2_IRQHandler        | 2 (3)   |
+   | INA3221 电流/电压轮询  | TIM7_IRQn               | TIM7_IRQHandler         | 3 (0)   |
+   | ESP32 link RX          | USART2_IRQn             | USART2_IRQHandler       | 3 (1)   |
+   | sensorhub report       | TIM8_TRG_COM_TIM14_IRQn | TIM8_TRG_COM_TIM14_IRQHandler | 3 (2) |
    | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | -       |
    ----------------------------------------------------------------------------
    NO interrupt: all 4 encoders are pure (16-bit delta), all PWM timers

@@ -19,10 +19,9 @@
 #include "include/mpu6050.h"
 #include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
 
-/* ---- DMP 输出（EXTI3 中断上下文写入，应用层读取） ---- */
+/* ---- DMP 输出（EXTI3 中断上下文写入，推送进 sensor_hub） ---- */
 static volatile float   g_qw, g_qx, g_qy, g_qz;   /* 姿态四元数 (w,x,y,z) */
 static volatile float   g_ax, g_ay, g_az;         /* 原始加速度（单位 g）*/
-static volatile uint8_t g_data_ready = 0;
 
 /* MPU 安装矩阵：单位阵 = 芯片轴与车体轴对齐；若斜装需改成旋转矩阵。 */
 static const signed char gyro_orientation[9] = { 1, 0, 0,
@@ -128,8 +127,6 @@ static void MPU6050_FIFO_Ready_Cb(void)
         g_ay = (float)accel[1] / MPU6050_ACCEL_SENS;
         g_az = (float)accel[2] / MPU6050_ACCEL_SENS;
 
-        g_data_ready = 1;
-
         /* 推送到 sensor hub（按 MPU6050_SAMPLE_HZ 频率自动更新） */
         SENSOR_PushMpu(g_qw, g_qx, g_qy, g_qz, g_ax, g_ay, g_az);
     }
@@ -197,36 +194,6 @@ uint8_t MPU6050_Start(void)
     if (mpu_set_dmp_state(1))
         return 1;
     return 0;
-}
-
-/**
- * @brief  自上次 MPU6050_GetQuaternion 之后是否有新数据。
- */
-uint8_t MPU6050_DataReady(void)
-{
-    return g_data_ready;
-}
-
-/**
- * @brief  读取最新四元数（w, x, y, z），并清掉 data-ready 标志。
- */
-void MPU6050_GetQuaternion(float *qw, float *qx, float *qy, float *qz)
-{
-    *qw = g_qw;
-    *qx = g_qx;
-    *qy = g_qy;
-    *qz = g_qz;
-    g_data_ready = 0;
-}
-
-/**
- * @brief  读取最新原始加速度（单位 g）。
- */
-void MPU6050_GetAccel(float *ax, float *ay, float *az)
-{
-    *ax = g_ax;
-    *ay = g_ay;
-    *az = g_az;
 }
 
 /**
