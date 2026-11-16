@@ -11,7 +11,7 @@
  *   方向1（F407 -> ESP32，~50Hz）：PAYLOAD = SensorData_t 112B
  *     -> RX 任务逐字节解析，CRC 校验后最新快照入 esp_link_sensor_queue。
  *   方向2（ESP32 -> F407）：PAYLOAD = 命令帧（cmd_id + param，每帧一条）
- *     -> 生产者（cmd_parser / c3_map / macro_engine）经封装接口入 esp_link_cmd_queue，
+ *     -> 生产者（cmd_parser）经封装接口入 esp_link_cmd_queue，
  *        TX 任务打包发送，每帧后停顿 >= 1 字节时间触发 F407 USART2 IDLE 组帧。
  *
  * CRC16-CCITT：多项式 0x1021，初始 0xFFFF，低字节在前。
@@ -47,6 +47,8 @@
 #define ESP_CMD_MOTOR_CLOSED    0x05    /* motor(1) + speed_d100(4, int32 LE) */
 #define ESP_CMD_STOP_ALL        0x06
 #define ESP_CMD_ODOMETER_RESET  0x07
+#define ESP_CMD_SYS_RESET       0x08    /* 全车软复位：F407 NVIC_SystemReset()（2026-11-16 定案，
+                                          PROTOCOL §1.3；上位机 SDK 检测 fresh 恢复沿重发 PID/CAM_RES） */
 
 #define ESP_CMD_PARAM_MAX       8
 
@@ -112,7 +114,7 @@ void esp_link_queues_init(void);
 /* ============================================================================
    队列句柄（app_main 统一建队；命令生产者使用发送封装，快照消费者 peek）
    ============================================================================ */
-extern QueueHandle_t esp_link_cmd_queue;      /* 入：命令帧（cmd_parser/c3_map/macro_engine 经封装生产） */
+extern QueueHandle_t esp_link_cmd_queue;      /* 入：命令帧（cmd_parser 经封装生产） */
 extern QueueHandle_t esp_link_sensor_queue;   /* 出：esp_link_snapshot_t（1 深 overwrite；所有消费者 peek） */
 
 /** Safety barrier: STOP is latched independently of the ordinary command queue.
@@ -130,7 +132,7 @@ bool esp_link_commands_inhibited(void);
 uint32_t esp_link_command_generation(void);
 bool esp_link_resume_commands(uint32_t observed_generation);
 /** True only after all commands accepted in this still-active generation have
- * completed UART TX (not merely been dequeued); used for normal macro completion. */
+ * completed UART TX (not merely been dequeued). */
 bool esp_link_commands_drained(uint32_t generation);
 
 /** Enqueue a command. Normal commands may return false (busy/inhibited/invalid).

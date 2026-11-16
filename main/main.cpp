@@ -5,18 +5,17 @@
  * Entry assembles queues/tasks, sequences startup and reports hardware memory.
  * Component tasks own their hardware initialization and exchange queue snapshots.
  *
- * Xbox 手柄 BLE 已移至 ESP32-C3（用户决策 2026-11-14：BLE 与 WiFi AP 同核共存
- * 不稳定）。本机经 c3_link 组件接收 C3 的 UART 状态帧（PROTOCOL.md §1.4），
- * 映射逻辑在 c3_map_task。原 xbox_service / xbox_controller（BLE）组件已移除。
+ * 2026-11-15 系统收敛（用户拍板）：Xbox 手柄 BLE 桥（C3 + c3_link + c3_map）与
+ * 离线宏引擎（macro_engine）已废弃删除；组员自动化 = 上位机原生 Python 脚本
+ * （PROTOCOL §2.4 组员编程模型），本机只做「传感器上报 + 命令透传 + 视频推流」。
  *
  * Core affinity is a scheduling policy:
- *   core 0（协议与射频）：esp_rx / esp_tx / c3_link_rx / esp_net
- *   core 1（应用逻辑；AUTOSTART_ARDUINO 关闭，无 Arduino loopTask）：macro / c3_map /
+ *   core 0（协议与射频）：esp_rx / esp_tx / esp_net
+ *   core 1（应用逻辑；AUTOSTART_ARDUINO 关闭，无 Arduino loopTask）：
  *                                                    telemetry / cmd_parser / camera
  *
  * 队列初始化：全部队列由 xxx_queues_init() 在任务创建之前统一创建——
- * 跨核绑定时优先级不保证时序（曾发生 core1 的 c3_map 抢在 core0 的
- * c3_link_rx 建队之前 peek NULL 触发 assert）。
+ * 跨核绑定时优先级不保证时序。
  */
 
 #include <Arduino.h>
@@ -25,12 +24,11 @@
 #include <esp_psram.h>
 
 #include "esp_link.h"
-#include "c3_link.h"
 #include "esp_net.h"
-#include "macro_engine.h"
 #include "telemetry.h"
 #include "cmd_parser.h"
 #include "camera_service.h"
+#include "ws2812_led.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -66,20 +64,17 @@ extern "C" void app_main()
         ESP_LOGW(TAG, "Expected 8 MiB PSRAM; verify module marking and startup PSRAM test");
 
     esp_link_queues_init();
-    c3_link_queues_init();
     esp_net_queues_init();
-    macro_queues_init();
     const bool camera_ready = camera_queues_init();
+    ws2812_queues_init();
     esp_link_request_stop(); // Rebooted bridge must not leave old motor targets active.
 
     start_task(esp_link_rx_task, "esp_rx", 4096, 6, 0, true);
     start_task(esp_link_tx_task, "esp_tx", 3072, 5, 0, true);
-    start_task(c3_link_rx_task, "c3_rx", 4096, 5, 0, true);
     start_task(esp_net_task, "esp_net", 10240, 5, 0, true);
-    start_task(macro_task, "macro", 6144, 4, 1, false);
-    start_task(c3_map_task, "c3_map", 4096, 4, 1, true);
     start_task(telemetry_task, "telemetry", 6144, 4, 1, false);
     start_task(cmd_parser_task, "cmd_parser", 6144, 4, 1, false);
+    start_task(ws2812_task, "ws2812", 3072, 2, 1, false);   /* 灯珠维护任务固定 core1 */
     if (camera_ready)
         start_task(camera_task, "camera", 8192, 3, 1, false);
     else

@@ -1,3 +1,7 @@
+> **PEO Rover 本地组件说明（2026-11-16）**：本目录是工程直接编译的 camera 副本，包含本地 DMA/缓存同步及 JPEG 缓冲容量改动。下文为通用驱动资料，安装示例不代表本工程需要再引入另一份相机组件。实际引脚、24 MHz 外部 XCLK、三帧 PSRAM 缓冲、分辨率、视频门控和测试方式见 [项目 README](../../README.md)。
+>
+> 本地帧缓冲按 DMA/缓存行对齐并独占完整缓存行；DMA 启动前 M2C 失效，CPU 读取 DMA 数据前同步，CPU 转换输出用 C2M 写回。`camera_config_t.jpeg_buffer_size` 可指定 JPEG 容量。当前工程启用 `CONFIG_CAMERA_PSRAM_DMA=y`；硬件工作情况仍需实机验证。
+
 # ESP32 Camera Driver
 
 [![Build examples](https://github.com/espressif/esp32-camera/actions/workflows/build.yml/badge.svg)](https://github.com/espressif/esp32-camera/actions/workflows/build.yml) [![Component Registry](https://components.espressif.com/components/espressif/esp32-camera/badge.svg)](https://components.espressif.com/components/espressif/esp32-camera)

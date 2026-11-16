@@ -9,8 +9,8 @@
  * 解析 {"cmd": 名字, 参数...} -> 编码 cmd_id+param -> esp_link 命令队列；
  * 成功提交后回发 ACK {"ack":名字,"status":0} 到 esp_net_ack_queue，由网络任务优先广播。
  *
- * 宏（{"type":"macro"}）已支持 act/wait/goto：解析校验后编译为 START 消息移交宏引擎。
- * STOP_ALL/PING/macro_abort 豁免本地陈旧代次过滤；macro_abort 直接锁 STOP。
+ * 本地命令：PING、CAM_RES、VIDEO_ON/OFF、WS2812；无本地宏引擎。
+ * STOP_ALL/PING 豁免本地陈旧代次过滤。
  */
 
 void cmd_parser_task(void *arg);

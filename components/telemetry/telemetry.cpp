@@ -1,20 +1,19 @@
 /**
  * @file    telemetry.cpp
- * @brief   PEO Rover - 遥测合并任务：SensorData + Gamepad -> JSON -> 广播
+ * @brief   PEO Rover - 遥测合并任务：SensorData -> JSON -> 广播
  *
- * JSON 结构见 PROTOCOL.md §2.1（传感器流）+ gamepad 字段：
+ * JSON 结构见 PROTOCOL.md §2.1（传感器流）：
  *   {"type":"sensor","tick":..,"dist":{..},"imu":{..},"wheels":{..},
- *    "power":{..},"cmd_ack":{..},"gamepad":{"connected":..,"battery":..,
- *    "joy_l":[..],"joy_r":[..],"triggers":[..],"buttons":["A",..]}}
+ *    "power":{..},"cmd_ack":{..},"sys":{..}}
  *
- * 每轮延时 20ms 后非破坏性 peek 最新传感器/手柄/宏快照，名义采样频率 50Hz。
+ * 2026-11-15：gamepad（C3 手柄桥）与 macro（宏引擎）字段已随组件废弃删除。
+ *
+ * 每轮延时 40ms 后非破坏性 peek 最新传感器快照，名义采样频率 25Hz。
  */
 
 #include "telemetry.h"
 #include "esp_link.h"
-#include "c3_link.h"
 #include "esp_net.h"
-#include "macro_engine.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -27,25 +26,6 @@
 #include <stdlib.h>
 
 static const char *TAG = "telemetry";
-
-/** 按键位图 -> 名字数组（JSON buttons 字段；命名对齐 PROTOCOL.md §2.1） */
-static const struct { uint16_t bit; const char *name; } k_btn_names[] = {
-    { XB_BTN_A,          "A" },
-    { XB_BTN_B,          "B" },
-    { XB_BTN_X,          "X" },
-    { XB_BTN_Y,          "Y" },
-    { XB_BTN_LB,         "LB" },
-    { XB_BTN_RB,         "RB" },
-    { XB_BTN_START,      "MENU" },
-    { XB_BTN_SELECT,     "VIEW" },
-    { XB_BTN_SHARE,      "SHARE" },
-    { XB_BTN_LS,         "LS" },
-    { XB_BTN_RS,         "RS" },
-    { XB_BTN_DPAD_UP,    "DPAD_UP" },
-    { XB_BTN_DPAD_DOWN,  "DPAD_DOWN" },
-    { XB_BTN_DPAD_LEFT,  "DPAD_LEFT" },
-    { XB_BTN_DPAD_RIGHT, "DPAD_RIGHT" },
-};
 
 /* cJSON does not free an item when AddItem fails. Keep ownership explicit. */
 static bool add_item(cJSON *parent, const char *name, cJSON *item)
@@ -100,8 +80,7 @@ static bool add_sys(cJSON *root)
 }
 
 /** Return a complete owned JSON string, or NULL; never publish an OOM-truncated object. */
-static char *build_json(const esp_link_sensor_t *s, const xbox_state_t *xb, bool have_xb,
-                        bool link_stale)
+static char *build_json(const esp_link_sensor_t *s, bool link_stale)
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) return NULL;
@@ -139,35 +118,6 @@ static char *build_json(const esp_link_sensor_t *s, const xbox_state_t *xb, bool
             !cJSON_AddNumberToObject(ack, "status", s->last_cmd_status)) return false;
 
         if (!add_sys(root)) return false;
-
-        macro_progress_t mp;
-        if (xQueuePeek(macro_progress_queue, &mp, 0) == pdTRUE && mp.state != MACRO_STATE_IDLE)
-        {
-            cJSON *m = cJSON_AddObjectToObject(root, "macro");
-            const char *state = mp.state == MACRO_STATE_DONE ? "done" :
-                                mp.state == MACRO_STATE_ABORTED ? "aborted" : "running";
-            if (!m || !cJSON_AddNumberToObject(m, "id", mp.id) ||
-                !cJSON_AddNumberToObject(m, "step", mp.step) ||
-                !cJSON_AddNumberToObject(m, "total", mp.total) ||
-                !cJSON_AddStringToObject(m, "state", state)) return false;
-        }
-        if (have_xb && xb)
-        {
-            cJSON *gp = cJSON_AddObjectToObject(root, "gamepad");
-            double jl[] = {(double)xb->joy_lx, (double)xb->joy_ly};
-            double jr[] = {(double)xb->joy_rx, (double)xb->joy_ry};
-            double tg[] = {(double)xb->trigger_lt, (double)xb->trigger_rt};
-            if (!gp || !cJSON_AddBoolToObject(gp, "connected", xb->connected != 0) ||
-                !cJSON_AddNumberToObject(gp, "battery", xb->battery) ||
-                !add_item(gp, "joy_l", cJSON_CreateDoubleArray(jl, 2)) ||
-                !add_item(gp, "joy_r", cJSON_CreateDoubleArray(jr, 2)) ||
-                !add_item(gp, "triggers", cJSON_CreateDoubleArray(tg, 2))) return false;
-            cJSON *btns = cJSON_AddArrayToObject(gp, "buttons");
-            if (!btns) return false;
-            for (unsigned i = 0; i < sizeof(k_btn_names) / sizeof(k_btn_names[0]); ++i)
-                if ((xb->buttons & k_btn_names[i].bit) &&
-                    !add_item(btns, NULL, cJSON_CreateString(k_btn_names[i].name))) return false;
-        }
         return true;
     }();
     char *out = ok ? cJSON_PrintUnformatted(root) : NULL;
@@ -177,11 +127,22 @@ static char *build_json(const esp_link_sensor_t *s, const xbox_state_t *xb, bool
 
 void telemetry_task(void *arg)
 {
+    EventGroupHandle_t eg = esp_net_conn_event();
+    if (!eg)
+    {
+        ESP_LOGE(TAG, "connection event group missing; task exits");
+        vTaskDelete(NULL);
+        return;
+    }
     ESP_LOGI(TAG, "task up");
 
     while (1)
     {
-        /* Latest-value mailbox has multiple readers (macro wait, telemetry). */
+        /* 无客户端 → 阻塞静止、零广播（esp_net accept 时置位唤醒） */
+        xEventGroupWaitBits(eg, PEO_NET_EVT_CLIENT, pdFALSE, pdTRUE, portMAX_DELAY);
+        while (xEventGroupGetBits(eg) & PEO_NET_EVT_CLIENT)
+        {
+        /* Latest-value mailbox（单读者：telemetry）。 */
         /* 25Hz 遥测：50Hz 时 ~30KB/s 生产速率 0.3s 就能顶爆积压上限；25Hz 减半，
            给 TCP 排水留时间（传感器数据本身 ~10Hz 更新，25Hz 已足够顺滑）。 */
         vTaskDelay(pdMS_TO_TICKS(40));
@@ -197,20 +158,16 @@ void telemetry_task(void *arg)
             sn.sensor.dist_left_status  = 1;
             sn.sensor.dist_right_status = 1;
         }
-        xbox_state_t xb;
-        bool have_xb = xbox_state_queue && (xQueuePeek(xbox_state_queue, &xb, 0) == pdTRUE);
         /* 所有 peek 后再取 now，避免跨核刚发布的快照时间晚于先前采样而导致年龄下溢。 */
         const uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         const bool link_stale = !have_sensor ||
             (uint32_t)(now - sn.received_ms) > ESP_LINK_STALE_MS;
-        if (have_xb && (uint32_t)(now - xb.snapshot_ms) > XB_SNAPSHOT_MAX_AGE_MS)
-            have_xb = false;  /* 心跳过期，不再输出陈旧 gamepad。 */
 
         /* 保留快照 peek；无客户端时跳过 JSON 分配/序列化及入队，下一轮仍按原节拍延时。 */
         if (!esp_net_has_client()) continue;
 
         const uint32_t gen_before = esp_link_command_generation();
-        char *json = build_json(&sn.sensor, &xb, have_xb, link_stale);
+        char *json = build_json(&sn.sensor, link_stale);
         if (gen_before != esp_link_command_generation())
         {
             free(json);  /* 拼接期间发生 STOP/代次变化，丢弃混合代次帧。 */
@@ -221,5 +178,6 @@ void telemetry_task(void *arg)
 
         if (xQueueSend(esp_net_tx_queue, &json, 0) != pdTRUE)
             free(json);   /* 广播队列满：丢弃本帧，等下帧 */
+        }
     }
 }

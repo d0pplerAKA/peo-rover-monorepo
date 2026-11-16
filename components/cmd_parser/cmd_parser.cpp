@@ -10,15 +10,13 @@
  *   {"cmd":"PID","kp":0.25,"ki":0.005}
  * 解析成功 -> 编码 cmd_id + param(小端) 入 esp_link_cmd_queue；
  * 回发 ACK {"ack":名字,"status":0}（status 1 = 参数错误/忙，2 = stale generation）。
- *
- * Macros are validated/compiled here; START owns its captured safety generation.
  */
 
 #include "cmd_parser.h"
 #include "esp_link.h"
 #include "esp_net.h"
-#include "macro_engine.h"
 #include "camera_service.h"
+#include "ws2812_led.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -49,6 +47,7 @@ static const cmd_entry_t k_cmd_table[] = {
     { "MOTOR_CLOSED",    ESP_CMD_MOTOR_CLOSED },
     { "STOP_ALL",        ESP_CMD_STOP_ALL },
     { "ODOMETER_RESET",  ESP_CMD_ODOMETER_RESET },
+    { "SYS_RESET",       ESP_CMD_SYS_RESET },
 };
 
 static int8_t cmd_find(const char *name)
@@ -207,16 +206,20 @@ static void handle_command(const cJSON *root, uint32_t generation,
     {
         const cJSON *jr = cJSON_GetObjectItem(root, "res");
         uint8_t fs;
-        if (cJSON_IsString(jr) && camera_resolution_from_name(jr->valuestring, &fs) &&
-            camera_request_resolution(fs))
-        {
-            ESP_LOGI(TAG, "camera resolution -> %s", jr->valuestring);
-            send_ack(jc->valuestring, 0);
-        }
-        else
+        if (!cJSON_IsString(jr) || !camera_resolution_from_name(jr->valuestring, &fs))
         {
             ESP_LOGW(TAG, "bad camera resolution name");
             send_ack(jc->valuestring, 1);
+        }
+        else if (!camera_request_resolution(fs))
+        {
+            ESP_LOGW(TAG, "camera service unavailable");
+            send_ack(jc->valuestring, 1);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "camera resolution -> %s", jr->valuestring);
+            send_ack(jc->valuestring, 0);
         }
         return;
     }
@@ -227,6 +230,39 @@ static void handle_command(const cJSON *root, uint32_t generation,
     {
         esp_net_video_set_enabled(strcmp(jc->valuestring, "VIDEO_ON") == 0);
         send_ack(jc->valuestring, 0);
+        return;
+    }
+
+    /* WS2812 灯珠是 S3 本地命令（RMT 直驱，不转发 F407） */
+    if (strcmp(jc->valuestring, "WS2812") == 0)
+    {
+        const cJSON *jr = cJSON_GetObjectItem(root, "r");
+        const cJSON *jg = cJSON_GetObjectItem(root, "g");
+        const cJSON *jb = cJSON_GetObjectItem(root, "b");
+        const cJSON *jbr = cJSON_GetObjectItem(root, "brightness");
+        /* 校验原始数值后再窄化；只有缺失字段才使用默认亮度。 */
+        if (!integer_in_range(jr, 0, 255) ||
+            !integer_in_range(jg, 0, 255) ||
+            !integer_in_range(jb, 0, 255) ||
+            (jbr != NULL && !integer_in_range(jbr, 0, 100)))
+        {
+            ESP_LOGW(TAG, "bad ws2812 color params");
+            send_ack(jc->valuestring, 1);
+            return;
+        }
+        const uint8_t brightness = jbr ? (uint8_t)jbr->valuedouble : 100;
+        if (!ws2812_set_color((uint8_t)jr->valuedouble, (uint8_t)jg->valuedouble,
+                             (uint8_t)jb->valuedouble, brightness))
+        {
+            ESP_LOGW(TAG, "ws2812 service unavailable");
+            send_ack(jc->valuestring, 1);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "ws2812 -> r=%d g=%d b=%d bright=%u%%",
+                     jr->valueint, jg->valueint, jb->valueint, (unsigned)brightness);
+            send_ack(jc->valuestring, 0);
+        }
         return;
     }
 
@@ -276,135 +312,6 @@ static void handle_command(const cJSON *root, uint32_t generation,
     }
 }
 
-/** 解析 {"type":"macro"} -> 预编译步骤数组 -> 移交宏引擎（START） */
-static void handle_macro(const cJSON *root, uint32_t generation,
-                         uint8_t slot, uint32_t received_ms)
-{
-    const cJSON *jgen = cJSON_GetObjectItem(root, "gen");
-    if (!resolve_generation(jgen, "macro", &generation)) return;
-
-    const cJSON *jid    = cJSON_GetObjectItem(root, "id");
-    const cJSON *jsteps = cJSON_GetObjectItem(root, "steps");
-    if (!integer_in_range(jid, 0, UINT16_MAX) || !cJSON_IsArray(jsteps))
-    {
-        ESP_LOGW(TAG, "macro: missing id/steps");
-        send_ack("macro", 1);
-        return;
-    }
-
-    int n = cJSON_GetArraySize(jsteps);
-    if (n <= 0 || n > MACRO_MAX_STEPS)
-    {
-        ESP_LOGW(TAG, "macro: steps out of range (%d, max %d)", n, MACRO_MAX_STEPS);
-        send_ack("macro", 1);
-        return;
-    }
-
-    macro_prog_t *prog = (macro_prog_t *)malloc(sizeof(macro_prog_t));
-    if (prog == NULL)
-    {
-        send_ack("macro", 1);
-        return;
-    }
-    memset(prog, 0, sizeof(*prog));
-    prog->id    = (uint16_t)jid->valuedouble;
-    prog->count = (uint16_t)n;
-
-    for (int i = 0; i < n; i++)
-    {
-        const cJSON  *js = cJSON_GetArrayItem(jsteps, i);
-        macro_step_t *st = &prog->steps[i];
-        bool ok = false;
-
-        const cJSON *jg = cJSON_GetObjectItem(js, "goto");
-        if (cJSON_IsNumber(jg))
-        {
-            /* goto：越界 = 宏结束（运行时处理） */
-            st->type          = MACRO_STEP_GOTO;
-            double target = jg->valuedouble;
-            ok = isfinite(target) && floor(target) == target;
-            st->u.got.target = ok && target >= 0 && target < n
-                              ? (int16_t)target : MACRO_MAX_STEPS;
-        }
-        else
-        {
-            const cJSON *jw = cJSON_GetObjectItem(js, "wait");
-            if (cJSON_IsObject(jw))
-            {
-                const cJSON *jf = cJSON_GetObjectItem(jw, "field");
-                const cJSON *jo = cJSON_GetObjectItem(jw, "op");
-                const cJSON *jv = cJSON_GetObjectItem(jw, "value");
-                const cJSON *jt = cJSON_GetObjectItem(jw, "timeout_ms");
-                if (cJSON_IsString(jf) && cJSON_IsString(jo) && cJSON_IsNumber(jv) &&
-                    isfinite(jv->valuedouble) && integer_in_range(jt, 0, UINT32_MAX) &&
-                    macro_field_from_name(jf->valuestring, &st->u.wait.field) &&
-                    macro_op_from_name(jo->valuestring, &st->u.wait.op))
-                {
-                    st->type             = MACRO_STEP_WAIT;
-                    st->u.wait.value     = jv->valuedouble;
-                    st->u.wait.timeout_ms = (uint32_t)jt->valuedouble;
-                    ok = true;
-                }
-            }
-            else
-            {
-                const cJSON *jc = cJSON_GetObjectItem(js, "cmd");
-                if (cJSON_IsString(jc))
-                {
-                    int8_t idx = cmd_find(jc->valuestring);
-                    if (idx >= 0)
-                    {
-                        uint8_t param[MACRO_PARAM_MAX] = { 0 };
-                        uint8_t plen = pack_param(k_cmd_table[idx].id, js, param);
-                        bool need_param = (k_cmd_table[idx].id == ESP_CMD_MOTOR ||
-                                           k_cmd_table[idx].id == ESP_CMD_MOTOR_CLOSED ||
-                                           k_cmd_table[idx].id == ESP_CMD_PID);
-                        if (!need_param || plen > 0)
-                        {
-                            st->type            = MACRO_STEP_ACT;
-                            st->u.act.cmd_id    = k_cmd_table[idx].id;
-                            st->u.act.param_len = plen;
-                            memcpy(st->u.act.param, param, plen);
-                            const cJSON *jd = cJSON_GetObjectItem(js, "duration_ms");
-                            ok = jd == NULL || integer_in_range(jd, 0, UINT32_MAX);
-                            st->u.act.duration_ms = ok && jd ? (uint32_t)jd->valuedouble : 0;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (!ok)
-        {
-            ESP_LOGW(TAG, "macro: step %d invalid", i);
-            free(prog);
-            send_ack("macro", 1);
-            return;
-        }
-    }
-
-    macro_ctrl_t c;
-    c.type = MACRO_CTRL_START;
-    c.prog = prog;
-    c.generation = generation;
-    if (generation != esp_link_command_generation() ||
-        xQueueSend(macro_ctrl_queue, &c, 0) != pdTRUE)
-    {
-        ESP_LOGE(TAG, "macro ctrl queue full");
-        free(prog);
-        send_ack("macro", jgen != NULL && generation != esp_link_command_generation() ? 2 : 1);
-        return;
-    }
-    esp_net_note_client_activity(slot, received_ms, true);
-    send_ack("macro", 0);
-}
-
-/** {"type":"macro_abort"} -> 宏引擎 ABORT */
-static void handle_macro_abort(void)
-{
-    esp_link_request_stop(); /* Independent of the macro/ordinary command queues. */
-}
-
 void cmd_parser_task(void *arg)
 {
     ESP_LOGI(TAG, "task up");
@@ -416,7 +323,7 @@ void cmd_parser_task(void *arg)
             continue;
         if (!msg.line) continue;
         /* 保留无 gen 消息在解析前/后的两次本地代次判定。必须先解析 JSON，
-           才能识别 STOP/PING/macro_abort 豁免，以及使用线 gen 的命令/START 宏。 */
+           才能识别 STOP/PING 豁免，以及使用线 gen 的命令。 */
         const bool local_generation_current = msg.generation == esp_link_command_generation();
         cJSON *root = cJSON_ParseWithOpts(msg.line, NULL, true);
         /* 正常/非法 JSON 共用释放点：先归还完整行预算，再释放字符串，避免重复归还。 */
@@ -426,13 +333,10 @@ void cmd_parser_task(void *arg)
             continue;   /* 非法 JSON：忽略 */
 
         const cJSON *jc = cJSON_GetObjectItem(root, "cmd");
-        const cJSON *jt = cJSON_GetObjectItem(root, "type");
         const bool stop_all = cJSON_IsString(jc) && strcmp(jc->valuestring, "STOP_ALL") == 0;
         const bool ping = cJSON_IsString(jc) && strcmp(jc->valuestring, "PING") == 0;
-        const bool macro_abort = cJSON_IsString(jt) && strcmp(jt->valuestring, "macro_abort") == 0;
-        const bool tagged_work = cJSON_GetObjectItem(root, "gen") != NULL &&
-            (jc != NULL || (cJSON_IsString(jt) && strcmp(jt->valuestring, "macro") == 0));
-        if (!stop_all && !ping && !macro_abort && !tagged_work &&
+        const bool tagged_work = cJSON_GetObjectItem(root, "gen") != NULL && jc != NULL;
+        if (!stop_all && !ping && !tagged_work &&
             (!local_generation_current || msg.generation != esp_link_command_generation()))
         {
             cJSON_Delete(root);
@@ -440,20 +344,7 @@ void cmd_parser_task(void *arg)
         }
 
         if (cJSON_GetObjectItem(root, "cmd") != NULL)
-        {
             handle_command(root, msg.generation, msg.slot, msg.received_ms);
-        }
-        else
-        {
-            const cJSON *jt = cJSON_GetObjectItem(root, "type");
-            if (cJSON_IsString(jt))
-            {
-                if (strcmp(jt->valuestring, "macro") == 0)
-                    handle_macro(root, msg.generation, msg.slot, msg.received_ms);
-                else if (strcmp(jt->valuestring, "macro_abort") == 0)
-                    handle_macro_abort();
-            }
-        }
 
         cJSON_Delete(root);
     }

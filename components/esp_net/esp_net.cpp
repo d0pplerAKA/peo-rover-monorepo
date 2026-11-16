@@ -16,6 +16,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/event_groups.h>
 #include <esp_camera.h>
 #include <esp_log.h>
 #include <esp_wifi.h>
@@ -84,6 +85,13 @@ bool esp_net_has_client(void)
         have_client |= s_client_activity[i].fd >= 0;
     portEXIT_CRITICAL(&s_activity_lock);
     return have_client;
+}
+
+static EventGroupHandle_t s_conn_eg = NULL; /* CLIENT/VIDEO 事件组（camera/telemetry 门控） */
+
+EventGroupHandle_t esp_net_conn_event(void)
+{
+    return s_conn_eg;
 }
 
 static int s_udp_fd       = -1;
@@ -228,7 +236,6 @@ static void wifi_init_ap(void)
 
 /* ============================================================================
    2. Disconnect protection uses the independent STOP latch, not a bounded queue.
-      The macro engine observes inhibition/generation changes and aborts.
    ============================================================================ */
 static void post_disconnect(void)
 {
@@ -244,6 +251,13 @@ void esp_net_video_set_enabled(bool enabled)
     portENTER_CRITICAL(&s_video_lock);
     s_video_enabled = enabled;
     portEXIT_CRITICAL(&s_video_lock);
+    if (s_conn_eg)
+    {
+        if (enabled)
+            xEventGroupSetBits(s_conn_eg, PEO_NET_EVT_VIDEO);
+        else
+            xEventGroupClearBits(s_conn_eg, PEO_NET_EVT_VIDEO);
+    }
 }
 
 bool esp_net_video_enabled(void)
@@ -307,6 +321,8 @@ void esp_net_video_flush(void)
 #define VIDEO_COOLDOWN_US 200000
 
 static int64_t s_video_cool_until_us = 0;   /* 冷却截止时刻（见 VIDEO_COOLDOWN_US） */
+static uint32_t s_tx_fail_cnt = 0;          /* 视频 sendto 失败累计（诊断；断连全量复位） */
+static int s_last_errno = 0;
 static bool send_video_now(const uint8_t *jpeg, uint32_t len)
 {
     static uint8_t pkt[PEO_NET_VIDEO_MAX_PKT + 8];
@@ -371,8 +387,6 @@ static bool send_video_now(const uint8_t *jpeg, uint32_t len)
                    分包纯属浪费空口时间；立刻退出把带宽留给下一帧。 */
                 /* 诊断：errno 分类（ENOBUFS=空口饱和；EINVAL/EMFILE=配置/资源；
                    ENXIO/EHOSTUNREACH=路由/ARP 失败）。1s 节流。 */
-                static uint32_t s_tx_fail_cnt = 0;
-                static int s_last_errno = 0;
                 static int64_t s_last_tx_fail_log_us = 0;
                 s_tx_fail_cnt++;
                 s_last_errno = errno;
@@ -429,8 +443,9 @@ void esp_net_queues_init(void)
     if (!esp_net_ack_queue) esp_net_ack_queue = xQueueCreate(PEO_NET_ACK_QUEUE_DEPTH, sizeof(char *));
     if (!s_video_queue_mutex) s_video_queue_mutex = xSemaphoreCreateMutex();
     if (!s_video_send_mutex) s_video_send_mutex = xSemaphoreCreateMutex();
+    if (!s_conn_eg) s_conn_eg = xEventGroupCreate();
     configASSERT(esp_net_rx_queue && esp_net_tx_queue && esp_net_ack_queue &&
-                 s_video_queue_mutex && s_video_send_mutex);
+                 s_video_queue_mutex && s_video_send_mutex && s_conn_eg);
 }
 
 /* One bounded pending byte stream per client; never discard a partial JSON line. */
@@ -454,6 +469,28 @@ static bool nonblocking(int fd)
     return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+/* 断连后网络全量复位（用户要求：归还全部内存，回到「无客户端」初始状态）：
+   清空遥测/ACK 广播队列、释放残留在 RX 队列中的客户端行（cmd_parser 仍在消费的
+   不受影响——queue 操作原子，此处只收走剩余项）、归还未发送视频帧、
+   复位发送冷却/帧号/失败计数。 */
+static void esp_net_cleanup_all(void)
+{
+    char *out;
+    while (xQueueReceive(esp_net_tx_queue, &out, 0) == pdTRUE) free(out);
+    while (xQueueReceive(esp_net_ack_queue, &out, 0) == pdTRUE) free(out);
+    esp_net_rx_message_t msg;
+    while (xQueueReceive(esp_net_rx_queue, &msg, 0) == pdTRUE)
+    {
+        esp_net_rx_release(msg.line_bytes);
+        free(msg.line);
+    }
+    esp_net_video_flush();
+    s_video_cool_until_us = 0;
+    s_frame_id = 0;
+    s_tx_fail_cnt = 0;
+    s_last_errno = 0;
+}
+
 static void drop_client(net_client_t *clients, net_client_t &c, int slot, const char *why,
                         bool stop_already_requested = false)
 {
@@ -473,7 +510,13 @@ static void drop_client(net_client_t *clients, net_client_t &c, int slot, const 
     bool have_client = false;
     for (int i = 0; i < PEO_NET_MAX_CLIENTS; ++i)
         have_client |= clients[i].fd >= 0;
-    if (!have_client) esp_net_video_set_enabled(false);
+    if (!have_client)
+    {
+        esp_net_video_set_enabled(false);   /* 同时清 VIDEO 事件位 */
+        if (s_conn_eg)
+            xEventGroupClearBits(s_conn_eg, PEO_NET_EVT_CLIENT);
+        esp_net_cleanup_all();              /* 网络部分全量复位到初始状态 */
+    }
     esp_net_video_flush();
     /* 心跳分支已先请求 STOP；仍执行全部回收，但同一事件不能再次递增代次。 */
     if (!stop_already_requested) post_disconnect();
@@ -641,6 +684,8 @@ void esp_net_task(void *arg)
                     s_video_peers[slot] = peer;
                     portEXIT_CRITICAL(&s_video_lock);
                     ESP_LOGI(TAG, "client %d connected", slot);
+                    if (s_conn_eg)
+                        xEventGroupSetBits(s_conn_eg, PEO_NET_EVT_CLIENT);
                 }
             }
         }

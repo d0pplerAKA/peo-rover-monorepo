@@ -2,15 +2,16 @@
 This checks ownership of cache-line ranges, NOT physical ESP32 DMA operation.
 """
 import os
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-CXX = os.environ.get('CC') or shutil.which('gcc')
-if not CXX:
-    raise SystemExit('A host C11 gcc compiler is required (CC or PATH).')
+CC = os.environ.get('CC') or shutil.which('gcc')
+if not CC:
+    raise SystemExit('A host C11 compiler is required (CC, or gcc on PATH; MSVC cl is supported).')
 
 def contract_checks():
     """Deterministic pre/post-fix arithmetic from the crash log."""
@@ -105,6 +106,8 @@ static cam_obj_t object, *cam_obj=&object;
 static size_t mock_line=64;
 static uint8_t mock_dma_align=16;
 static int failures=0, sync_violations=0, prepares=0;
+static esp_err_t sync_result=ESP_OK;
+static int last_sync_flags=0;
 /* Set to emulate the pre-fix allocator: 16-byte alignment + manual offset. */
 static int legacy_layout=0;
 static int legacy_offset=0;
@@ -130,7 +133,9 @@ static void *heap_caps_aligned_alloc(size_t alignment,size_t size,int caps) {
     uintptr_t addr,owned_size;
     if(legacy_layout || legacy_offset) {
         /* Drive the block into the cache-misaligned case deterministically. */
-        addr=((base+7)&~(uintptr_t)15)+(uintptr_t)legacy_offset;
+        /* Force a 16-byte-aligned allocation that is NOT cache-line aligned.
+         * Rounding base+7 down to 16 used to return base and missed this case. */
+        addr=base+16+(uintptr_t)legacy_offset;
         owned_size=size;
     } else {
         addr=(base+alignment-1)&~(uintptr_t)(alignment-1);
@@ -140,6 +145,7 @@ static void *heap_caps_aligned_alloc(size_t alignment,size_t size,int caps) {
     return (void*)addr;
 }
 static esp_err_t esp_cache_msync(void *addr,size_t size,int flags) {
+    last_sync_flags=flags;
     uintptr_t begin=(uintptr_t)addr,end=begin+size;
     bool owned=false;
     for(unsigned i=0;i<slot_count;i++)
@@ -150,7 +156,7 @@ static esp_err_t esp_cache_msync(void *addr,size_t size,int flags) {
         return ESP_ERR_INVALID_ARG;
     }
     if(flags & ESP_CACHE_MSYNC_FLAG_DIR_C2M) prepares++;
-    return ESP_OK;
+    return sync_result;
 }
 static void cleanup(void) {
     for(unsigned i=0;i<slot_count;i++) free(slots[i].backing);
@@ -160,7 +166,8 @@ static void cleanup(void) {
 '''
 body = '\n'.join([
     function(hal, 'static inline size_t dcache_line_size(void)'),
-    function(hal, 'static inline void cam_drop_psram_cache('),
+    function(hal, 'static inline esp_err_t cam_drop_psram_cache('),
+    function(hal, 'static inline esp_err_t cam_flush_psram_cache('),
     function(ll, 'bool ll_cam_dma_sizes('),
     function(hal, 'static lldesc_t * allocate_dma_descriptors('),
     function(hal, 'static esp_err_t cam_dma_config('),
@@ -185,9 +192,19 @@ int main(int argc,char **argv) {
         for(unsigned f=0;f<2;f++) {
             uint8_t *buf=object.frames[f].fb.buf;
             size_t usable=object.recv_size+object.dma_half_buffer_size;
-            cam_drop_psram_cache(buf,32); // Actual SOI call.
-            cam_drop_psram_cache(buf,usable); // Max frame/tail range.
-            cam_drop_psram_cache(buf+usable-1025,1025); // EOI straddling boundary.
+            if (cam_drop_psram_cache(buf,32) != ESP_OK ||
+                cam_drop_psram_cache(buf,usable) != ESP_OK ||
+                cam_drop_psram_cache(buf+usable-1025,1025) != ESP_OK)
+                failures++; // SOI, max frame/tail range, EOI straddling boundary.
+            if (last_sync_flags != (ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_INVALIDATE))
+                failures++;
+            if (cam_flush_psram_cache(buf,usable) != ESP_OK ||
+                last_sync_flags != ESP_CACHE_MSYNC_FLAG_DIR_C2M) failures++;
+            // Synchronization errors must reach callers; never mask a failed cache operation.
+            sync_result=ESP_FAIL;
+            if (cam_drop_psram_cache(buf,32) != ESP_FAIL ||
+                cam_flush_psram_cache(buf,32) != ESP_FAIL) failures++;
+            sync_result=ESP_OK;
             for(unsigned n=0;n<object.dma_node_cnt;n++) {
                 lldesc_t *d=&object.frames[f].dma[n];
                 if(d->buf<buf || d->buf+d->size>buf+usable) {fprintf(stderr,"FAIL descriptor out of range\n");failures++;}
@@ -212,9 +229,17 @@ with tempfile.TemporaryDirectory(prefix='peo-camera-', dir=os.environ.get('TMPDI
     source = Path(tmp)/'camera_dma_test.c'
     exe = Path(tmp)/('camera_dma_test.exe' if os.name=='nt' else 'camera_dma_test')
     source.write_text(prefix+body+suffix,encoding='utf-8')
-    cmd=[CXX,'-std=c11','-Wall','-Wextra','-Werror','-Wno-pointer-to-int-cast','-Wno-sign-compare','-Wno-unused-function',str(source),'-o',str(exe)]
-    if os.name=='nt':cmd.insert(1,'-static')
-    subprocess.run(cmd,check=True)
+    if Path(CC).name.lower() in ('cl', 'cl.exe'):
+        cmd=[CC,'/nologo','/utf-8','/std:c11','/W3','/wd4311','/wd4267','/wd4018',str(source),'/Fe:'+str(exe)]
+    else:
+        cmd=[CC,'-std=c11','-Wall','-Wextra','-Werror','-Wno-pointer-to-int-cast','-Wno-sign-compare','-Wno-unused-function',*shlex.split(os.environ.get('CFLAGS', '')),str(source),'-o',str(exe)]
+        if os.name=='nt':cmd.insert(1,'-static')
+    subprocess.run(cmd,check=True,cwd=tmp)
     contract_checks()
     source_contract_checks()
     subprocess.run([str(exe)],check=True)
+    for layout in ('legacy', 'legacy-offset'):
+        result = subprocess.run([str(exe), layout], capture_output=True, text=True)
+        if result.returncode != 1 or 'FAIL allocation setup' not in result.stderr:
+            raise AssertionError(f'{layout}: expected controlled rejection, got {result.returncode}\n{result.stderr}')
+        print(f'PASS rejected {layout} misaligned allocation')
