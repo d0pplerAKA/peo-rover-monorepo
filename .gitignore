@@ -6,6 +6,7 @@ managed_components/
 
 # 备份与弃用文件
 sdkconfig.bak*
+sdkconfig.old
 *.bak
 
 # Python

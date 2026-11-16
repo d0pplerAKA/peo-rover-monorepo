@@ -2,6 +2,7 @@
 # Usage: run in PowerShell from the project root:  .\build.ps1
 
 $ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath $PSScriptRoot
 
 # If this PowerShell was spawned from git-bash, MSYS/MSYSTEM vars are inherited,
 # which makes idf.py silently exit without doing anything. Clear them first.

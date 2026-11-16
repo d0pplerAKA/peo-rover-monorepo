@@ -15,4 +15,4 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/arduino-esp32: ^4.0.0-RC1
-  h2zero/esp-nimble-cpp: ^2.6.0
+  espressif/cjson: "*"
