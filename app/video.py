@@ -21,6 +21,8 @@ class VideoWidget(QWidget):
         self.setMinimumSize(280, 140)
 
     def _current_fps(self) -> float:
+        if not self._frame_times or time.monotonic() - self._frame_times[-1] > 1.0:
+            return 0.0
         """按最近 30 帧的到达时间算滚动 fps（首帧后才有值）。"""
         if len(self._frame_times) >= 2:
             span = self._frame_times[-1] - self._frame_times[0]
@@ -46,6 +48,7 @@ class VideoWidget(QWidget):
 
     def clear(self):
         self._pixmap = None
+        self._frame_id = -1
         self._frame_times.clear()
         self.update()
 

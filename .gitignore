@@ -7,6 +7,11 @@ venv/
 # 运行产物（坏帧取证样本）
 bad_frames/
 
+# Python packaging
+build/
+dist/
+*.egg-info/
+
 # IDE
 .vscode/
 .idea/

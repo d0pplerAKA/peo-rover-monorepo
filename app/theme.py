@@ -34,6 +34,16 @@ QPushButton {
 QPushButton:hover { background: #383c46; }
 QPushButton:pressed { background: #24272e; }
 QPushButton:disabled { color: #6a6f7a; background: #26282f; }
+/* 急停按钮（安全设施：红色突出，Tab1 唯一命令按钮） */
+QPushButton#stopBtn {
+    background: #8b2c2c;
+    border: 1px solid #c04040;
+    color: #ffd9d9;
+    font-weight: bold;
+    font-size: 14px;
+}
+QPushButton#stopBtn:hover { background: #a33333; }
+QPushButton#stopBtn:pressed { background: #6f2323; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {
     background: #16171b;
     border: 1px solid #454a55;

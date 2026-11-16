@@ -26,6 +26,7 @@ CMD_PID           = 0x04
 CMD_MOTOR_CLOSED  = 0x05
 CMD_STOP_ALL      = 0x06
 CMD_ODOMETER_RESET = 0x07
+CMD_SYS_RESET     = 0x08
 
 # 命令结果码（回显在 SensorData.last_cmd_status）
 ST_OK          = 0x00
@@ -46,17 +47,8 @@ AP_PASSWORD    = "12345678"
 SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBB2x')   # 112B
 VIDEO_HDR   = struct.Struct('>HHHH')                             # 8B 大端
 
-# 手柄按钮名（ESP32 上报 buttons 数组元素，PROTOCOL.md §2.1；与 asukiaaa xboxNotif 对应）
-BTN_A, BTN_B, BTN_X, BTN_Y = "A", "B", "X", "Y"
-BTN_LB, BTN_RB = "LB", "RB"
-BTN_MENU, BTN_VIEW, BTN_SHARE = "MENU", "VIEW", "SHARE"
-BTN_LS, BTN_RS = "LS", "RS"
-BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT = \
-    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT"
-
-
 # =============================================================================
-# CRC16-CCITT（KERMIT：poly 0x1021，init 0xFFFF，与 F407 ESP_LINK_CRC16 一致）
+# CRC16-CCITT-FALSE（poly 0x1021，init 0xFFFF，与 F407 ESP_LINK_CRC16 一致）
 # 自检：crc16_ccitt(b"123456789") == 0x29B1
 # =============================================================================
 def crc16_ccitt(data: bytes) -> int:
@@ -94,7 +86,7 @@ def unpack_esp_frame(frame: bytes) -> bytes | None:
 
 
 # =============================================================================
-# 命令编码（方向2：cmd_id(1) + param，追加在手柄 20B 之后）
+# 命令编码（方向2：cmd_id(1) + param）
 # =============================================================================
 def encode_cmd(cmd_id: int, *params: bytes) -> bytes:
     return bytes((cmd_id,)) + b''.join(params)
@@ -123,6 +115,11 @@ def cmd_stop_all() -> bytes:
 def cmd_odometer_reset() -> bytes:
     """清零四轮里程（无参）。"""
     return encode_cmd(CMD_ODOMETER_RESET)
+
+
+def cmd_sys_reset() -> bytes:
+    """全车软复位（无参，F407 NVIC_SystemReset）。"""
+    return encode_cmd(CMD_SYS_RESET)
 
 
 # =============================================================================
@@ -155,6 +152,7 @@ class SensorData:
     sys_tick_ms: int = 0
     last_cmd_id: int = 0
     last_cmd_status: int = 0
+    link_stale: bool = False       # S3 JSON metadata; not part of the 112-byte UART payload
 
     @classmethod
     def parse(cls, payload: bytes) -> 'SensorData':
@@ -172,37 +170,6 @@ class SensorData:
             current_mA=tuple(v[24:28]), bus_voltage_mV=tuple(v[28:32]),
             ina_timestamp_ms=v[32],
             sys_tick_ms=v[33], last_cmd_id=v[34], last_cmd_status=v[35],
-        )
-
-
-@dataclass
-class GamepadState:
-    """手柄状态（ESP32 经 WiFi JSON 上报，PROTOCOL.md §2.1 gamepad 字段，只读）。
-
-    v2.26 起 esp_link 方向2 已无手柄帧（手柄数据只走 ESP32↔上位机），
-    本类取代旧的 GamepadData（20B 二进制结构，已删除）。
-    """
-    connected: bool = False
-    battery: int = 0
-    joy_l: tuple = (32768, 32768)      # (x, y)，0..65535，中值 32768
-    joy_r: tuple = (32768, 32768)
-    triggers: tuple = (0, 0)           # (lt, rt)，0..1023
-    buttons: frozenset = frozenset()   # 按下的按钮名集合（BTN_* 常量）
-
-    def pressed(self, btn: str) -> bool:
-        """某按钮是否按下。"""
-        return btn in self.buttons
-
-    @classmethod
-    def from_json(cls, j: dict) -> 'GamepadState':
-        """解析 sensor JSON 里的 gamepad 字段。"""
-        return cls(
-            connected=bool(j.get("connected", False)),
-            battery=int(j.get("battery", 0)),
-            joy_l=tuple(j.get("joy_l", (32768, 32768))),
-            joy_r=tuple(j.get("joy_r", (32768, 32768))),
-            triggers=tuple(j.get("triggers", (0, 0))),
-            buttons=frozenset(j.get("buttons", ())),
         )
 
 

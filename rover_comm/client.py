@@ -1,369 +1,511 @@
-"""
-rover_comm.client — 网络客户端（TCP 8888 命令/传感器流 + UDP 8889 视频）
-
-设计：纯 Python（threading + 回调），不依赖 Qt。
-- GUI 层把回调桥接成 Qt signal（跨线程 emit 自动 queued）。
-- 组员写算法时也可直接用本类（不用 GUI）。
-
-用法：
-    c = RoverClient()
-    c.on_sensor = lambda sd: print(sd.dist_front_mm)
-    c.on_frame  = lambda fid, jpeg: save(fid, jpeg)
-    c.connect("192.168.4.1")
-    c.stop_all()
-    ...
-    c.close()
-"""
+"""TCP/UDP client with bounded buffers and independent connection lifetimes."""
 import json
-import queue
+import logging
+import math
 import socket
 import threading
 import time
+from collections import deque
 
-from .protocol import (
-    TCP_CMD_PORT, UDP_VIDEO_PORT, VIDEO_MAGIC,
-    SensorData, GamepadState, VideoHeader,
-)
+from .protocol import TCP_CMD_PORT, UDP_VIDEO_PORT, VIDEO_MAGIC, SensorData, VideoHeader
 
-# 心跳间隔（s）：上位机保活，ESP32 端超时 2s 自动 STOP_ALL（PROTOCOL.md §2.4）
 HEARTBEAT_INTERVAL_S = 0.5
+MAX_JSON_LINE = 16384
+MAX_VIDEO_BYTES = 512 * 1024
+MAX_VIDEO_PACKETS = (MAX_VIDEO_BYTES + 1399) // 1400
+_LOG = logging.getLogger(__name__)
 
 
-# =============================================================================
-# UDP 视频帧组装器（按 frame_id 分组、packet_id 排序；丢包 = 整帧丢弃）
-# =============================================================================
-class FrameAssembler:
-    """按 frame_id 组装 UDP 分包（8B 头 + 1400B 分片）。
+def jpeg_structure_ok(data: bytes) -> bool:
+    """Check marker boundaries, SOF before SOS, scans and terminal EOI.
 
-    关键规则（防花屏，宁可丢帧不可拼错帧）：
-    - packet_id==0 且 fid 变化 → 新帧开始，重置缓冲；
-    - fid 与当前帧不同的迟到包（802.11 重传/乱序）→ 直接丢弃，绝不混入当前帧；
-    - 所有分包到齐（len==total，无洞）才 emit；
-    - 2s 未凑齐 → 残帧丢弃，防陈旧分片堆积；
-    - emit 前 JPEG 结构守卫（SOI 开头 + EOI 结尾），坏帧丢弃不上报。
-    诊断统计：packets_total/late/bad、frames_ok/aborted/bad_jpeg——暴露给 GUI 状态栏定位丢包源。
+    This is a structural guard, not an entropy decoder or an image validity proof.
     """
+    if len(data) < 4 or data[:2] != b'\xff\xd8':
+        return False
+    i, n = 2, len(data)
+    saw_sof = saw_sos = False
+    while i < n:
+        if data[i] != 0xFF:
+            return False
+        while i < n and data[i] == 0xFF:
+            i += 1
+        if i >= n:
+            return False
+        marker = data[i]
+        i += 1
+        if marker == 0xD9:
+            return saw_sof and saw_sos and i == n
+        if marker in (0x00, 0xD8) or 0xD0 <= marker <= 0xD7:
+            return False
+        if marker == 0x01:
+            continue
+        if i + 2 > n:
+            return False
+        size = int.from_bytes(data[i:i + 2], 'big')
+        if size < 2 or i + size > n:
+            return False
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            if size < 8:
+                return False
+            height = int.from_bytes(data[i + 3:i + 5], 'big')
+            width = int.from_bytes(data[i + 5:i + 7], 'big')
+            if not width or not height or width * height > 5_000_000:
+                return False
+            saw_sof = True
+        i += size
+        if marker == 0xDA:
+            if not saw_sof or size < 6:
+                return False
+            saw_sos = True
+            while i < n:
+                start = data.find(b'\xff', i)
+                if start < 0:
+                    return False
+                i = start
+                while i < n and data[i] == 0xFF:
+                    i += 1
+                if i >= n:
+                    return False
+                if data[i] == 0 or 0xD0 <= data[i] <= 0xD7:
+                    i += 1
+                    continue
+                i = start  # next scan/EOI is parsed by the outer marker loop
+                break
+    return False
 
+
+class FrameAssembler:
+    """One bounded frame; accept reordered fragments after packet 0.
+
+    A different frame starts only with packet 0. Serial-number ordering rejects
+    late old packet-0 datagrams; after a 2s idle gap the sequence can restart.
+    """
     def __init__(self):
         self._frame_id = -1
+        self._total = 0
         self._packets = {}
+        self._bytes = 0
         self._frame_start = 0.0
-        self.on_bad_frame = None      # (jpeg:bytes, frame_id:int) 组装层坏帧取证钩子
-        # ---- 诊断统计（只增不减，GUI 定期读取）----
-        self.packets_total = 0        # 收到的视频包总数
-        self.packets_late = 0         # 迟到包（旧帧，丢弃）
-        self.packets_bad = 0          # 非法包头（坏 magic / packet_id 越界）
-        self.frames_ok = 0            # 拼齐且合法的帧
-        self.frames_aborted = 0       # 超时残帧（丢包导致）
-        self.frames_bad_jpeg = 0      # 拼齐但 JPEG 结构非法
-        self.last_jpeg_len = 0        # 最近一帧合法 JPEG 字节数
+        self._done = False
+        self.packets_total = self.packets_late = self.packets_bad = 0
+        self.frames_ok = self.frames_aborted = self.frames_bad_jpeg = 0
+        self.last_jpeg_len = 0
 
     def push(self, hdr: VideoHeader, data: bytes) -> bytes | None:
-        """收到一个 UDP 包，若凑齐整帧则返回完整 JPEG，否则 None。"""
         self.packets_total += 1
-        if hdr.magic != VIDEO_MAGIC or hdr.total_pkt <= 0:
+        if (hdr.magic != VIDEO_MAGIC or not 1 <= hdr.total_pkt <= MAX_VIDEO_PACKETS
+                or not 0 <= hdr.packet_id < hdr.total_pkt or not 0 <= hdr.frame_id <= 65535
+                or not 0 < len(data) <= 1400):
             self.packets_bad += 1
             return None
-        if hdr.packet_id >= hdr.total_pkt:
-            self.packets_bad += 1    # 垃圾包头守卫（packet_id 越界直接丢）
-            return None
         now = time.monotonic()
-        if hdr.frame_id != self._frame_id:
-            if hdr.packet_id != 0:
+        expired = now - self._frame_start > 2.0
+        if hdr.frame_id != self._frame_id or expired:
+            delta = (hdr.frame_id - self._frame_id) & 0xFFFF
+            if hdr.packet_id != 0 or (self._frame_id >= 0 and not expired and delta >= 0x8000):
                 self.packets_late += 1
-                return None   # 旧帧的迟到包：丢弃，避免污染当前帧
-            self._frame_id = hdr.frame_id
-            self._packets = {}
-            self._frame_start = now
-        elif now - self._frame_start > 2.0:
-            self._packets = {}      # 残帧超时：放弃（下一帧 packet_id==0 会重开）
-            self.frames_aborted += 1
+                return None
+            if self._packets:
+                self.frames_aborted += 1
+            self._frame_id, self._total = hdr.frame_id, hdr.total_pkt
+            self._packets, self._bytes = {}, 0
+            self._frame_start, self._done = now, False
+        if self._done:
+            self.packets_late += 1
+            return None
+        if hdr.total_pkt != self._total:
+            self.packets_bad += 1
+            return None
+        previous = self._packets.get(hdr.packet_id)
+        if previous is not None:
+            if previous != data:
+                self.packets_bad += 1
+                self._packets.clear()
+                self._done = True
+                self.frames_aborted += 1
+            return None
+        self._bytes += len(data)
+        if self._bytes > MAX_VIDEO_BYTES:
+            self._packets.clear()
+            self._done = True
+            self.packets_bad += 1
             return None
         self._packets[hdr.packet_id] = data
-        if len(self._packets) == hdr.total_pkt:
-            jpeg = b''.join(self._packets[i] for i in range(hdr.total_pkt))
-            self._packets = {}
-            # JPEG 结构守卫：SOI 开头 + EOI 结尾，挡住截断/错位帧，
-            # 避免 Qt 解码报错刷屏（"missing SOS"/"premature end" 类）。
-            if len(jpeg) < 4 or jpeg[:2] != b'\xff\xd8' or jpeg[-2:] != b'\xff\xd9':
-                self.frames_bad_jpeg += 1
-                if self.on_bad_frame:
-                    self.on_bad_frame(jpeg, hdr.frame_id)   # 取证：拼齐但结构坏
-                return None
-            self.frames_ok += 1
-            self.last_jpeg_len = len(jpeg)
-            return jpeg
-        return None
+        if len(self._packets) != self._total:
+            return None
+        jpeg = b''.join(self._packets[i] for i in range(self._total))
+        self._packets.clear()
+        self._done = True
+        if not jpeg_structure_ok(jpeg):
+            self.frames_bad_jpeg += 1
+            return None
+        self.frames_ok += 1
+        self.last_jpeg_len = len(jpeg)
+        return jpeg
 
 
 def _sensor_from_json(j: dict) -> SensorData:
-    """§2.1 传感器 JSON → SensorData（字段缺失取 0）。"""
-    dist = j.get("dist", {})
-    imu = j.get("imu", {})
-    wheels = j.get("wheels", {})
-    power = j.get("power", {})
-    ack = j.get("cmd_ack", {})
-    quat = imu.get("quat") or [0.0, 0.0, 0.0, 0.0]
-    accel = imu.get("accel_g") or [0.0, 0.0, 0.0]
-    speed = wheels.get("speed_d100") or [0, 0, 0, 0]
-    odo = wheels.get("odometer") or [0, 0, 0, 0]
-    cur = power.get("current_mA") or [0, 0, 0, 0]
-    volt = power.get("bus_voltage_mV") or [0, 0, 0, 0]
+    """Reject malformed telemetry; missing measurements are marked invalid."""
+    def obj(parent, key):
+        value = parent.get(key, {})
+        if not isinstance(value, dict):
+            raise ValueError(f'invalid {key}')
+        return value
 
-    def _d(field: str):
-        return dist.get(field, {}).get("mm", 0)
+    def number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError('invalid telemetry number')
+        return value
 
-    def _s(field: str):
-        return 0 if dist.get(field, {}).get("ok", True) else 1
+    def vector(parent, key, length):
+        values = parent.get(key, [0] * length)
+        if not isinstance(values, list) or len(values) != length:
+            raise ValueError(f'invalid {key}')
+        return tuple(number(v) for v in values)
 
+    dist, imu = obj(j, 'dist'), obj(j, 'imu')
+    wheels, power, ack = obj(j, 'wheels'), obj(j, 'power'), obj(j, 'cmd_ack')
+    distances = [obj(dist, k) for k in ('front', 'left', 'right')]
+    quat, accel = vector(imu, 'quat', 4), vector(imu, 'accel_g', 3)
     return SensorData(
-        dist_front_mm=_d("front"), dist_left_mm=_d("left"), dist_right_mm=_d("right"),
-        dist_front_status=_s("front"), dist_left_status=_s("left"), dist_right_status=_s("right"),
+        dist_front_mm=number(distances[0].get('mm', 0)),
+        dist_left_mm=number(distances[1].get('mm', 0)),
+        dist_right_mm=number(distances[2].get('mm', 0)),
+        dist_front_status=0 if distances[0].get('ok') is True else 1,
+        dist_left_status=0 if distances[1].get('ok') is True else 1,
+        dist_right_status=0 if distances[2].get('ok') is True else 1,
         quat_w=quat[0], quat_x=quat[1], quat_y=quat[2], quat_z=quat[3],
         accel_x=accel[0], accel_y=accel[1], accel_z=accel[2],
-        speed_d100=tuple(speed), odometer=tuple(odo),
-        current_mA=tuple(cur), bus_voltage_mV=tuple(volt),
-        sys_tick_ms=j.get("tick", 0),
-        last_cmd_id=ack.get("id", 0), last_cmd_status=ack.get("status", 0),
-    )
+        speed_d100=vector(wheels, 'speed_d100', 4), odometer=vector(wheels, 'odometer', 4),
+        current_mA=vector(power, 'current_mA', 4), bus_voltage_mV=vector(power, 'bus_voltage_mV', 4),
+        sys_tick_ms=number(j.get('tick', 0)), last_cmd_id=number(ack.get('id', 0)),
+        last_cmd_status=number(ack.get('status', 0)), link_stale=j.get('link_stale', False) is not False)
 
 
-# =============================================================================
-# RoverClient
-# =============================================================================
+class _Session:
+    def __init__(self, tcp, udp):
+        self.tcp, self.udp = tcp, udp
+        self.peer = tcp.getpeername()[0]
+        self.stop = threading.Event()
+        self.ready = threading.Event()
+        self.condition = threading.Condition()
+        self.pending = deque()
+        self.generation = None
+        self.blocked_generation = None
+        self.stop_acks = 0
+        self.ping_t = None
+        self.threads = []
+
+
 class RoverClient:
-    """TCP 命令/传感器流 + UDP 视频接收。"""
+    """Callbacks run on worker threads; callback errors cannot kill receivers.
 
+    Queue acceptance is not an MCU execution acknowledgment. Normal commands
+    require a telemetry generation; STOP/PING remain available before telemetry.
+    """
     def __init__(self):
-        self._tcp: socket.socket | None = None
-        self._udp: socket.socket | None = None
-        self._send_queue: queue.Queue | None = queue.Queue(maxsize=64)  # 主线程只入队，发送线程执行阻塞 sendall
-        self._sender_thread: threading.Thread | None = None
+        self._state_lock = threading.RLock()
+        self._connect_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
+        self._session = None
+        self._epoch = 0
+        self._tcp = self._udp = None
         self._running = False
-        self._tcp_thread: threading.Thread | None = None
-        self._udp_thread: threading.Thread | None = None
-        self._hb_thread: threading.Thread | None = None
-        self._video_asm: FrameAssembler | None = None   # 视频组装器（诊断统计，_udp_loop 填充）
-        # v1.5 会话代次（PROTOCOL.md §2.1）：随 50Hz sensor JSON 的 "gen" 更新；
-        # 命令/宏发送时自动附带，STOP 前积压的旧命令会因旧代次被 ESP32 拒绝（status=2）。
-        self._observed_gen: int | None = None
-        self.sys_info: dict | None = None
-        self._ping_t_ms: int | None = None
-        self.last_rtt_ms: int | None = None
-
-        # 回调（用户赋值；在接收线程里调用，勿做重活）
-        self.on_sensor: callable | None = None          # (SensorData)
-        self.on_frame: callable | None = None           # (frame_id:int, jpeg:bytes)
-        self.on_macro_status: callable | None = None    # (dict)
-        self.on_gamepad: callable | None = None         # (GamepadState)
-        self.on_ack: callable | None = None             # (dict: {"ack":cmd,"status":n})
-        self.on_bad_frame: callable | None = None       # (jpeg:bytes, frame_id:int) 组装层坏帧取证
-        self.on_disconnected: callable | None = None    # ()
-
-    # ---------------- 连接管理 ----------------
-    @property
-    def connected(self) -> bool:
-        return self._tcp is not None and self._running
-
-    def connect(self, host: str, tcp_port: int = TCP_CMD_PORT,
-                udp_port: int = UDP_VIDEO_PORT) -> bool:
-        """连 TCP + 绑 UDP，启动两个接收线程。返回是否成功。"""
-        self.close()
-        try:
-            self._tcp = socket.create_connection((host, tcp_port), timeout=5)
-            # create_connection 会把 timeout=5 残留在套接字上：recv 5s 无数据即抛
-            # socket.timeout（OSError 子类），被 _tcp_loop 误判为断连而关闭连接——
-            # 遥测静默期（F407 未接/无传感器帧）必触发。改回阻塞模式：
-            # 断链由 recv 的 EOF/错误 + 心跳 send 失败双重检测。
-            self._tcp.settimeout(None)
-            self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._udp.bind(("0.0.0.0", udp_port))
-            # 加大收包缓冲：24fps 突发下 GUI 主线程短暂繁忙（解码/重绘）时，
-            # 内核缓冲区过小会直接丢包 → 帧不完整；256KB ≈ 20 帧余量
-            self._udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
-            self._udp.settimeout(0.5)
-        except OSError as e:
-            self.close()
-            raise ConnectionError(f"连接失败: {e}") from e
-
-        self._running = True
-        self._observed_gen = None   # 重连后不沿用旧代次：首条 sensor JSON 会在 20ms 内带来新值
-        self._ping_t_ms = None      # 新会话：清空未完成的 PING 登记与旧会话监控状态
-        self.last_rtt_ms = None
+        self._observed_gen = None
+        self._video_asm = None
         self.sys_info = None
-        self._tcp_thread = threading.Thread(target=self._tcp_loop, daemon=True,
-                                            name="rover-tcp")
-        self._udp_thread = threading.Thread(target=self._udp_loop, daemon=True,
-                                            name="rover-udp")
-        self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True,
-                                           name="rover-heartbeat")
-        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True,
-                                               name="rover-send")
-        self._tcp_thread.start()
-        self._udp_thread.start()
-        self._hb_thread.start()
-        self._sender_thread.start()
-        return True
+        self.last_rtt_ms = None
+        self.on_sensor = self.on_frame = self.on_ack = self.on_disconnected = None
+
+    @property
+    def connected(self):
+        with self._state_lock:
+            return self._session is not None and not self._session.stop.is_set()
+
+    @property
+    def generation(self):
+        return self._observed_gen
+
+    def wait_ready(self, timeout=0.5):
+        with self._state_lock:
+            session = self._session
+        return bool(session and session.ready.wait(timeout) and not session.stop.is_set())
+
+    @staticmethod
+    def _callback(callback, *args):
+        if callback:
+            try:
+                callback(*args)
+            except Exception:
+                _LOG.exception('Rover callback failed')
+
+    @staticmethod
+    def _dispose(sock):
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+
+    def connect(self, host, tcp_port=TCP_CMD_PORT, udp_port=UDP_VIDEO_PORT):
+        with self._connect_lock:
+            self.close()
+            with self._state_lock:
+                epoch = self._epoch
+            tcp = udp = None
+            try:
+                tcp = socket.create_connection((host, tcp_port), timeout=5)
+                tcp.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                tcp.settimeout(0.5)  # bound send stalls; receiver handles idle timeouts
+                if udp_port is not None:
+                    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
+                    udp.bind(('0.0.0.0', udp_port))
+                    udp.settimeout(0.5)
+                session = _Session(tcp, udp)
+                with self._state_lock:
+                    if epoch != self._epoch:
+                        raise ConnectionError('Connection cancelled')
+                    self._session = session
+                    self._tcp, self._udp, self._running = tcp, udp, True
+                    self._observed_gen = self.sys_info = self.last_rtt_ms = None
+                    self._video_asm = FrameAssembler() if udp else None
+                    workers = [('rover-send', self._sender_loop), ('rover-tcp', self._tcp_loop),
+                               ('rover-heartbeat', self._heartbeat_loop)]
+                    if udp:
+                        workers.append(('rover-udp', self._udp_loop))
+                    for name, target in workers:
+                        thread = threading.Thread(target=target, args=(session,), daemon=True, name=name)
+                        session.threads.append(thread)
+                        thread.start()
+                return True
+            except OSError as exc:
+                self._dispose(tcp)
+                self._dispose(udp)
+                raise ConnectionError(f'Connection failed: {exc}') from exc
+
+    def _close_session(self, session):
+        with self._state_lock:
+            if self._session is not session:
+                return
+            self._session = None
+            self._running = False
+            self._tcp = self._udp = None
+            self._observed_gen = self.sys_info = self.last_rtt_ms = self._video_asm = None
+            session.stop.set()
+            session.ready.set()  # wake waiters; they also check stop
+            with session.condition:
+                session.pending.clear()
+                session.condition.notify_all()
+            self._dispose(session.tcp)
+            self._dispose(session.udp)
+            # Serialize reset callbacks before a new session can be installed.
+            self._callback(self.on_disconnected)
 
     def close(self):
-        if self._tcp is None and self._udp is None and not self._running:
-            return
-        self._running = False
-        for s in (self._tcp, self._udp):
-            if s is not None:
-                try:
-                    s.shutdown(socket.SHUT_RDWR)   # 先 shutdown：可靠唤醒其它线程的阻塞 recv/send，防卡死
-                except OSError:
-                    pass
-                try:
-                    s.close()
-                except OSError:
-                    pass
-        self._tcp = self._udp = None
-        if self.on_disconnected:
-            self.on_disconnected()
+        with self._state_lock:
+            self._epoch += 1  # also cancels an in-flight connect
+            session = self._session
+            if session:
+                self._close_session(session)
+        if session:
+            current = threading.current_thread()
+            for thread in session.threads:
+                if thread is not current:
+                    thread.join(timeout=0.6)
 
-    # ---------------- 发送 ----------------
-    def send_json(self, obj) -> bool:
-        """发一个 JSON 对象（自动换行结尾）。
-
-        v1.5 起自动附加会话代次：命令/宏消息在已知当前代次时带上
-        `gen`（PROTOCOL.md §2.1）——STOP 前进入 TCP 缓冲的旧命令因此带旧
-        代次，会被 ESP32 以 status=2 拒绝，不会在 STOP 后解除急停。
-        心跳（type=heartbeat）不附加。
-        """
-        obj = dict(obj)   # 浅拷贝，不把 gen 写回调用方的对象
-        t = obj.get("type")
-        if ("cmd" in obj or t == "macro") and "gen" not in obj and self._observed_gen is not None:
-            obj["gen"] = self._observed_gen
-        line = json.dumps(obj, separators=(",", ":")) + "\n"
-        return self._send_raw(line.encode("utf-8"))
-
-    def send_macro(self, macro) -> bool:
-        """发宏脚本（Macro 实例或 dict）。"""
-        obj = macro.to_dict() if hasattr(macro, "to_dict") else macro
-        return self.send_json(obj)
-
-    def stop_all(self) -> bool:
-        return self.send_json({"cmd": "STOP_ALL"})
-
-    def ping(self) -> bool:
-        t = int(time.monotonic() * 1000)   # 单调时钟：RTT 不受系统调时影响
-        self._ping_t_ms = t                # 先登记后发送，ACK 用 t 精确匹配
-        if not self.send_json({"cmd": "PING", "t": t}):
-            self._ping_t_ms = None         # 入队失败撤销登记
-            return False
-        return True
-
-    def video_on(self) -> bool:
-        return self.send_json({"cmd": "VIDEO_ON"})
-
-    def video_off(self) -> bool:
-        return self.send_json({"cmd": "VIDEO_OFF"})
-
-    def reset_odometer(self) -> bool:
-        return self.send_json({"cmd": "ODOMETER_RESET"})
-
-    def _send_raw(self, data: bytes) -> bool:
-        """非阻塞入队：实际 sendall 在专用发送线程执行，绝不卡调用方（GUI 主线程）。"""
-        if not self.connected:
-            return False
-        try:
-            self._send_queue.put_nowait(data)
+    def send_json_batch(self, objects, *, expected_session=None):
+        if len(objects) > 4:
+            raise ValueError("At most four commands per batch")
+        with self._state_lock:
+            session = self._session
+            if session is None or (expected_session is not None and session is not expected_session):
+                return False
+            lines = []
+            priority = False
+            for original in objects:
+                obj = dict(original)
+                command = obj.get('cmd')
+                if command == 'STOP_ALL':
+                    if len(objects) != 1:
+                        raise ValueError('STOP_ALL must be sent separately')
+                    priority = True
+                elif command != 'PING':
+                    if session.generation is None:
+                        return False
+                    obj.setdefault('gen', session.generation)
+                line = json.dumps(obj, separators=(',', ':'), allow_nan=False).encode('utf-8')
+                if len(line) > MAX_JSON_LINE:
+                    raise ValueError('Command line exceeds 16384 bytes')
+                lines.append(line + b'\n')
+            if not lines:
+                return True
+            data = b''.join(lines)
+            if len(data) > 65536:
+                raise ValueError('Command batch exceeds 65536 bytes')
+            with session.condition:
+                if priority:
+                    session.pending.clear()
+                    if session.generation is not None:
+                        session.blocked_generation = session.generation
+                    session.generation = self._observed_gen = None
+                    session.ready.clear()
+                elif len(session.pending) >= 64:
+                    return False
+                session.pending.append(data)
+                session.condition.notify_all()
             return True
-        except queue.Full:
+
+    def send_json(self, obj):
+        return self.send_json_batch([obj])
+
+    def stop_all(self):
+        return self.send_json({'cmd': 'STOP_ALL'})
+
+    def stop_and_wait(self, timeout=0.3, attempts=2):
+        """Wait for a newly received successful S3 STOP ACK, not old telemetry.
+
+        The wire protocol has no request ID; this confirms S3 acceptance only.
+        """
+        with self._stop_lock:
+            for _ in range(attempts):
+                with self._state_lock:
+                    session = self._session
+                    if not session:
+                        return False
+                    before = session.stop_acks
+                    if not self.stop_all():
+                        return False
+                with session.condition:
+                    session.condition.wait_for(
+                        lambda: session.stop_acks > before or session.stop.is_set(), timeout)
+                    if session.stop_acks > before:
+                        return True
+                    if session.stop.is_set():
+                        return False
             return False
 
-    def _sender_loop(self):
-        """单发送线程：这里允许阻塞 sendall（链路拥塞时也只阻塞本线程）。"""
-        while self._running:
-            try:
-                data = self._send_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            tcp = self._tcp
-            if tcp is None:
-                break
-            try:
-                tcp.sendall(data)
-            except OSError:
-                break   # 对端已死：交给 close() 唤醒所有线程并通知断连
-        if self._running:
-            self.close()
+    def ping(self):
+        with self._state_lock:
+            session = self._session
+            if not session:
+                return False
+            session.ping_t = time.monotonic_ns() // 1_000_000
+            return self.send_json({'cmd': 'PING', 't': session.ping_t})
 
-    # ---------------- 接收线程 ----------------
-    def _tcp_loop(self):
-        """按行收 JSON：sensor → on_sensor；macro 状态 → on_macro_status。"""
-        buf = b""
-        while self._running:
-            try:
-                chunk = self._tcp.recv(4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
+    def video_on(self):
+        return self.send_json({'cmd': 'VIDEO_ON'})
+
+    def video_off(self):
+        return self.send_json({'cmd': 'VIDEO_OFF'})
+
+    def reset_odometer(self):
+        return self.send_json({'cmd': 'ODOMETER_RESET'})
+
+    def sys_reset(self):
+        return self.send_json({'cmd': 'SYS_RESET'})
+
+    def _sender_loop(self, session):
+        try:
+            while not session.stop.is_set():
+                with session.condition:
+                    session.condition.wait_for(lambda: session.pending or session.stop.is_set())
+                    if session.stop.is_set():
+                        return
+                    data = session.pending.popleft()
+                session.tcp.sendall(data)  # at most one committed batch may precede STOP
+        except OSError:
+            pass
+        finally:
+            self._close_session(session)
+
+    def _tcp_loop(self, session):
+        buf = bytearray()
+        try:
+            while not session.stop.is_set():
                 try:
-                    obj = json.loads(line)
-                except ValueError:
+                    chunk = session.tcp.recv(4096)
+                except socket.timeout:
                     continue
-                self._dispatch(obj)
-        self.close()
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                while b'\n' in buf:
+                    end = buf.index(b'\n')
+                    if end > MAX_JSON_LINE:
+                        return
+                    line = bytes(buf[:end])
+                    del buf[:end + 1]
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            self._dispatch(obj, session)
+                    except (ValueError, TypeError, OverflowError, RecursionError):
+                        _LOG.debug('Discarded invalid telemetry/JSON')
+                if len(buf) > MAX_JSON_LINE:
+                    break
+        except OSError:
+            pass
+        finally:
+            self._close_session(session)
 
-    def _dispatch(self, obj: dict):
-        # 命令 ACK（ESP32 回执，无 type 字段）
-        if "ack" in obj and "type" not in obj:
-            if (obj.get("ack") == "PING" and self._ping_t_ms is not None
-                    and obj.get("t") == self._ping_t_ms):   # t 匹配：拒绝迟到/串台的 PING ACK
-                self.last_rtt_ms = int(time.monotonic() * 1000) - self._ping_t_ms
-                self._ping_t_ms = None
-            if self.on_ack:
-                self.on_ack(obj)
-            return
-        t = obj.get("type")
-        if t == "sensor":
-            if isinstance(obj.get("sys"), dict):
-                self.sys_info = obj["sys"]
-            gen = obj.get("gen")
-            if isinstance(gen, int) and gen >= 0:
-                self._observed_gen = gen   # v1.5 会话代次跟踪
-            if self.on_sensor:
-                self.on_sensor(_sensor_from_json(obj))
-            if self.on_gamepad and "gamepad" in obj:
-                self.on_gamepad(GamepadState.from_json(obj["gamepad"]))
-        elif t == "macro" and self.on_macro_status:
-            self.on_macro_status(obj)
+    def _dispatch(self, obj, session=None):
+        with self._state_lock:
+            session = session or self._session
+            if session is None or self._session is not session:
+                return
+            if 'ack' in obj and 'type' not in obj:
+                if obj.get('ack') == 'PING' and session.ping_t is not None and obj.get('t') == session.ping_t:
+                    self.last_rtt_ms = time.monotonic_ns() // 1_000_000 - session.ping_t
+                    session.ping_t = None
+                if obj.get('ack') == 'STOP_ALL' and obj.get('status') == 0:
+                    with session.condition:
+                        session.stop_acks += 1
+                        session.condition.notify_all()
+                self._callback(self.on_ack, obj)
+            elif obj.get('type') == 'sensor':
+                sensor = _sensor_from_json(obj)
+                gen = obj.get('gen')
+                if type(gen) is int and 0 <= gen <= 0xFFFFFFFF and gen != session.blocked_generation:
+                    session.generation = self._observed_gen = gen
+                    session.ready.set()
+                if isinstance(obj.get('sys'), dict):
+                    self.sys_info = {key: value for key, value in obj['sys'].items()
+                                     if key in ('cpu0', 'cpu1', 'ram_free', 'ram_total')
+                                     and type(value) in (int, float) and 0 <= value <= 0xFFFFFFFF
+                                     and math.isfinite(value)}
+                self._callback(self.on_sensor, sensor)
 
-    def _heartbeat_loop(self):
-        """每 500ms 发心跳保活（PROTOCOL.md §2.4：ESP32 超时 2s 自动急停）。"""
-        while self._running:
-            time.sleep(HEARTBEAT_INTERVAL_S)
-            if self._running and not self.send_json({"type": "heartbeat"}):
-                self.close()   # 发送失败（对端已死）→ 主动关连，同时解除 tcp 线程的阻塞 recv
-                break
+    def _heartbeat_loop(self, session):
+        while not session.stop.wait(HEARTBEAT_INTERVAL_S):
+            with self._state_lock:
+                if self._session is not session:
+                    return
+                if not self.ping():
+                    self._close_session(session)
+                    return
 
-    def _udp_loop(self):
-        """收 UDP 视频包，组装 JPEG 帧后回调 on_frame。"""
-        asm = FrameAssembler()
-        self._video_asm = asm      # 暴露诊断统计（GUI 状态栏读取）
-        asm.on_bad_frame = self.on_bad_frame
-        while self._running:
+    def _udp_loop(self, session):
+        with self._state_lock:
+            asm = self._video_asm
+        while not session.stop.is_set():
             try:
-                # 64KB 接收缓冲：不假设 ESP32 端分片大小（PEO_NET_VIDEO_MAX_PKT 可能
-                # 被调大，若 recvfrom 缓冲小于包长会被静默截断 → 拼帧错位）
-                packet, _ = self._udp.recvfrom(65536)
+                packet, source = session.udp.recvfrom(65536)
             except socket.timeout:
                 continue
             except OSError:
                 break
-            if len(packet) < 8:
+            if source[0] != session.peer or source[1] != UDP_VIDEO_PORT or len(packet) < 8:
                 continue
             hdr = VideoHeader.parse(packet[:8])
             jpeg = asm.push(hdr, packet[8:])
-            if jpeg is not None and self.on_frame:
-                self.on_frame(hdr.frame_id, jpeg)
+            if jpeg is not None:
+                with self._state_lock:
+                    if self._session is not session:
+                        return
+                    self._callback(self.on_frame, hdr.frame_id, jpeg)
