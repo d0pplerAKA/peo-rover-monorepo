@@ -31,6 +31,7 @@ static volatile float   g_pi_u[4]        = { 0.0f, 0.0f, 0.0f, 0.0f };
 static volatile float   g_pi_kp;                                   /* shared gains: all 4 motors */
 static volatile float   g_pi_ki;
 static          float   g_pi_e_prev[4]   = { 0.0f, 0.0f, 0.0f, 0.0f };
+static volatile uint8_t g_mode = CONTROL_MODE_CLOSED;              /* 0=闭环(默认) 1=开环 */
 
 /* ----------------------------------------------------------------------------
    PUBLIC API
@@ -66,6 +67,7 @@ void CONTROL_Init(void)
         g_pi_e_prev[m]   = 0.0f;
         g_target_d100[m] = 0;
     }
+    g_mode = CONTROL_MODE_CLOSED;
 }
 
 /**
@@ -91,14 +93,17 @@ void TIM6_DAC_IRQHandler(void)
         g_odometer[m]  += delta;                                        /* 32-bit odometry */
         g_speed_d100[m] = (int32_t)delta * PEO_CTRL_CM_S_D100_PER_DELTA; /* 0.01 cm/s      */
 
-        /* ---- Speed PI controller (velocity / incremental form) ----
-         *   e[n] = target - actual                  (0.01 cm/s)
-         *   u[n] = u[n-1] + Kp*(e[n]-e[n-1]) + Ki*e[n]
-         *
-         * The velocity form accumulates the OUTPUT u directly, so clamping
-         * u also clamps the integral term = built-in anti-windup (important
-         * when a wheel is stalled against an obstacle).                    */
+        /* 仅闭环模式运行速度 PI 并覆盖 PWM。开环模式下编码器照常测速
+           （speed 仍回显真实转速），但 PI 不跑、PWM 保持开环命令设的值。 */
+        if (g_mode == CONTROL_MODE_CLOSED)
         {
+            /* ---- Speed PI controller (velocity / incremental form) ----
+             *   e[n] = target - actual                  (0.01 cm/s)
+             *   u[n] = u[n-1] + Kp*(e[n]-e[n-1]) + Ki*e[n]
+             *
+             * The velocity form accumulates the OUTPUT u directly, so clamping
+             * u also clamps the integral term = built-in anti-windup (important
+             * when a wheel is stalled against an obstacle).                    */
             float e      = (float)(g_target_d100[m] - g_speed_d100[m]);
             float e_prev = g_pi_e_prev[m];
 
@@ -174,6 +179,21 @@ void CONTROL_SetTargetSpeed(uint8_t motor, int32_t speed_d100)
 }
 
 /**
+ * @brief  Set all four closed-loop target speeds atomically (0.01 cm/s).
+ */
+void CONTROL_SetTargetSpeedAll(const int32_t speed_d100[4])
+{
+    uint8_t  m;
+    uint32_t primask = __disable_irq();      /* 临界区：四轮目标一次写完 */
+
+    for (m = 0; m < 4; m++)
+        g_target_d100[m] = speed_d100[m];
+
+    if (!primask)
+        __enable_irq();
+}
+
+/**
  * @brief  Return the current target speed for one wheel (0.01 cm/s).
  */
 int32_t CONTROL_GetTargetSpeed(uint8_t motor)
@@ -217,4 +237,30 @@ void CONTROL_StopAll(void)
         g_pi_e_prev[m]   = 0.0f;
         MOTOR_Coast(m);
     }
+    g_mode = CONTROL_MODE_CLOSED;   /* 急停回到闭环安全态 */
+}
+
+void CONTROL_SetMode(uint8_t mode)
+{
+    uint8_t m;
+
+    if (mode != CONTROL_MODE_OPEN && mode != CONTROL_MODE_CLOSED)
+        return;
+
+    if (g_mode == mode)
+        return;   /* 同模式无操作 */
+
+    g_mode = mode;
+
+    /* 切模式复位 PI 积分，避免切回闭环瞬间 PWM 突变。 */
+    for (m = 0; m < 4; m++)
+    {
+        g_pi_u[m]      = 0.0f;
+        g_pi_e_prev[m] = 0.0f;
+    }
+}
+
+uint8_t CONTROL_GetMode(void)
+{
+    return g_mode;
 }

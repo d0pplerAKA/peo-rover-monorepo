@@ -124,7 +124,8 @@
                 "c:\\Users\\Danny\\Documents\\Keil Files\\Keil Project\\peo_rover\\COMPONENTS\\TIMER",
                 "c:\\Users\\Danny\\Documents\\Keil Files\\Keil Project\\peo_rover\\COMPONENTS\\TOF400C",
                 "c:\\Users\\Danny\\Documents\\Keil Files\\Keil Project\\peo_rover\\COMPONENTS\\USART",
-                "c:\\Users\\Danny\\Documents\\Keil Files\\Keil Project\\peo_rover\\COMPONENTS\\ESP_LINK"
+                "c:\\Users\\Danny\\Documents\\Keil Files\\Keil Project\\peo_rover\\COMPONENTS\\ESP_LINK",
+                "c:\\Users\\Danny\\Documents\\Keil Files\\Keil Project\\peo_rover\\COMPONENTS\\GAMEPAD"
             ],
             "defines": [
                 "USE_STDPERIPH_DRIVER",

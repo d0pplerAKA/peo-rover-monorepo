@@ -8,6 +8,7 @@
 #include "COMPONENTS/TIMER/include/timer.h"
 #include "COMPONENTS/PEO_PINMAP.H"                              /* boot banner: 驱动/传感器地址宏 */
 #include "COMPONENTS/CONTROL/include/control.h"      /* boot banner: PEO_CTRL_KP/KI/LOOP_HZ */
+#include "COMPONENTS/GAMEPAD/include/gamepad.h"     /* lock 状态上报（GetHub） */
 #include "COMPONENTS/TOF400C/include/tof400c.h"      /* boot banner: PEO_PM_VL53_DISTANCE_MODE 等 */
 #include <stdio.h>                                   /* boot banner / dbg_f3: printf */
 
@@ -105,7 +106,10 @@ void SENSOR_GetHub(SensorData_t *out)
     /* 关中断拷贝，保证字段间一致（同一时刻 T 的快照）。 */
     primask = __get_PRIMASK();
     __disable_irq();
-    g_sensor_data.sys_tick_ms = TIMER_GetTick();   /* 快照时刻的总时间戳 */
+    g_sensor_data.sys_tick_ms   = TIMER_GetTick();    /* 快照时刻的总时间戳 */
+    g_sensor_data.control_mode  = CONTROL_GetMode();  /* 当前控制模式（开环/闭环） */
+    g_sensor_data.fw_version    = PEO_FW_VERSION;     /* F407 固件版本号 */
+    g_sensor_data.lock          = GAMEPAD_GetLock();  /* 控制权锁：0=手操，1=自主 */
     *out = g_sensor_data;
     __set_PRIMASK(primask);
 }
@@ -137,6 +141,17 @@ void print_boot_banner(void)
     printf("  Build    : %s %s\r\n", __DATE__, __TIME__);
     printf("  Target   : STM32F407VGT6 @ %lu MHz\r\n",
            (unsigned long)(clk.SYSCLK_Frequency / 1000000UL));
+    {
+        uint32_t rev_id = DBGMCU_GetREVID();
+        uint32_t dev_id = DBGMCU_GetDEVID();
+        uint32_t uid0   = *(volatile uint32_t *)0x1FFF7A10U;  /* UID[31:0]  */
+        uint32_t uid1   = *(volatile uint32_t *)0x1FFF7A14U;  /* UID[63:32] */
+        uint32_t uid2   = *(volatile uint32_t *)0x1FFF7A18U;  /* UID[95:64] */
+        printf("    Revision ID : 0x%04lX\r\n", (unsigned long)rev_id);
+        printf("    Device ID   : 0x%03lX\r\n", (unsigned long)dev_id);
+        printf("    UID         : %08lX-%08lX-%08lX\r\n",
+               (unsigned long)uid2, (unsigned long)uid1, (unsigned long)uid0);
+    }
     printf("-------------------------------------------------\r\n");
     printf("  CLOCKS (actual)\r\n");
     printf("    SYSCLK = %lu Hz\r\n", (unsigned long)clk.SYSCLK_Frequency);

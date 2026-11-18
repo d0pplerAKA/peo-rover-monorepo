@@ -15,6 +15,7 @@
 #include "COMPONENTS/BUILTIN_LED/builtin_led.h"
 #include "COMPONENTS/CONTROL/include/control.h"
 #include "COMPONENTS/MOTOR/include/motor.h"
+#include "COMPONENTS/TIMER/include/timer.h"
 
 #include <string.h>
 
@@ -112,6 +113,10 @@ static void ESP_LINK_SendHub(void)
 /* uint32 数组保证 4 字节对齐（DMA Memory0 地址要求） */
 static uint32_t g_rx_dma_buf[ESP_LINK_RX_BUF_SIZE / 4];
 
+/* 失联自停：最后收到有效帧（CRC 通过）的时间戳（SysTick ms）。
+   0 = 尚未收到任何有效帧（不监督）。S3 每 200ms 发空帧心跳。 */
+static volatile uint32_t g_last_rx_ms = 0;
+
 /* 前置声明：HandleCmd 定义在 ProcessFrame 之后 */
 static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len);
 
@@ -152,6 +157,7 @@ static void ESP_LINK_ProcessRx(uint16_t len)
     if (crc_calc != crc_recv)
         return;                                            /* CRC 错 */
 
+    g_last_rx_ms = TIMER_GetTick();   /* 有效帧（含空帧心跳）刷新失联看门狗 */
     ESP_LINK_ProcessFrame(&buf[3], payload_len);
 }
 
@@ -214,8 +220,12 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             BUILTIN_LED_Toggle();
             break;
 
-        case ESP_CMD_SENSOR_RESET:
-            /* TODO: 传感器复位（VL53L1X / MPU6050 复位流程） */
+        case ESP_CMD_LED_ON:
+            BUILTIN_LED_On();
+            break;
+
+        case ESP_CMD_LED_OFF:
+            BUILTIN_LED_Off();
             break;
 
         case ESP_CMD_MOTOR:
@@ -226,6 +236,7 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             motor = cmd->param[0];
             speed = (int16_t)(cmd->param[1] | ((uint16_t)cmd->param[2] << 8));
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
+            CONTROL_SetMode(CONTROL_MODE_OPEN);   /* 开环直驱，绕过 PI */
             MOTOR_SetSpeed(motor, speed);
             break;
         }
@@ -248,6 +259,7 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             motor = cmd->param[0];
             memcpy(&speed_d100, cmd->param + 1, 4);
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
+            CONTROL_SetMode(CONTROL_MODE_CLOSED);   /* 切回闭环 */
             CONTROL_SetTargetSpeed(motor, speed_d100);
             break;
         }
@@ -416,6 +428,14 @@ void TIM8_TRG_COM_TIM14_IRQHandler(void)
     {
         TIM_ClearITPendingBit(ESP_REPORT_TIM, TIM_IT_Update);
         ESP_LINK_SendHub();   /* 打包 + 启动 DMA 发送（非阻塞） */
+
+        /* 失联自停（deadman）：S3 掉电/死机时 F407 收不到心跳空帧，
+           超过 ESP_LINK_DEADMAN_MS 自动停车。首帧前（g_last_rx_ms==0）不监督。 */
+        if (g_last_rx_ms != 0 &&
+            (uint32_t)(TIMER_GetTick() - g_last_rx_ms) > ESP_LINK_DEADMAN_MS)
+        {
+            CONTROL_StopAll();
+        }
     }
 }
 

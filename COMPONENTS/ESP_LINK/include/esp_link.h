@@ -35,13 +35,15 @@
 #define ESP_LINK_SOF1           0x55    /* 帧头低字节 */
 #define ESP_LINK_MAX_PAYLOAD    64      /* payload 上限：命令 <= 9B，留余量 */
 #define ESP_LINK_FRAME_OVH      5       /* SOF(2) + LEN(1) + CRC(2) */
+#define ESP_LINK_DEADMAN_MS     500     /* 失联自停：500ms 无有效帧 -> CONTROL_StopAll()（S3 每 200ms 发空帧心跳） */
 
 /* ============================================================================
    命令 ID（ESP32 -> F407，帧 payload 的全部内容）
    ----------------------------------------------------------------------------
    命令体格式：cmd_id(1) + param(变长)。param 长度由 cmd_id 约定：
-     LED_TOGGLE    无参数
-     SENSOR_RESET  无参数
+     LED_TOGGLE    无参数（翻转）
+     LED_ON        无参数（点亮，绝对状态）
+     LED_OFF       无参数（熄灭，绝对状态）
      MOTOR         motor(1) + speed(2, int16)         开环直驱
      PID           kp(4, float) + ki(4, float)        共享增益
      MOTOR_CLOSED  motor(1) + speed_d100(4, int32)    闭环目标速度
@@ -49,13 +51,14 @@
      ODOMETER_RESET 无参数                           清零四轮里程
    ============================================================================ */
 #define ESP_CMD_LED_TOGGLE      0x01
-#define ESP_CMD_SENSOR_RESET    0x02
 #define ESP_CMD_MOTOR           0x03
 #define ESP_CMD_PID             0x04
 #define ESP_CMD_MOTOR_CLOSED    0x05
 #define ESP_CMD_STOP_ALL        0x06
 #define ESP_CMD_ODOMETER_RESET  0x07
 #define ESP_CMD_SYS_RESET       0x08    /* 全车软复位：NVIC_SystemReset()（2026-11-16 定案） */
+#define ESP_CMD_LED_ON          0x09    /* 板载 LED 点亮（绝对状态） */
+#define ESP_CMD_LED_OFF         0x0A    /* 板载 LED 熄灭（绝对状态） */
 
 /* 命令执行结果码（回显到 sensorhub.last_cmd_status） */
 #define ESP_CMD_OK              0x00    /* 成功 */

@@ -867,6 +867,11 @@
               <FilePath>.\COMPONENTS\ESP_LINK\esp_link.c</FilePath>
             </File>
             <File>
+              <FileName>gamepad.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\COMPONENTS\GAMEPAD\gamepad.c</FilePath>
+            </File>
+            <File>
               <FileName>VL53L1X_api.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\COMPONENTS\VL53L1X\core\VL53L1X_api.c</FilePath>

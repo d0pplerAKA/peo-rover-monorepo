@@ -36,6 +36,7 @@ void NVIC_InitAll(void)
     PEO_NVIC_Enable(PEO_NVIC_INA_IRQ,               3,  0);
     PEO_NVIC_Enable(PEO_NVIC_ESP_IRQ,               3,  1);
     PEO_NVIC_Enable(PEO_NVIC_ESP_TX_IRQ,            3,  2);
+    PEO_NVIC_Enable(PEO_NVIC_GAMEPAD_IRQ,            3,  3);   /* gamepad RX (USART3) */
 
     /* Optional (uncomment when the driver lands):
        PEO_NVIC_Enable(PEO_NVIC_DBG_IRQ, PEO_NVIC_PRIO_DBG);   // debug console RX

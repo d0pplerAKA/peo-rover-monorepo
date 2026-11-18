@@ -41,7 +41,7 @@
    | 1 (0)         | 1 kHz control loop (TIM6)                  |
    | 2 (0)         | MPU6050 data-ready (EXTI3)                 |
    | 2 (1/2/3)     | VL53L1X data-ready x3 (EXTI0/1/2)          |
-   | 3 (0/1/2)     | INA3221 poll + ESP32 RX + report (TIM14)   |
+   | 3 (0/1/2/3)   | INA3221 poll + ESP32 RX + report (TIM14) + gamepad RX (USART3) |
    | optional      | USART1 debug RX (commented in nvic.c)      |
    ============================================================================ */
 #define PEO_NVIC_PRIO_GROUP         NVIC_PriorityGroup_2
@@ -60,6 +60,7 @@
    | INA3221 电流/电压轮询  | TIM7_IRQn               | TIM7_IRQHandler         | 3 (0)   |
    | ESP32 link RX          | USART2_IRQn             | USART2_IRQHandler       | 3 (1)   |
    | sensorhub report       | TIM8_TRG_COM_TIM14_IRQn | TIM8_TRG_COM_TIM14_IRQHandler | 3 (2) |
+   | gamepad RX (USART3)    | USART3_IRQn             | USART3_IRQHandler             | 3 (3) |
    | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | -       |
    ----------------------------------------------------------------------------
    不使用中断：4 路编码器均采用 16 位差分读取；PWM 定时器
@@ -79,6 +80,7 @@
 #define PEO_NVIC_INA_IRQ              TIM7_IRQn       /* INA3221 电流/电压轮询 */
 #define PEO_NVIC_ESP_IRQ              USART2_IRQn     /* ESP32 link RX          */
 #define PEO_NVIC_ESP_TX_IRQ           TIM8_TRG_COM_TIM14_IRQn  /* sensorhub 上报 (TIM14) */
+#define PEO_NVIC_GAMEPAD_IRQ          USART3_IRQn     /* 手柄 RX (USART3)          */
 
 /* ============================================================================
    3. DMA STREAM / CHANNEL MAP  (RM0090 Table 43 - DMA1 request mapping)

@@ -495,6 +495,10 @@
 #define PEO_DMA_ESP_TX_STREAM   DMA1_Stream6
 #define PEO_DMA_ESP_TX_CH       DMA_Channel_4
 
+/** 手柄 USART3 DMA (RM0090 Table 43 - DMA1 request mapping) **/
+#define PEO_DMA_GAMEPAD_RX_STREAM  DMA1_Stream1
+#define PEO_DMA_GAMEPAD_RX_CH      DMA_Channel_4
+
 /* ============================================================================
    14. EXTI LINES
    ----------------------------------------------------------------------------

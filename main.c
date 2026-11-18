@@ -35,6 +35,7 @@
 #include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
 #include "COMPONENTS/INA3221/include/ina3221.h"
 #include "COMPONENTS/ESP_LINK/include/esp_link.h"
+#include "COMPONENTS/GAMEPAD/include/gamepad.h"
 
 int main(void)
 {
@@ -84,6 +85,9 @@ int main(void)
     ESP_LINK_Init();
     ESP_LINK_StartReport();  /* TIM14 定时器触发 sensorhub 上报（DMA 发送） */
 
+    /* 8c. 手柄手操链路 (USART3) - Xbox 手柄经 C3 有线接入，F407 端解析 + 锁仲裁 */
+    GAMEPAD_Init();
+
     /* 9. Boot banner：全面的诊断信息（时钟/构建/参数/传感器/模块状态） */
     print_boot_banner();
 
@@ -91,15 +95,17 @@ int main(void)
 
     while (1)
     {
-        /* ── 命令消费：中断只入队，这里出队执行 ──
-           命令来源：① 上位机（WiFi -> ESP32 -> USART2）② ESP32 端手柄映射
-           （Xbox 手柄在 ESP32 本地解析，映射成命令帧后下发，不再传原始手柄数据）。 */
-        //ESP_Cmd_t cmd;
-        //if (ESP_LINK_PopCommand(&cmd))
-        //{
-          //  ESP_LINK_ExecCommand(&cmd);
-        //}
+        /* ── 命令消费：中断只入队，这里出队执行（自主链路）──
+           命令来源：上位机（WiFi -> ESP32 -> USART2）。 */
+        ESP_Cmd_t cmd;
+        if (ESP_LINK_PopCommand(&cmd))
+        {
+            ESP_LINK_ExecCommand(&cmd);
+        }
 
-        mdelay(100);   /* 10 ms 调度节拍 */
+        /* ── 手柄手操链路：锁仲裁 + 摇杆映射（C3 -> USART3，方案 A）── */
+        GAMEPAD_Process();
+
+        mdelay(5);   /* 10 ms 调度节拍 */
     }
 }

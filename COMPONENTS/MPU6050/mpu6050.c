@@ -139,20 +139,20 @@ static void MPU6050_FIFO_Ready_Cb(void)
  */
 void MPU6050_Init(void)
 {
-    uint8_t who = 0, ret = 0;
+//    uint8_t who = 0, ret = 0;
 
     I2C_MPU_Init();   /* I2C1 @ 400 kHz */
-
+/*
     ret = I2C_MPU_ReadBytes(PEO_PM_MPU6050_ADDR, MPU6050_WHO_AM_I_REG, 1, &who);
     if (ret == NO_ERROR)
         printf("[MPU6050] WHO_AM_I = 0x%02X\n", who);
     else
         printf("[MPU6050] WHO_AM_I read failed, err=%d\n", ret);
-
-    if (MPU6050_DMP_Init() == 0)
-        printf("[MPU6050] DMP configured (call MPU6050_Start() to begin)\n");
-    else
-        printf("[MPU6050] DMP init FAILED\n");
+*/
+    if (MPU6050_DMP_Init() == 0) ;
+//        printf("[MPU6050] DMP configured (call MPU6050_Start() to begin)\n");
+//    else
+//        printf("[MPU6050] DMP init FAILED\n");
 }
 
 /**

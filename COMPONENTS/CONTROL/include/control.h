@@ -133,6 +133,14 @@ uint32_t CONTROL_GetLoopTick(void);
 void CONTROL_SetTargetSpeed(uint8_t motor, int32_t speed_d100);
 
 /**
+ * @brief  Set all four closed-loop target speeds atomically (0.01 cm/s).
+ * @param  speed_d100  Array of four target speeds, index = motor (M1..M4).
+ * @note   Writes all four targets inside a critical section so the 1 kHz
+ *         loop never sees a partially-updated four-wheel target.
+ */
+void CONTROL_SetTargetSpeedAll(const int32_t speed_d100[4]);
+
+/**
  * @brief  Return the current target speed for one wheel (0.01 cm/s).
  * @param  motor  0..3 (M1..M4).
  */
@@ -160,5 +168,34 @@ void CONTROL_SetGains(float kp, float ki);
  *         (motor terminals floating). Use for emergency stop.
  */
 void CONTROL_StopAll(void);
+
+/* ============================================================================
+   CONTROL MODE（开环 / 闭环）
+   ----------------------------------------------------------------------------
+   闭环（默认）：速度 PI 控制（MOTOR_CLOSED / peo.drive()）。
+   开环：直接 PWM 直驱（MOTOR / peo.motor()），绕过 PI，作为闭环 PID 参数
+         调不通时的保底手段。
+
+   切换是隐式的：MOTOR 命令 -> 切开环；MOTOR_CLOSED -> 切闭环；
+   STOP_ALL -> CONTROL_StopAll() 切回闭环（安全态）。
+
+   开环模式下编码器照常测速（speed_d100 仍回显真实转速），仅 PI 与
+   MOTOR_SetSpeed 覆盖被跳过；切回闭环时复位 PI 积分，避免 PWM 突变。
+   ============================================================================ */
+#define CONTROL_MODE_CLOSED     (0U)   /* 闭环：速度 PI（默认） */
+#define CONTROL_MODE_OPEN       (1U)   /* 开环：直接 PWM */
+
+/**
+ * @brief  Switch control mode and reset the PI integrators.
+ * @param  mode  CONTROL_MODE_CLOSED or CONTROL_MODE_OPEN.
+ * @note   Resets the PI integrators on switch so returning to closed loop
+ *         starts from zero output (no PWM jump).
+ */
+void CONTROL_SetMode(uint8_t mode);
+
+/**
+ * @brief  Return the current control mode (CONTROL_MODE_CLOSED / _OPEN).
+ */
+uint8_t CONTROL_GetMode(void);
 
 #endif /* __CONTROL_H__ */
