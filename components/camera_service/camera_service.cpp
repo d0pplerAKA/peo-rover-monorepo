@@ -53,10 +53,26 @@ bool camera_request_resolution(uint8_t framesize)
 #define CAM_XCLK_HZ         20000000
 
 /* 只限制应用层取帧；传感器仍自由运行，多余帧由 GRAB_LATEST 弹旧回收。
-   周期向上取整为 66667us（约 15fps），避免整数截断使目标帧率偏高。 */
-#define CAM_TARGET_FPS      15
-static_assert(CAM_TARGET_FPS > 0 && CAM_TARGET_FPS <= 1000000, "invalid camera target fps");
-static const int64_t CAM_FRAME_PERIOD_US = (1000000LL + CAM_TARGET_FPS - 1) / CAM_TARGET_FPS;
+   全局统一 24fps（2026-11-18 用户拍板锁 24，弃分级 30/30/24）：
+   - QVGA 24fps ~0.96Mbps、SVGA 24fps ~2.7Mbps（贴墙档，EAGAIN 判据）；
+   - 15fps 时代实测多窗口稳定，24fps 为画质/帧率/带宽平衡点。
+   周期向上取整，避免整数截断使目标帧率偏高。 */
+static int cam_fps_for(framesize_t fs)
+{
+    (void)fs;
+    return 24;   /* 全档统一：锁 24fps */
+}
+static int64_t period_us_for_fps(int fps)
+{
+    return (1000000LL + fps - 1) / fps;
+}
+/* 运行时周期：cfg.frame_size 每次更新后调用（含启动默认档、切换、重试、回退），
+   无条件同步，杜绝「未切换不更新」漏洞。初始默认 15fps 周期。 */
+static int64_t s_frame_period_us = period_us_for_fps(15);
+static void apply_frame_period(framesize_t fs)
+{
+    s_frame_period_us = period_us_for_fps(cam_fps_for(fs));
+}
 
 /* 回调运行于 ESP_TIMER_TASK，只唤醒相机任务，不在定时器任务中取帧或发送。
    使用专用二值信号量，避免与驱动或其他调用链使用的任务通知相互干扰。 */
@@ -76,7 +92,7 @@ static esp_err_t cam_wait_next_frame(esp_timer_handle_t timer, SemaphoreHandle_t
     int64_t now_us = esp_timer_get_time();
     if (now_us >= *next_frame_us)
     {
-        *next_frame_us = now_us + CAM_FRAME_PERIOD_US;
+        *next_frame_us = now_us + s_frame_period_us;
         return ESP_OK;
     }
 
@@ -89,9 +105,9 @@ static esp_err_t cam_wait_next_frame(esp_timer_handle_t timer, SemaphoreHandle_t
         now_us = esp_timer_get_time();   /* 唤醒后复核期限，不因提前唤醒突破节拍 */
     } while (now_us < *next_frame_us);
 
-    *next_frame_us += CAM_FRAME_PERIOD_US;
+    *next_frame_us += s_frame_period_us;
     if (*next_frame_us <= now_us)
-        *next_frame_us = now_us + CAM_FRAME_PERIOD_US;
+        *next_frame_us = now_us + s_frame_period_us;
     return ESP_OK;
 }
 
@@ -270,6 +286,7 @@ void camera_task(void *arg)
                 cfg.jpeg_quality = cam_quality_for(cfg.frame_size);
                 cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* 适配新分辨率 */
             }
+            apply_frame_period(cfg.frame_size);   /* 无条件同步：启动默认档无切换也必须应用分级帧率 */
             /* 从空闲恢复：硬复位（deinit 后传感器仍处流模式）后重新 init */
             cam_sensor_hard_reset();
             esp_err_t e = esp_psram_is_initialized()
@@ -303,6 +320,7 @@ void camera_task(void *arg)
                 cfg.frame_size = (framesize_t)req;
                 cfg.jpeg_quality = cam_quality_for(cfg.frame_size);   /* 质量随分辨率分级，控制帧大小/带宽 */
                 cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* 缓冲随分辨率适配 */
+                apply_frame_period(cfg.frame_size);
                 active = false;
                 esp_net_video_flush();
                 esp_camera_deinit();
@@ -327,6 +345,7 @@ void camera_task(void *arg)
                              newer ? "newer request" : "original request");
                     cfg.frame_size = (framesize_t)req;
                     cfg.jpeg_quality = cam_quality_for(cfg.frame_size);
+                    apply_frame_period(cfg.frame_size);
                     esp_net_video_flush();
                     esp_camera_deinit();   /* 清理失败 init 的半配置态 */
                     cam_release_control_gpios();
@@ -345,6 +364,7 @@ void camera_task(void *arg)
                         cfg.frame_size = old_size;
                         cfg.jpeg_quality = cam_quality_for(cfg.frame_size);
                         cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* 回退同步缓冲 */
+                        apply_frame_period(cfg.frame_size);   /* 回退同步帧率 */
                         esp_net_video_flush();
                         esp_camera_deinit();   /* 清理重试失败的半配置态 */
                         cam_release_control_gpios();
@@ -373,7 +393,7 @@ void camera_task(void *arg)
 
         camera_fb_t *fb = esp_camera_fb_get();
         if (next_frame_us == 0)
-            next_frame_us = esp_timer_get_time() + CAM_FRAME_PERIOD_US;
+            next_frame_us = esp_timer_get_time() + s_frame_period_us;
         if (fb != NULL && !esp_net_video_enabled())
         {
             esp_camera_fb_return(fb);   /* 视频关闭：抓帧即弃（统计已移至网络层） */
