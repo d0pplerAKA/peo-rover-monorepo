@@ -6,7 +6,7 @@
  */
 #include "include/sensor_hub.h"
 #include "COMPONENTS/TIMER/include/timer.h"
-#include "PEO_PINMAP.H"                              /* boot banner: 驱动/传感器地址宏 */
+#include "COMPONENTS/PEO_PINMAP.H"                              /* boot banner: 驱动/传感器地址宏 */
 #include "COMPONENTS/CONTROL/include/control.h"      /* boot banner: PEO_CTRL_KP/KI/LOOP_HZ */
 #include "COMPONENTS/TOF400C/include/tof400c.h"      /* boot banner: PEO_PM_VL53_DISTANCE_MODE 等 */
 #include <stdio.h>                                   /* boot banner / dbg_f3: printf */

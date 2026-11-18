@@ -13,6 +13,7 @@ void I2C_INA_Init(void)    // INA3221
 {
     GPIO_InitTypeDef GPIO_S;
     I2C_InitTypeDef I2C_InitStruct;
+    I2C_StructInit(&I2C_InitStruct);   /* 填默认值，避免 OwnAddress1 用未初始化值 */
 
     GPIO_S.GPIO_Mode = GPIO_Mode_AF;
     GPIO_S.GPIO_OType = GPIO_OType_OD;
@@ -24,8 +25,8 @@ void I2C_INA_Init(void)    // INA3221
     GPIO_S.GPIO_Pin = PEO_PM_INA_SDA_PIN;
     GPIO_Init(PEO_PM_INA_SDA_PORT, &GPIO_S);
 
-    GPIO_PinAFConfig(PEO_PM_INA_SCL_PORT, PEO_PM_INA_SCL_SRC, PEO_PM_INA_I2C_AF);   // SCL GPIO_Pin_1  GPIOF
-    GPIO_PinAFConfig(PEO_PM_INA_SDA_PORT, PEO_PM_INA_SDA_SRC, PEO_PM_INA_I2C_AF);   // SDA GPIO_Pin_0  GPIOF
+    GPIO_PinAFConfig(PEO_PM_INA_SCL_PORT, PEO_PM_INA_SCL_SRC, PEO_PM_INA_I2C_AF);   // SCL 引脚：GPIOB GPIO_Pin_10
+    GPIO_PinAFConfig(PEO_PM_INA_SDA_PORT, PEO_PM_INA_SDA_SRC, PEO_PM_INA_I2C_AF);   // SDA 引脚：GPIOB GPIO_Pin_11
 
     I2C_DeInit(PEO_PM_INA_I2C);
     delay_ms(5);
@@ -181,6 +182,8 @@ uint8_t I2C_INA_ReadBytes(uint8_t sl_addr, uint8_t reg_addr, uint8_t *byte_buffe
         counter--;
     }
     I2C_Send7bitAddress(PEO_PM_INA_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Receiver);  /* 7-bit -> 8-bit */
+    if (byte_num == 1)
+        I2C_AcknowledgeConfig(PEO_PM_INA_I2C, DISABLE);  /* 单字节：清 ADDR 前禁 ACK */
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_INA_I2C, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) != SUCCESS)

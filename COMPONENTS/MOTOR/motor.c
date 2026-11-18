@@ -12,26 +12,25 @@
 /* ----------------------------------------------------------------------------
    PWM CHANNEL TABLE
    ----------------------------------------------------------------------------
-   8 channels = 4 motors x (IN1, IN2). Each entry names the timer, the
-   compare channel (1..4) and the timer's ARR (period) - which depends on the
-   APB bus the timer sits on (4200 on APB1, 8400 on APB2, both = 20 kHz).
+   8 路输出 = 4 个电机 x (IN1, IN2)，每项记录定时器、通道 (1..4) 和周期计数。
+   APB1 周期计数为 4200，APB2 为 8400，均为 20 kHz；硬件 ARR = 周期计数 - 1。
    ---------------------------------------------------------------------------- */
 typedef struct {
     TIM_TypeDef *tim;       /* timer peripheral                 */
     uint8_t      channel;   /* compare channel 1..4             */
-    uint16_t     arr;       /* auto-reload value (= period)     */
+    uint16_t     arr;       /* 周期计数；同时作为 100% 占空比的 CCR 值 */
 } motor_pwm_ch_t;
 
 static const motor_pwm_ch_t pwm_ch[8] = {
-    /* M1: IN1/IN2 = TIM2 CH3/CH4 (PB10/PB11) */
-    { TIM2,  3, PEO_PM_ARR_APB1 },
-    { TIM2,  4, PEO_PM_ARR_APB1 },
-    /* M2: IN1/IN2 = TIM5 CH3/CH4 (PA2/PA3) */
+    /* M1：IN1/IN2 = TIM5 CH3/CH4 (PA2/PA3)，APB1 */
     { TIM5,  3, PEO_PM_ARR_APB1 },
     { TIM5,  4, PEO_PM_ARR_APB1 },
-    /* M3: IN1/IN2 = TIM9 CH1/CH2 (PE5/PE6) */
+    /* M2：IN1/IN2 = TIM9 CH1/CH2 (PE5/PE6)，APB2 */
     { TIM9,  1, PEO_PM_ARR_APB2 },
     { TIM9,  2, PEO_PM_ARR_APB2 },
+    /* M3：IN1/IN2 = TIM12 CH1/CH2 (PB14/PB15)，APB1 */
+    { TIM12, 1, PEO_PM_ARR_APB1 },
+    { TIM12, 2, PEO_PM_ARR_APB1 },
     /* M4: IN1 = TIM10 CH1 (PB8), IN2 = TIM11 CH1 (PB9) */
     { TIM10, 1, PEO_PM_ARR_APB2 },
     { TIM11, 1, PEO_PM_ARR_APB2 },
@@ -48,7 +47,7 @@ static const motor_pwm_ch_t pwm_ch[8] = {
 /**
  * @brief  Write a raw CCR value to one PWM channel.
  * @param  ch   Channel index 0..7.
- * @param  ccr  Compare value (0 .. ARR).
+ * @param  ccr  比较值 (0 .. 周期计数)，周期计数对应 100% 占空比。
  */
 static void pwm_set_raw(uint8_t ch, uint16_t ccr)
 {
@@ -66,7 +65,7 @@ static void pwm_set_raw(uint8_t ch, uint16_t ccr)
 /**
  * @brief  Write a duty cycle to one PWM channel.
  * @param  ch    Channel index 0..7.
- * @param  duty  0..MOTOR_SPEED_MAX (per-mille). CCR = duty * ARR / 1000.
+ * @param  duty  0..MOTOR_SPEED_MAX（千分比），CCR = duty * 周期计数 / 1000。
  */
 static void pwm_set_duty(uint8_t ch, uint16_t duty)
 {
@@ -92,9 +91,9 @@ static void gpio_af_init(GPIO_TypeDef *port, uint16_t pin,
 }
 
 /**
- * @brief  Configure one timer's time-base (edge-aligned up-counting) and
- *         enable it. Prescaler = 0, so the timer counts at its bus clock
- *         (84 MHz APB1 / 168 MHz APB2) and ARR sets the 20 kHz period.
+ * @brief  配置并启动边沿对齐、向上计数的 PWM 定时器，预分频为 0。
+ *         定时器时钟为 APB1 84 MHz / APB2 168 MHz，输出频率为 20 kHz。
+ * @param  arr  周期计数；硬件 ARR 写入 arr - 1。
  */
 static void timer_pwm_init(TIM_TypeDef *tim, uint16_t arr)
 {
@@ -102,7 +101,7 @@ static void timer_pwm_init(TIM_TypeDef *tim, uint16_t arr)
 
     tb.TIM_Prescaler         = 0;
     tb.TIM_CounterMode       = TIM_CounterMode_Up;
-    tb.TIM_Period            = arr;
+    tb.TIM_Period            = arr - 1U;
     tb.TIM_ClockDivision     = TIM_CKD_DIV1;
     tb.TIM_RepetitionCounter = 0;
     TIM_TimeBaseInit(tim, &tb);
@@ -157,9 +156,9 @@ void MOTOR_Init(void)
     gpio_af_init(PEO_PM_PWM8_PORT, PEO_PM_PWM8_PIN, PEO_PM_PWM8_SRC, PEO_PM_PWM7_8_AF);
 
     /* Timers: time-base + OC channels. */
-    timer_pwm_init(TIM2,  PEO_PM_ARR_APB1);  oc_init(TIM2,  3);  oc_init(TIM2,  4);
     timer_pwm_init(TIM5,  PEO_PM_ARR_APB1);  oc_init(TIM5,  3);  oc_init(TIM5,  4);
     timer_pwm_init(TIM9,  PEO_PM_ARR_APB2);  oc_init(TIM9,  1);  oc_init(TIM9,  2);
+    timer_pwm_init(TIM12, PEO_PM_ARR_APB1);  oc_init(TIM12, 1);  oc_init(TIM12, 2);
     timer_pwm_init(TIM10, PEO_PM_ARR_APB2);  oc_init(TIM10, 1);
     timer_pwm_init(TIM11, PEO_PM_ARR_APB2);  oc_init(TIM11, 1);
 

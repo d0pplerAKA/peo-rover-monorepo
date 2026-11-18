@@ -88,8 +88,14 @@ static void ESP_LINK_SendHub(void)
     if (DMA_GetCmdStatus(PEO_DMA_ESP_TX_STREAM) != DISABLE)
         return;
 
-    /* 启动 DMA 发送（单次模式，发 flen 字节后自动停） */
+    /* 启动 DMA 发送（单次模式，发 flen 字节后自动停）。
+       RM0090 重配置序列：禁流 -> 等 EN 实际清零 -> 清全部标志 -> 配长度 -> 使能。 */
     DMA_Cmd(PEO_DMA_ESP_TX_STREAM, DISABLE);
+    while (DMA_GetCmdStatus(PEO_DMA_ESP_TX_STREAM) != DISABLE)
+        ;   /* 等 EN 实际清零 */
+    DMA_ClearFlag(PEO_DMA_ESP_TX_STREAM,
+                  DMA_FLAG_TCIF6 | DMA_FLAG_HTIF6 | DMA_FLAG_TEIF6 |
+                  DMA_FLAG_DMEIF6 | DMA_FLAG_FEIF6);
     DMA_SetCurrDataCounter(PEO_DMA_ESP_TX_STREAM, flen);
     DMA_Cmd(PEO_DMA_ESP_TX_STREAM, ENABLE);
 }
@@ -254,6 +260,13 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             CONTROL_ResetOdometer();   /* 清零四轮里程 */
             break;
 
+        case ESP_CMD_SYS_RESET:
+            /* 全车软复位：整颗 F407 回上电态（传感器/里程/PWM/队列全清）。
+               复位后 ESP32 链路自动恢复，上位机 SDK 检测 fresh 恢复沿重发 PID/分辨率。 */
+            for (volatile uint32_t d = 0; d < 200000U; d++) { }   /* 让 USART2 数据发完 */
+            NVIC_SystemReset();
+            break;
+
         default:
             status = ESP_CMD_ERR_INVALID;
             break;
@@ -281,8 +294,13 @@ void USART2_IRQHandler(void)
 
         ESP_LINK_ProcessRx(len);
 
-        /* 重置 DMA 计数器，从缓冲头收下一帧 */
+        /* 重置 DMA 计数器，从缓冲头收下一帧（RM0090 重配置序列） */
         DMA_Cmd(PEO_DMA_ESP_RX_STREAM, DISABLE);
+        while (DMA_GetCmdStatus(PEO_DMA_ESP_RX_STREAM) != DISABLE)
+            ;   /* 等 EN 实际清零 */
+        DMA_ClearFlag(PEO_DMA_ESP_RX_STREAM,
+                      DMA_FLAG_TCIF5 | DMA_FLAG_HTIF5 | DMA_FLAG_TEIF5 |
+                      DMA_FLAG_DMEIF5 | DMA_FLAG_FEIF5);
         DMA_SetCurrDataCounter(PEO_DMA_ESP_RX_STREAM, ESP_LINK_RX_BUF_SIZE);
         DMA_Cmd(PEO_DMA_ESP_RX_STREAM, ENABLE);
     }

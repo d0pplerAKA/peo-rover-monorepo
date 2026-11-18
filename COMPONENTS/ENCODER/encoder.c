@@ -30,10 +30,10 @@ static const encoder_cfg_t enc_cfg[4] = {
     /* M2: TIM3 CH1/CH2 = PA6/PA7 (AF2) */
     { PEO_PM_ENC2_TIM, PEO_PM_ENC2_CH1_PORT, PEO_PM_ENC2_CH1_PIN, PEO_PM_ENC2_CH1_SRC,
       PEO_PM_ENC2_CH2_PORT, PEO_PM_ENC2_CH2_PIN, PEO_PM_ENC2_CH2_SRC, PEO_PM_ENC2_AF },
-    /* M3: TIM8 CH1/CH2 = PC6/PC7 (AF3) */
+    /* M3 编码器：TIM4 CH1/CH2 = PD12/PD13 (AF2) */
     { PEO_PM_ENC3_TIM, PEO_PM_ENC3_CH1_PORT, PEO_PM_ENC3_CH1_PIN, PEO_PM_ENC3_CH1_SRC,
       PEO_PM_ENC3_CH2_PORT, PEO_PM_ENC3_CH2_PIN, PEO_PM_ENC3_CH2_SRC, PEO_PM_ENC3_AF },
-    /* M4: TIM4 CH1/CH2 = PD12/PD13 (AF2) */
+    /* M4 编码器：TIM8 CH1/CH2 = PC6/PC7 (AF3) */
     { PEO_PM_ENC4_TIM, PEO_PM_ENC4_CH1_PORT, PEO_PM_ENC4_CH1_PIN, PEO_PM_ENC4_CH1_SRC,
       PEO_PM_ENC4_CH2_PORT, PEO_PM_ENC4_CH2_PIN, PEO_PM_ENC4_CH2_SRC, PEO_PM_ENC4_AF },
 };
@@ -111,8 +111,8 @@ void ENCODER_Init(void)
 
     encoder_init_one(&enc_cfg[0]);   /* M1 (TIM1) */
     encoder_init_one(&enc_cfg[1]);   /* M2 (TIM3) */
-    encoder_init_one(&enc_cfg[2]);   /* M3 (TIM8) */
-    encoder_init_one(&enc_cfg[3]);   /* M4 (TIM4) */
+    encoder_init_one(&enc_cfg[2]);   /* M3 编码器 (TIM4) */
+    encoder_init_one(&enc_cfg[3]);   /* M4 编码器 (TIM8) */
 
     for (i = 0; i < 4; i++)
         g_last_cnt[i] = 0;

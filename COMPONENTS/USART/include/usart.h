@@ -14,7 +14,7 @@
 #define __USART_H__
 
 #include "stm32f4xx.h"
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 /* ============================================================================
    DEBUG CONSOLE (USART1, PA9/PA10)

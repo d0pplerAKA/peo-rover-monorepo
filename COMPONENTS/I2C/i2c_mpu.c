@@ -5,6 +5,7 @@ void I2C_MPU_Init(void)    // MPU6050
 {
     GPIO_InitTypeDef GPIO_S;
     I2C_InitTypeDef I2C_InitStruct;
+    I2C_StructInit(&I2C_InitStruct);   /* 填默认值，避免 OwnAddress1 用未初始化值 */
 
     GPIO_S.GPIO_Mode = GPIO_Mode_AF;
     GPIO_S.GPIO_OType = GPIO_OType_OD;
@@ -185,6 +186,8 @@ uint32_t I2C_MPU_ReadBytes(unsigned char slave_addr, unsigned char addr, unsigne
         counter--;
     }
     I2C_Send7bitAddress(PEO_PM_MPU6050_I2C, (uint8_t)(slave_addr << 1), I2C_Direction_Receiver);  /* 7-bit -> 8-bit */
+    if (byteNum == 1)
+        I2C_AcknowledgeConfig(PEO_PM_MPU6050_I2C, DISABLE);  /* 单字节：清 ADDR 前禁 ACK */
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_MPU6050_I2C, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) != SUCCESS)

@@ -26,7 +26,7 @@
 #define __ESP_LINK_H__
 
 #include "stm32f4xx.h"
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 /* ============================================================================
    帧格式常量
@@ -55,6 +55,7 @@
 #define ESP_CMD_MOTOR_CLOSED    0x05
 #define ESP_CMD_STOP_ALL        0x06
 #define ESP_CMD_ODOMETER_RESET  0x07
+#define ESP_CMD_SYS_RESET       0x08    /* 全车软复位：NVIC_SystemReset()（2026-11-16 定案） */
 
 /* 命令执行结果码（回显到 sensorhub.last_cmd_status） */
 #define ESP_CMD_OK              0x00    /* 成功 */

@@ -2,7 +2,7 @@
  * @file    ina3221.c
  * @brief   双 INA3221 驱动：4 路电机电流监测（I2C2 专用总线）。
  *
- *   两片 INA3221 挂在同一条 I2C2（PF1=SCL/PF0=SDA）：
+ *   两片 INA3221 挂在同一条 I2C2（PB10=SCL/PB11=SDA）：
  *     片 A (A0=GND, 0x40): CH1=M1, CH2=M2, CH3=留空
  *     片 B (A0=VS,  0x41): CH1=M3, CH2=M4, CH3=留空
  *   模块内置 R100=0.1Ω 分流电阻；分流电压 LSB=40uV，总线电压 LSB=8mV。
@@ -33,8 +33,9 @@
 #define INA3221_SHUNT_LSB_UV      40U     /* 分流电压 LSB = 40 uV  */
 #define INA3221_BUS_LSB_MV        8U      /* 总线电压 LSB = 8 mV   */
 
-/* 配置寄存器：MODE[5:3]=111 连续测分流+总线；AVG[14:12]=000 1次平均 */
-#define INA3221_CONFIG_CONTINUOUS (0x0038U)
+/* 配置寄存器：CH3/CH2/CH1 EN[2:0]=111 全开；MODE[5:3]=111 连续测分流+总线；
+   AVG[14:12]=000 1次平均；VBUSCT[11:9]/VSHCT[8:6]=000 140us（默认）。 */
+#define INA3221_CONFIG_CONTINUOUS (0x003FU)
 
 
 
@@ -68,7 +69,7 @@ static void INA3221_CheckId(uint8_t addr)
  */
 void INA3221_Init(void)
 {
-    I2C_INA_Init();   /* I2C2 @ 400 kHz, PF1=SCL/PF0=SDA */
+    I2C_INA_Init();   /* I2C2 @ 400 kHz, PB10=SCL/PB11=SDA */
 
     INA3221_Config(PEO_PM_INA3221_ADDR_A);
     INA3221_CheckId(PEO_PM_INA3221_ADDR_A);
@@ -129,10 +130,12 @@ static void ina_read_two_motors(uint8_t addr, int16_t *cur0, uint16_t *vol0,
 
     I2C_INA_ReadBytes(addr, INA3221_REG_SHUNT_CH1, raw, 8);
 
-    shunt0 = (int16_t)(((uint16_t)raw[0] << 8) | raw[1]);   /* CH1 分流电压 */
-    bus0   = (uint16_t)(((uint16_t)raw[2] << 8) | raw[3]);  /* CH1 总线电压 */
-    shunt1 = (int16_t)(((uint16_t)raw[4] << 8) | raw[5]);   /* CH2 分流电压 */
-    bus1   = (uint16_t)(((uint16_t)raw[6] << 8) | raw[7]);  /* CH2 总线电压 */
+    /* 分流电压寄存器低 3 位为保留（恒 0），右移 3 位得到 bit[15:3] 有符号数据，
+       否则电流会放大 8 倍（0x07D0=100mA 会算成 800mA）。 */
+    shunt0 = (int16_t)((int16_t)(((uint16_t)raw[0] << 8) | raw[1]) >> 3);  /* CH1 分流电压 */
+    bus0   = (uint16_t)(((uint16_t)raw[2] << 8) | raw[3]);                 /* CH1 总线电压 */
+    shunt1 = (int16_t)((int16_t)(((uint16_t)raw[4] << 8) | raw[5]) >> 3);  /* CH2 分流电压 */
+    bus1   = (uint16_t)(((uint16_t)raw[6] << 8) | raw[7]);                 /* CH2 总线电压 */
 
     /* 电流 mA = shunt_raw * 40uV / 100mOhm = shunt_raw * 0.4 */
     *cur0 = (int16_t)((float)shunt0 * INA3221_SHUNT_LSB_UV / PEO_PM_INA3221_RSHUNT_MOHM);

@@ -62,8 +62,8 @@
    | sensorhub report       | TIM8_TRG_COM_TIM14_IRQn | TIM8_TRG_COM_TIM14_IRQHandler | 3 (2) |
    | Debug RX (optional)    | USART1_IRQn             | USART1_IRQHandler       | -       |
    ----------------------------------------------------------------------------
-   NO interrupt: all 4 encoders are pure (16-bit delta), all PWM timers
-   (TIM2/5/9/10/11) edge-aligned; no nFAULT (simplified DRV8871); no I2C2.
+   不使用中断：4 路编码器均采用 16 位差分读取；PWM 定时器
+   (TIM5/9/10/11/12) 均为边沿对齐；简化版 DRV8871 无 nFAULT；I2C2 不使用中断。
    Optional entries (debug RX) are commented out in nvic.c until their
    drivers land - uncomment when the corresponding component is added.
    ============================================================================ */
@@ -83,10 +83,8 @@
 /* ============================================================================
    3. DMA STREAM / CHANNEL MAP  (RM0090 Table 43 - DMA1 request mapping)
    ----------------------------------------------------------------------------
-   | Peripheral | Direction | Stream / Channel | IRQ channel          |
-   |------------|-----------|------------------|----------------------|
-   | SPI2 (TFT) | RX (opt.) | DMA1_Stream3 Ch0 | DMA1_Stream3_IRQn    |
-   | SPI2 (TFT) | TX (opt.) | DMA1_Stream4 Ch0 | DMA1_Stream4_IRQn    |
+   TFT 已移除，不再分配其 DMA 通道；PB14/PB15 用于 M3 PWM。
+   ESP32 链路的 USART2 DMA 映射见 PEO_PINMAP.H 第 13 节。
    ============================================================================ */
 
 /* DMA stream/channel macros (PEO_DMA_*) live in PEO_PINMAP.H section 13 -

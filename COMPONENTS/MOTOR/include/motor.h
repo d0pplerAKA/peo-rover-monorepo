@@ -8,11 +8,11 @@
  * (TIM1/3/4/8, PEO_PINMAP.H section 4) are a separate concern and are
  * intentionally left untouched.
  *
- * PWM routing (PEO_PINMAP.H section 5):
- *   M1 -> TIM2  CH3/CH4 = PB10/PB11      (APB1, ARR 4200 @ 20 kHz)
- *   M2 -> TIM5  CH3/CH4 = PA2/PA3        (APB1, ARR 4200 @ 20 kHz)
- *   M3 -> TIM9  CH1/CH2 = PE5/PE6        (APB2, ARR 8400 @ 20 kHz)
- *   M4 -> TIM10 CH1(PB8) + TIM11 CH1(PB9) (APB2, ARR 8400 @ 20 kHz)
+ * PWM 映射（PEO_PINMAP.H 第 5 节，均为 20 kHz）：
+ *   M1 -> TIM5  CH3/CH4 = PA2/PA3        (APB1，周期计数 4200，ARR 4199)
+ *   M2 -> TIM9  CH1/CH2 = PE5/PE6        (APB2，周期计数 8400，ARR 8399)
+ *   M3 -> TIM12 CH1/CH2 = PB14/PB15      (APB1，周期计数 4200，ARR 4199)
+ *   M4 -> TIM10 CH1(PB8) + TIM11 CH1(PB9) (APB2，周期计数 8400，ARR 8399)
  *
  * DRV8871 direction logic (simplified module, IN1/IN2 only):
  *   IN1 = PWM, IN2 = 0    ->  forward
@@ -22,8 +22,8 @@
  *
  * Architecture rule (see PEO_PINMAP.H / rcc.h):
  *   - This component ONLY configures its own peripherals (GPIO + TIM).
- *   - Timer clocks are enabled by RCC_Clock_Init() (TIM2/5 on APB1,
- *     TIM9/10/11 on APB2) - never re-enabled here.
+ *   - 定时器时钟由 RCC_Clock_Init() 统一使能：APB1 的 TIM5/12、
+ *     APB2 的 TIM9/10/11；此处不重复使能。
  *   - Edge-aligned PWM uses no timer interrupt, so no NVIC channel is
  *     configured here (NVIC_InitAll() in COMPONENTS/NVIC).
  ******************************************************************************
@@ -32,7 +32,7 @@
 #define __MOTOR_H__
 
 #include "stm32f4xx.h"
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 /* ============================================================================
    MOTOR INDICES (0-based)
@@ -45,10 +45,9 @@
 /* ============================================================================
    SPEED SCALE
    ----------------------------------------------------------------------------
-   Speeds are given in per-mille of the PWM period (+1000 = full forward,
-   -1000 = full reverse). Internally each channel is scaled to its own
-   timer's ARR (4200 on APB1, 8400 on APB2) so the caller never has to know
-   which bus a motor's timer lives on.
+   速度使用 PWM 周期的千分比（+1000 全速正转，-1000 全速反转）。
+   各通道按周期计数缩放 CCR（APB1 为 4200，APB2 为 8400），
+   100% 占空比时 CCR = 周期计数 = 硬件 ARR + 1，调用方无需区分总线。
    ============================================================================ */
 #define MOTOR_SPEED_MAX (1000)
 

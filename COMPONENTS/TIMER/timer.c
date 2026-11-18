@@ -8,7 +8,7 @@
  ******************************************************************************
  */
 #include "include/timer.h"
-#include "PEO_PINMAP.H"          /* PEO_PM_SYSCLK_HZ */
+#include "COMPONENTS/PEO_PINMAP.H"          /* PEO_PM_SYSCLK_HZ */
 
 /** Millisecond counter, incremented by SysTick_Handler every 1 ms. */
 static volatile uint32_t g_ms_tick = 0;
@@ -37,6 +37,11 @@ void TIMER_Init(void)
     {
         while (1);   /* unreachable: 168000 reload always fits */
     }
+
+    /* 启用 DWT 周期计数器（mdelay 忙等用，独立于 SysTick，可在中断上下文安全使用）。 */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL   |= DWT_CTRL_CYCCNTENA_Msk;
 }
 
 /**
@@ -65,9 +70,13 @@ unsigned long get_tick(unsigned long *count)
  */
 void mdelay(unsigned long ms)
 {
-    unsigned long start = g_ms_tick;
-    while ((g_ms_tick - start) < ms)
+    /* DWT 周期计数器忙等（不依赖 SysTick）：可在中断上下文安全使用。
+       否则 EXTI3 内 FIFO 溢出 -> mpu_reset_fifo -> mdelay(50) 会因 SysTick
+       优先级更低、抢不进 EXTI3 而永久等待（死锁）。无符号减法处理 CYCCNT 回绕。 */
+    uint32_t cycles = (uint32_t)(ms * (PEO_PM_SYSCLK_HZ / 1000UL));
+    uint32_t start  = DWT->CYCCNT;
+    while ((DWT->CYCCNT - start) < cycles)
     {
-        /* spin until the SysTick counter advances by 'ms' */
+        /* spin */
     }
 }

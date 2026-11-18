@@ -18,7 +18,7 @@
  ******************************************************************************
  */
 #include "stm32f4xx.h"
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 #include "COMPONENTS/RCC/include/rcc.h"
 #include "COMPONENTS/NVIC/include/nvic.h"
@@ -72,11 +72,12 @@ int main(void)
     TOF400C_Init();          /* 3x VL53L1X (EXTI0/1/2, I2C3 init implicit) */
 #endif
 #if PEO_ENABLE_INA3221
-    INA3221_Init();          /* INA3221 current monitor (I2C2, PF1=SCL/PF0=SDA) */
+    INA3221_Init();          /* INA3221 current monitor (I2C2, PB10=SCL/PB11=SDA) */
     INA3221_PollInit();      /* TIM7 轮询读电流电压 -> sensorhub（SENSOR_RATE_INA_HZ） */
 #endif
 #if PEO_ENABLE_MPU6050
     MPU6050_Init();          /* MPU6050 DMP (PE3/EXTI3, start via MPU6050_Start()) */
+    MPU6050_Start();
 #endif
 
     /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 命令接收 */
@@ -93,12 +94,12 @@ int main(void)
         /* ── 命令消费：中断只入队，这里出队执行 ──
            命令来源：① 上位机（WiFi -> ESP32 -> USART2）② ESP32 端手柄映射
            （Xbox 手柄在 ESP32 本地解析，映射成命令帧后下发，不再传原始手柄数据）。 */
-        ESP_Cmd_t cmd;
-        if (ESP_LINK_PopCommand(&cmd))
-        {
-            ESP_LINK_ExecCommand(&cmd);
-        }
+        //ESP_Cmd_t cmd;
+        //if (ESP_LINK_PopCommand(&cmd))
+        //{
+          //  ESP_LINK_ExecCommand(&cmd);
+        //}
 
-        mdelay(10);   /* 10 ms 调度节拍 */
+        mdelay(100);   /* 10 ms 调度节拍 */
     }
 }

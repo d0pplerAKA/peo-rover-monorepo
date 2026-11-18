@@ -11,8 +11,8 @@
  * Routing (PEO_PINMAP.H section 4):
  *   M1 -> TIM1 CH1/CH2 = PE9/PE11   (AF1)
  *   M2 -> TIM3 CH1/CH2 = PA6/PA7    (AF2)
- *   M3 -> TIM8 CH1/CH2 = PC6/PC7    (AF3)
- *   M4 -> TIM4 CH1/CH2 = PD12/PD13  (AF2)
+ *   M3 编码器 -> TIM4 CH1/CH2 = PD12/PD13 (AF2)
+ *   M4 编码器 -> TIM8 CH1/CH2 = PC6/PC7   (AF3)
  *
  * Hall encoder: 11 PPR on the motor shaft -> x4 = 44 counts/motor-rev;
  * gearbox 45:1 -> 1980 counts/output-rev; 65 mm wheel -> ~0.103 mm/count.
@@ -29,7 +29,7 @@
 #define __ENCODER_H__
 
 #include "stm32f4xx.h"
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 /* ============================================================================
    ENCODER INDICES (0-based, same as the MOTOR component's M1..M4)

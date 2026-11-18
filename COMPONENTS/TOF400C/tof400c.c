@@ -165,7 +165,7 @@ uint8_t TOF400C_BOOT_Init(uint8_t assigned_addr)
     }
 
     delay_ms(5);
-    status = VL53L1X_SetI2CAddress((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, assigned_addr);
+    status = VL53L1X_SetI2CAddress((uint16_t) PEO_PM_VL53_DEFAULT_ADDR, (uint8_t)(assigned_addr << 1));
     if(status)
     {
         printf("[%x] sensor set new addr failed!\n", assigned_addr);

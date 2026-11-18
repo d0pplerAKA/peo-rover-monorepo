@@ -5,6 +5,7 @@ void I2C_TOF_Init(void)    // TOF400C
 {
     GPIO_InitTypeDef GPIO_S;
     I2C_InitTypeDef I2C_InitStruct;
+    I2C_StructInit(&I2C_InitStruct);   /* 填默认值，避免 OwnAddress1 用未初始化值 */
 
     GPIO_S.GPIO_Mode = GPIO_Mode_AF;
     GPIO_S.GPIO_OType = GPIO_OType_OD;
@@ -212,6 +213,7 @@ uint8_t I2C_TOF_ReadByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_recei
         counter--;
     }
     I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Receiver);
+    I2C_AcknowledgeConfig(PEO_PM_VL53_I2C, DISABLE);  /* 单字节：清 ADDR 前禁 ACK */
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_VL53_I2C, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) != SUCCESS)
@@ -224,7 +226,6 @@ uint8_t I2C_TOF_ReadByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_recei
         
         counter--;
     }
-    I2C_AcknowledgeConfig(PEO_PM_VL53_I2C, DISABLE);
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_VL53_I2C, I2C_EVENT_MASTER_BYTE_RECEIVED) != SUCCESS)

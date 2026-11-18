@@ -42,7 +42,7 @@
 #define __CONTROL_H__
 
 #include "stm32f4xx.h"
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 /* ============================================================================
    CONTROL LOOP TIMEBASE (TIM6, APB1, 16-bit basic timer)

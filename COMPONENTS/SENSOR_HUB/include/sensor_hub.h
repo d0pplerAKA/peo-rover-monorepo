@@ -58,7 +58,7 @@
 #define PEO_ENABLE_CONTROL    0
 #define PEO_ENABLE_TOF400C    0
 #define PEO_ENABLE_INA3221    0
-#define PEO_ENABLE_MPU6050    0
+#define PEO_ENABLE_MPU6050    1
 
 /* ============================================================================
    传感器数据包（当前状态快照）

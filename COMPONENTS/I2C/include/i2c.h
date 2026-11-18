@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include "stm32f4xx.h"
 
-#include "PEO_PINMAP.H"
+#include "COMPONENTS/PEO_PINMAP.H"
 
 #include "COMPONENTS/DELAY/include/delay.h"
 

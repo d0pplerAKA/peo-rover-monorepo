@@ -16,7 +16,7 @@
  */
 void RCC_Clock_Init(void)
 {
-    RCC_AHB1PeriphClockCmd(PEO_RCC_AHB1_EN, ENABLE);   /* GPIOA-E         */
-    RCC_APB1PeriphClockCmd(PEO_RCC_APB1_EN, ENABLE);   /* TIM2/3/4/5, I2C1/3, SPI2 */
-    RCC_APB2PeriphClockCmd(PEO_RCC_APB2_EN, ENABLE);   /* TIM1/8/9/10/11, USART1, SYSCFG */
+    RCC_AHB1PeriphClockCmd(PEO_RCC_AHB1_EN, ENABLE);   /* GPIOA-E 与 DMA1 时钟 */
+    RCC_APB1PeriphClockCmd(PEO_RCC_APB1_EN, ENABLE);   /* TIM3/4/5/6/7/12/14、I2C1/2/3、USART2/3 时钟 */
+    RCC_APB2PeriphClockCmd(PEO_RCC_APB2_EN, ENABLE);   /* TIM1/8/9/10/11、USART1、SYSCFG 时钟 */
 }
