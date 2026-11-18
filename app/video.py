@@ -11,7 +11,7 @@ from app.i18n import tr
 
 
 class VideoWidget(QWidget):
-    """显示 UDP 8889 收到的 JPEG 帧（等比缩放，居中）。"""
+    """显示 TCP 8890 收到的 JPEG 帧（等比缩放，居中）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)

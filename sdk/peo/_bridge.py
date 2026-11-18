@@ -35,7 +35,6 @@ class _Bridge:
         self.client = RoverClient()
         self._snap = None
         self._snap_t = 0.0
-        self.sensor_count = 0
         self._lock = threading.Lock()
         self._lease = ControlLock()
         self._lifecycle = threading.Lock()
@@ -49,7 +48,7 @@ class _Bridge:
         self.client.on_sensor = self._on_sensor
         self.client.on_disconnected = self._on_disconnected
 
-    def connect(self, host='192.168.4.1'):
+    def connect(self, host='peo_rover.local'):
         if _stop_requested.is_set():
             raise ScriptStopped(tr('script stopped', '脚本已停止'))
         with self._lifecycle:
@@ -90,7 +89,6 @@ class _Bridge:
                     self._recovered = False
             self._snap = sensor
             self._snap_t = time.monotonic()
-            self.sensor_count += 1
 
     def _on_disconnected(self):
         self._connected = False

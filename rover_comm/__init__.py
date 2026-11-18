@@ -13,26 +13,26 @@ from .protocol import (
     CMD_LED_TOGGLE, CMD_SENSOR_RESET, CMD_MOTOR, CMD_PID,
     CMD_MOTOR_CLOSED, CMD_STOP_ALL, CMD_ODOMETER_RESET, CMD_SYS_RESET,
     ST_OK, ST_ERR_INVALID, ST_ERR_BADLEN, ST_ERR_BADMOTOR,
-    TCP_CMD_PORT, UDP_VIDEO_PORT, AP_SSID, AP_PASSWORD,
+    TCP_CMD_PORT, VIDEO_TCP_PORT,
     # 函数
     crc16_ccitt, pack_esp_frame, unpack_esp_frame,
     encode_cmd, cmd_motor, cmd_pid, cmd_motor_closed, cmd_stop_all,
     cmd_odometer_reset, cmd_sys_reset,
     # 结构
-    SensorData, VideoHeader,
-    SENSOR_DATA, VIDEO_HDR,
+    SensorData,
+    SENSOR_DATA, VIDEO_REC,
 )
-from .client import RoverClient, FrameAssembler
+from .client import RoverClient
 
 __all__ = [
     "CMD_LED_TOGGLE", "CMD_SENSOR_RESET", "CMD_MOTOR", "CMD_PID",
     "CMD_MOTOR_CLOSED", "CMD_STOP_ALL", "CMD_ODOMETER_RESET", "CMD_SYS_RESET",
     "ST_OK", "ST_ERR_INVALID", "ST_ERR_BADLEN", "ST_ERR_BADMOTOR",
-    "TCP_CMD_PORT", "UDP_VIDEO_PORT", "AP_SSID", "AP_PASSWORD",
+    "TCP_CMD_PORT", "VIDEO_TCP_PORT",
     "crc16_ccitt", "pack_esp_frame", "unpack_esp_frame",
     "encode_cmd", "cmd_motor", "cmd_pid", "cmd_motor_closed", "cmd_stop_all",
     "cmd_odometer_reset", "cmd_sys_reset",
-    "SensorData", "VideoHeader",
-    "SENSOR_DATA", "VIDEO_HDR",
-    "RoverClient", "FrameAssembler",
+    "SensorData",
+    "SENSOR_DATA", "VIDEO_REC",
+    "RoverClient",
 ]

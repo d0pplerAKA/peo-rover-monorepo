@@ -1,18 +1,20 @@
 # peo SDK — Current API Reference
 
-Updated 2026-11-16. This document describes the checked-in implementation.
+Updated 2026-11-17. This document describes the checked-in implementation.
 Install from the repository root; see [README.md](README.md) and
 [wire protocol](../PROTOCOL.md). The old PDF is not synchronized with this revision.
 
 ## Lifecycle
 
-### `connect(host="192.168.4.1") -> None`
+### `connect(host="peo_rover.local") -> None`
 
-Acquire the local control lease (loopback TCP 8892), open TCP 8888 and bind UDP
-8889, then start independent receive/send/PING workers. UDP bind failure is an
-explicit connection failure, not a silent video downgrade. Repeated connect to
-the same active host is a no-op; changing host closes the old session first.
-Failure releases sockets and the lease. A pending IDE stop raises `ScriptStopped`.
+Acquire the local control lease (loopback TCP 8892) and open TCP 8888.
+TCP 8890 is opened only after cam.on(); cam.off() closes it and stops retries.
+The client sends a one-way safety heartbeat every 500 ms (no ACK or RTT).
+While video is enabled, read timeout is 5 s and reconnect backoff is 2 s;
+video failure leaves the command channel up. Repeated connect to the same active host is a no-op;
+changing host closes the old session first. Failure releases sockets and the
+lease. A pending IDE stop raises `ScriptStopped`.
 
 The bridge waits for fresh telemetry before applying cached PID/resolution.
 Ordinary action calls wait up to 500 ms for a valid generation before sending.
@@ -54,12 +56,11 @@ variable captures its value at that moment.
 | `wheels.bus_voltage_mV` | four bus voltages, mV |
 | `sys.cpu0 / cpu1` | S3 CPU utilization percent |
 | `sys.ram` | internal RAM used percent |
-| `sys.rtt_ms` | last matched PING round-trip time, ms |
 
 Sensor properties return `None` when disconnected or before the first snapshot.
 A stale connected snapshot is retained for inspection; check `fresh` before
 using it for control. Missing distance fields are invalid, not valid zero ranges.
-S3 JSON arrives at approximately 25 Hz. Resource values are read on demand;
+S3 JSON arrives at approximately 20 Hz. Resource values are read on demand;
 reconnect does not spawn accumulating system-poll threads.
 
 ## Actions
@@ -194,5 +195,5 @@ configuration paths and do not delete personal configuration.
 
 IDE Stop immediately queues STOP and sets cancellation. It does not kill a
 Python thread. Scripts and active/multiline shell sessions cannot run together.
-The 500 ms network PING continues independently of user code, so heartbeat does
+The 500 ms one-way safety heartbeat continues independently of user code, so heartbeat does
 not detect a stalled algorithm. Always check sensor/frame freshness in algorithms.

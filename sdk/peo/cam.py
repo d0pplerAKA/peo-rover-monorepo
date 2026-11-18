@@ -18,7 +18,6 @@ class Cam:
         self._decode_lock = threading.Lock()
         self._decoded_raw = self._decoded = None
         self._on = False
-        self.frames_total = 0
         self.on_new_frame = None
         _bridge.client.on_frame = self._on_frame
 
@@ -28,7 +27,6 @@ class Cam:
                 return
             self._latest = (jpeg, frame_id)
             self._last_t = time.monotonic()
-            self.frames_total += 1
             self._lock.notify_all()
         callback = self.on_new_frame
         if callback:

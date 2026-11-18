@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from rover_comm.client import RoverClient
 from rover_comm.control import ControlLock
-from rover_comm.protocol import SensorData, TCP_CMD_PORT
+from rover_comm.protocol import SensorData, TCP_CMD_PORT, VIDEO_TCP_PORT
 from app.i18n import tr, set_language, current_language
 from app.theme import apply_theme
 from app.video import VideoWidget
@@ -60,28 +60,14 @@ class _StreamRelay(io.TextIOBase):
 
     替代 io.StringIO 缓冲——脚本运行中 print 的内容实时进控制台，
     而不是结束后一次性刷出。
-    libjpeg 噪音行（解码警告）过滤丢弃——不进控制台、不刷屏幕
-    （C 层警告另有 fd 2 → stderr.log 归档）。
     """
-
-    _LIBJPEG_NOISE = (
-        "Corrupt JPEG data",
-        "Empty JPEG image",
-        "Unsupported marker type",
-        "Bogus marker",
-        "premature end of data segment",
-        "extraneous bytes before marker",
-        "Invalid JPEG file structure",
-        "missing SOS marker",
-        "JPEG datastream contains no image",
-    )
 
     def __init__(self, q: "queue.Queue"):
         super().__init__()
         self._q = q
 
     def write(self, s: str) -> int:
-        if s and not any(pat in s for pat in self._LIBJPEG_NOISE):
+        if s:
             _enqueue_output(self._q, s)
         return len(s)
 
@@ -174,7 +160,7 @@ class CodeEditor(QPlainTextEdit):
         self.setExtraSelections([sel])
 
 _MAX_LOG_BLOCKS = 500      # 日志行数上限：超出自动覆盖最旧
-_PERF_INTERVAL_MS = 1000   # 性能计数刷新周期
+_PERF_INTERVAL_MS = 1000   # CPU/RAM 状态刷新周期
 _IDE_VIDEO_MS = 33         # Main-thread latest-frame polling; bounded rendering cadence
 _IDE_SHOW_MIN_S = 0.030    # Tab2 显示最小间隔：均匀节奏（24fps=42ms 帧间隔不丢帧）
 
@@ -255,9 +241,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.resize(1280, 800)        # 初始窗口大小（三端工作台合理尺寸）
-        self._sensor_count = 0        # 性能计数（1s 窗口）
-        self._perf_tick = 0           # UI performance sampling only; client owns heartbeat
-        self._frame_count = 0
         self._video_on = False
 
         self._control_lease = ControlLock()
@@ -293,8 +276,6 @@ class MainWindow(QMainWindow):
         self._shown_seq = -1           # Tab2 已显示帧 seq（积压重复通知去重）
         self._last_ide_show = None     # Tab2 上次显示时刻（节流用）
         self._bad_dump_count = 0       # 坏帧取证落盘计数（上限 8）
-        self._sdk_sensor_base = 0      # Tab2 状态栏：SDK 遥测计数基线
-        self._sdk_frame_base = 0
         # shell REPL 状态
         self._shell_q = queue.Queue(maxsize=4)      # 主线程 → shell 线程的输入行
         self._shell_out_q = queue.Queue(maxsize=256)  # shell 线程 → 主线程的输出（QTimer drain）
@@ -418,7 +399,7 @@ class MainWindow(QMainWindow):
         f.setVerticalSpacing(3)
 
         row = QHBoxLayout()
-        self.host_edit = QLineEdit("192.168.4.1")
+        self.host_edit = QLineEdit("peo_rover.local")
         self.connect_btn = QPushButton()
         self.connect_btn.clicked.connect(self._on_connect_clicked)
         self.disconnect_btn = QPushButton()
@@ -963,7 +944,7 @@ class MainWindow(QMainWindow):
             return
         cancel = self._connect_cancel = threading.Event()
         self._connecting = True
-        host = self.host_edit.text().strip() or "192.168.4.1"
+        host = self.host_edit.text().strip() or "peo_rover.local"
         self.connect_btn.setEnabled(False)
         self.disconnect_btn.setEnabled(False)
         self.video_btn.setEnabled(False)
@@ -976,7 +957,8 @@ class MainWindow(QMainWindow):
                     self._control_lease.release()
                     self._sig_conn.emit(False, "Connection cancelled")
                     return
-                self.client.connect(host, TCP_CMD_PORT, TCP_CMD_PORT + 1)
+                # 这里只配置视频端口；点击开启视频后才真正连接 8890。
+                self.client.connect(host, tcp_port=TCP_CMD_PORT, video_port=VIDEO_TCP_PORT)
                 self.client.wait_ready(1.0)
                 if cancel.is_set():
                     self.client.close()
@@ -1026,8 +1008,6 @@ class MainWindow(QMainWindow):
             self._frame_mailbox = None
         self.video.clear()                        # 视频 → 占位
         self._reset_sensor_placeholders()         # 仪表盘 → "—" 占位
-        self._sensor_count = 0                    # 性能计数立即归零（不残留旧 Hz/fps）
-        self._frame_count = 0
         self._update_perf()
         self._log("✗ " + tr("log_disconn"))
 
@@ -1054,7 +1034,6 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_sensor(self, s: SensorData):
-        self._sensor_count += 1
         def fmt_mm(v, ok):
             return f"{v} mm" if ok else f"{v} mm({tr('invalid')})"
         self.lbl_dist_f.setText(fmt_mm(s.dist_front_mm, s.dist_front_status == 0 and not s.link_stale))
@@ -1074,8 +1053,6 @@ class MainWindow(QMainWindow):
     def _on_ack(self, ack: dict):
         """ESP32 命令回执（PROTOCOL.md §2.1 ACK）。"""
         cmd = ack.get("ack", "?")
-        if cmd == "PING":
-            return  # RTT is shown in the status bar; do not flood logs at 2 Hz.
         status = ack.get("status", -1)
         self._log(f"{tr('log_ack')} {cmd} → "
                   + (tr("st_ok") if status == 0 else f"{tr('st_err')}{status}"))
@@ -1108,7 +1085,6 @@ class MainWindow(QMainWindow):
         img = QImage.fromData(jpeg, "JPEG")
         if img.isNull():
             return
-        self._frame_count += 1
         self.video.show_image(frame_id, img)
 
     @Slot(str)
@@ -1148,80 +1124,35 @@ class MainWindow(QMainWindow):
     # ============================ 性能 ============================
 
     def _update_perf(self):
-        self._perf_tick = (self._perf_tick + 1) % 5
+        """每秒刷新 CPU0/CPU1/RAM；来源为当前连接的 sensor.sys。"""
         if self.tabs.currentIndex() == 1:
-            self._update_perf_ide()      # Tab2：SDK 遥测（GUI client 已断）
+            self._update_perf_ide()
             return
-        sys_info = self.client.sys_info or {}
-        cpu0 = sys_info.get("cpu0")
-        cpu1 = sys_info.get("cpu1")
+        self._show_sys_info(self.client.sys_info)
+
+    def _show_sys_info(self, sys_info):
+        """两个 Tab 共用格式化；没有遥测时显示占位符，RAM 显示使用率。"""
+        sys_info = sys_info or {}
+        cpu0, cpu1 = sys_info.get("cpu0"), sys_info.get("cpu1")
         cpu0_txt = "-" if cpu0 is None else f"{cpu0}%"
         cpu1_txt = "-" if cpu1 is None else f"{cpu1}%"
         free, total = sys_info.get("ram_free"), sys_info.get("ram_total")
         ram_txt = "-"
         if isinstance(free, (int, float)) and isinstance(total, (int, float)) and total > 0:
             ram_txt = f"{round((total - free) * 100 / total)}%"
-        rtt = self.client.last_rtt_ms
-        rtt_txt = "-" if rtt is None else f"{rtt} ms"
-        asm = getattr(self.client, "_video_asm", None)
-        loss_txt = self._loss_text(asm)
-        txt = (f"{tr('perf_sensor')} {self._sensor_count} Hz   "
-               f"{tr('perf_video')} {self._frame_count} fps"
-               f"{loss_txt}   "
-               f"{tr('perf_cpu0')} {cpu0_txt}   {tr('perf_cpu1')} {cpu1_txt}   "
-               f"{tr('perf_ram')} {ram_txt}   {tr('perf_rtt')} {rtt_txt}")
-        self.lbl_perf.setText(txt)
-        self._sensor_count = 0
-        self._frame_count = 0     # 每秒归零：显示的是速率不是累计帧数
-
-    @staticmethod
-    def _loss_text(asm) -> str:
-        """帧组装器丢包统计：坏帧（残帧+结构坏）/ 坏包（迟到+非法）。"""
-        if asm is None:
-            return ""
-        lost_f = asm.frames_aborted + asm.frames_bad_jpeg
-        lost_p = asm.packets_late + asm.packets_bad
-        return f"   {tr('perf_loss')} {lost_f}f/{lost_p}p"
+        self.lbl_perf.setText(
+            f"{tr('perf_cpu0')} {cpu0_txt}   {tr('perf_cpu1')} {cpu1_txt}   "
+            f"{tr('perf_ram')} {ram_txt}")
 
     def _update_perf_ide(self):
-        """Tab2 状态栏：读 SDK 遥测（shell/脚本连接的 _bridge 数据）。
-
-        GUI 自己的 client 在切 Tab2 时已断开（单客户端规范），
-        状态栏改读 SDK：传感器计数做差算 Hz、cam 帧计数做差算 fps、
-        CPU/RAM/RTT 取 peo.sys（SDK 后台线程 1s 刷新）。
-        """
+        """Tab2 使用 SDK 连接的 sensor.sys（切换后 GUI 自身连接已关闭）。"""
         try:
             self._ensure_sdk_path()
-            import peo as _peo
-            bridge = _peo._bridge
-            cam = _peo.cam
-            ok = True
-        except Exception:
-            ok = False
-        if ok:
-            n = bridge.sensor_count
-            hz = n - self._sdk_sensor_base
-            self._sdk_sensor_base = n
-            f = cam.frames_total
-            fps = f - self._sdk_frame_base
-            self._sdk_frame_base = f
-            cpu0_txt = "-" if _peo.sys.cpu0 is None else f"{_peo.sys.cpu0}%"
-            cpu1_txt = "-" if _peo.sys.cpu1 is None else f"{_peo.sys.cpu1}%"
-            ram_txt = "-" if _peo.sys.ram is None else f"{_peo.sys.ram}%"
-            rtt = _peo.sys.rtt_ms
-            rtt_txt = "-" if rtt is None else f"{rtt} ms"
-            asm = getattr(bridge.client, "_video_asm", None)
-            loss_txt = self._loss_text(asm)
-        else:
-            hz = fps = 0
-            cpu0_txt = cpu1_txt = ram_txt = rtt_txt = "-"
-            loss_txt = ""
-        txt = (f"{tr('perf_sensor')} {hz} Hz   "
-               f"{tr('perf_video')} {fps} fps"
-               f"{loss_txt}   "
-               f"{tr('perf_cpu0')} {cpu0_txt}   {tr('perf_cpu1')} {cpu1_txt}   "
-               f"{tr('perf_ram')} {ram_txt}   {tr('perf_rtt')} {rtt_txt}")
-        self.lbl_perf.setText(txt)
+            import peo
+            sys_info = peo._bridge.client.sys_info
+        except ImportError:
+            sys_info = None
+        self._show_sys_info(sys_info)
 
     def closeEvent(self, event):
         self._closing = True

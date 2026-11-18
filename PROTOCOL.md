@@ -14,7 +14,7 @@
                                                    WiFi AP
  [上位机 Python (PySide6 GUI / peo SDK 脚本)] <──────────────> [ESP32-S3]
          ▲                                                      │  ▲
-         └────────── UDP 8889：视频流（JPEG 直推）──────────────┘  │
+         └────────── TCP 8890：视频流（JPEG 直推）──────────────┘  │
                                                                   │
                                                           USART2 @ 921600（PD5=TX / PD6=RX）
                                                           esp_link 帧协议（见 §1）
@@ -29,7 +29,7 @@
 | 链路 | 物理层 | 协议 | 方向 |
 |---|---|---|---|
 | ESP32-S3 ↔ F407 | USART2 921600 | esp_link 帧（§1）| 双向 |
-| ESP32-S3 ↔ 上位机 | WiFi（ESP32 开 AP）| TCP 8888 JSON 命令（§2）+ UDP 8889 视频（§3）| 双向 / 单向 |
+| ESP32-S3 ↔ 上位机 | WiFi（ESP32 开 AP）| TCP 8888 JSON 命令（§2）+ TCP 8890 视频（§3）| 双向 / 单向 |
 
 ### 0.1 组员资源清单（上位机可获得的全部资源）
 
@@ -37,12 +37,12 @@
 
 | # | 资源 | 实时数据流 | 控制/操作 |
 |---|---|---|---|
-| 1 | MPU6050（姿态+加速度） | 约 25Hz JSON `imu.quat[4]` / `imu.accel_g[3]`（§2.1）| 无（只读）|
-| 2 | INA3221（四路电流+总线电压） | 约 25Hz JSON `power.current_mA[4]` / `power.bus_voltage_mV[4]`（§2.1）| 无（只读）|
-| 3 | 编码器（速度+里程） | 约 25Hz JSON `wheels.speed_d100[4]`（0.01 cm/s）/ `wheels.odometer[4]`（§2.1）| **清零里程**：`{"cmd": "ODOMETER_RESET"}`（§1.3 0x07）|
+| 1 | MPU6050（姿态+加速度） | 约 20Hz JSON `imu.quat[4]` / `imu.accel_g[3]`（§2.1）| 无（只读）|
+| 2 | INA3221（四路电流+总线电压） | 约 20Hz JSON `power.current_mA[4]` / `power.bus_voltage_mV[4]`（§2.1）| 无（只读）|
+| 3 | 编码器（速度+里程） | 约 20Hz JSON `wheels.speed_d100[4]`（0.01 cm/s）/ `wheels.odometer[4]`（§2.1）| **清零里程**：`{"cmd": "ODOMETER_RESET"}`（§1.3 0x07）|
 | 4 | 四电机 PWM | `wheels.speed_d100[4]` 回显 | 开环：`MOTOR`；闭环速度：`MOTOR_CLOSED`；急停：`STOP_ALL`（§2.1）|
 | 5 | 电机 PI 参数 | 无 | `{"cmd": "PID", "kp": .., "ki": ..}`（四轮共享增益，§1.3 0x04）|
-| 6 | 摄像头 | UDP 8889 视频帧 JPEG（§3）→ `peo.cam.read()` / `RoverClient.on_frame` | 无（只读；分辨率由上位机 `CAM_RES` 热切换）|
+| 6 | 摄像头 | TCP 8890 视频帧 JPEG（§3）→ `peo.cam.read()` / `RoverClient.on_frame` | 无（只读；分辨率由上位机 `CAM_RES` 热切换）|
 
 Python 侧对应：`SensorData` 字段（§4）、`rover_comm.client.RoverClient`（网络层）、
 `peo` SDK（§2.4 组员编程模型，组员唯一接口）。
@@ -148,22 +148,25 @@ F407 端序列化 = **整个 struct 内存拷贝（原生 C 布局，含 padding
 | `CAM_RES` | `res`: QQVGA / QVGA / VGA / SVGA |
 | `VIDEO_ON` / `VIDEO_OFF` | S3 本地视频开关 |
 | `WS2812` | `r/g/b` 必填整数 0–255；`brightness` 可省略，默认 100，提供时须为整数 0–100 |
-| `PING` | 数值 `t` 原样回显；省略/非 number 使用 0 |
+
+> **WS2812 状态灯语义（2026-11-16）**：未连上笔记本热点 = 蓝色呼吸（1.6s 周期）；
+> 连上 = 绿色快闪 3 次 → 绿色常亮；断连 = 回到呼吸。手动 `WS2812` 命令在连接状态下
+> 覆盖常亮色，连接状态变化（断连/重连）后自动回到状态灯语义。
 
 ```json
 {"cmd":"MOTOR_CLOSED","motor":1,"speed_d100":4000,"gen":3}
 {"cmd":"WS2812","r":128,"g":0,"b":0,"brightness":50,"gen":3}
 {"cmd":"STOP_ALL"}
-{"cmd":"PING","t":123456}
+{"type":"heartbeat"}
 ```
 
 普通 ACK：`{"ack":"命令名","status":0}`。0 表示桥接层接受，1 表示参数错误/未知命令/当前无法接受，2 表示显式 gen 过期。**ACK 不是 F407 执行确认，也不是相机/灯珠硬件完成确认。** 未识别对象、非法 JSON 和某些无 gen 的旧消息可能静默丢弃。
 
-S3 每次锁存 STOP 递增 uint32 `gen` 并在遥测发送。带 gen 时须为当前 uint32 整数；无 gen 保留固件兼容路径。当前 Python 客户端除 STOP/PING 外，必须获得可用遥测代次后才允许普通命令入队，并自动附加 gen。STOP 清空本机尚未发送命令，待不同 gen 的遥测到达后再允许新工作。调用方仍可显式提供 gen，过期值由 S3 拒绝。
+S3 每次锁存 STOP 递增 uint32 `gen` 并在遥测发送。带 gen 时须为当前 uint32 整数；无 gen 保留固件兼容路径。当前 Python 客户端除 STOP/单向安全心跳外，必须获得可用遥测代次后才允许普通命令入队，并自动附加 gen。STOP 清空本机尚未发送命令，待不同 gen 的遥测到达后再允许新工作。调用方仍可显式提供 gen，过期值由 S3 拒绝。
 
-STOP/PING 不受 gen 限制。SDK 四轮目标作为一个本机发送批次（最多四条 JSON）排队，F407 仍逐条执行。STOP 前已提交的一批可能先发出，不能保证物理瞬时停车。普通动作返回只表示本机入队成功；`peo.stop()` 单独等待新收到的成功 STOP ACK，300 ms 超时后重发一次，仍未确认抛异常。协议没有请求 ID，无法提供严格逐请求 ACK 关联。
+STOP/单向安全心跳不受 gen 限制。SDK 四轮目标作为一个本机发送批次（最多四条 JSON）排队，F407 仍逐条执行。STOP 前已提交的一批可能先发出，不能保证物理瞬时停车。普通动作返回只表示本机入队成功；`peo.stop()` 单独等待新收到的成功 STOP ACK，300 ms 超时后重发一次，仍未确认抛异常。协议没有请求 ID，无法提供严格逐请求 ACK 关联。
 
-S3 当前每轮延时 40 ms 读取快照并发 JSON，名义约 **25 Hz**，不是原文的 50 Hz。UART 传感器源更新频率与 TCP 发送频率不同。
+S3 按 50 ms 固定节拍读取快照并发 JSON，名义 **20 Hz**。UART 传感器源更新频率与 TCP 发送频率不同。
 
 ```json
 {"type":"sensor","tick":12345,"gen":3,
@@ -177,7 +180,9 @@ S3 当前每轮延时 40 ms 读取快照并发 JSON，名义约 **25 Hz**，不�
 
 无 UART 快照或快照接收年龄超过 500 ms 时，S3 添加 `link_stale:true`，仍可发送自身资源数据。上位机将此标记保存在 `SensorData.link_stale`（不改变 112 B UART 布局），SDK fresh 还要求已连接且最近 250 ms 收到遥测。缺失测距字段按无效处理。历史 sensor `cmd_ack` 不能确认当前 STOP。
 
-`sys.cpu0/cpu1` 为 S3 每核利用率，`ram_free/ram_total` 为内部堆字节。PING 用本机单调毫秒时间戳，只有匹配当前待确认 t 的 ACK 才更新 RTT。
+遥测为**最新值邮箱**语义（2026-11-18 起）：S3 只保留最近一帧待发遥测，新帧覆盖旧帧；链路拥塞时遥测可被丢弃（ACK 不受影响），拥塞不再导致断连。上位机依赖 250 ms fresh 超时与 `link_stale` 判断链路，不假设遥测逐帧必达。数字精度：`quat` 4 位小数、`accel_g` 3 位小数、非有限浮点输出 `null`。
+
+`sys.cpu0/cpu1` 为 S3 每核利用率，`ram_free/ram_total` 为内部堆字节。GUI 两个 Tab 的状态栏只显示 CPU0、CPU1、RAM；PING/RTT 和视频帧统计已删除。
 
 ### 2.2 已移除功能
 
@@ -185,7 +190,11 @@ C3 手柄桥、S3 本地宏引擎和上位机宏面板均已移除。`{"type":"m
 
 ### 2.3 连接、资源与视频状态
 
-- AP `PEO_Rover` / `12345678`，默认 IP `192.168.4.1`；S3 `PEO_NET_MAX_CLIENTS=1`。
+- **S3 = WiFi STA（2026-11-16 定案）**：连接笔记本移动热点（SSID/密码烧录前填进
+  `PEO_NET_STA_SSID/PASS`），上位机经 `peo_rover.local`（mDNS）或热点分配 IP 连接；
+  不再使用 S3 软 AP（旧 `PEO_Rover`/`192.168.4.1` 已移除）。
+- S3 `PEO_NET_MAX_CLIENTS=1`：TCP accept 层拒绝第二连接（STA 模式下仅笔记本热点
+  是 AP，其他设备天然进不来）。
 - Monitor 和 SDK 共用本机 loopback TCP 8892 控制租约；这不是跨设备的锁。
 - TCP 断开后 S3 请求 STOP、关闭视频并清理队列；相机退出活动循环后 flush/deinit。
 - VIDEO_ON 后相机重新初始化；成功恢复或切换后的前 48 次抓帧用于预热。首帧时延取决于初始化/采集，不保证 0.5 s。
@@ -199,28 +208,30 @@ C3 手柄桥、S3 本地宏引擎和上位机宏面板均已移除。`{"type":"m
 **实际心跳请求：**
 
 ```json
-{"cmd":"PING","t":123456}
+{"type":"heartbeat"}
 ```
 
-每 500 ms 一次，S3 回复 `{"ack":"PING","status":0,"t":123456}`。旧 `{"type":"heartbeat"}` 不是当前固件支持的命令。
+每 500 ms 一次，S3 仅更新此客户端的安全看门狗活动时间，不回包、不测 RTT、不恢复运动。此消息不带 `cmd`，不受 gen 校验限制。
 
-S3 在连接成功提交 MOTOR/MOTOR_CLOSED/PID 后监督活动；这些成功命令或 PING 续期，超过 2000 ms 则锁存 STOP 并断开。其他本地命令不续期。后台 PING 不能证明算法本身在推进，循环需自行检查传感器和图像新鲜度。断线/软件崩溃时硬件侧仍需独立看门狗。
+S3 在连接成功提交 MOTOR/MOTOR_CLOSED/PID 后监督活动；这些成功命令或单向安全心跳续期，超过 2000 ms 则锁存 STOP 并断开。其他本地命令不续期。后台心跳不能证明算法本身在推进，循环需自行检查传感器和图像新鲜度。断线/软件崩溃时硬件侧仍需独立看门狗。
 
 SDK `drive` 不再按未确认的旧目标去重，也不声称实现固定 5 ms 节流。调用方应显式 `delay` 控制频率。GUI Stop 立即请求优先 STOP，随后由 SDK 检查协作取消；不能强杀不合作的 Python 线程。
 
-## 3. UDP 视频（端口 8889）
+## 3. TCP 视频（端口 8890）
 
-每包为 `magic(2) + frame_id(2) + packet_id(2) + total_pkt(2) + JPEG 分片`，头部全部大端，magic 为 `0xCAFE`。数据分片最多 1400 B；packet_id 从 0 开始，frame_id 为 16 位并可回绕，S3 全断连清理时会复位帧号。
+2026-11-16 定案：视频流完全改为 TCP（原 UDP 8889 已退役）。S3 监听 8890，上位机连接后单向接收；视频通道与命令通道（8888）是两个独立 TCP 连接，互不阻塞。S3 侧 1:1：新视频连接会顶掉旧连接并作废在飞帧。
 
-接收端只接受 TCP 对端 IP、UDP 源端口 8889。最多保留一帧、512 KiB / 375 个分片。包 0 建立帧上下文，之后允许本帧包乱序；包 0 之前的片不缓存。相同帧的 total 必须一致，冲突重复包会放弃该帧。迟到旧帧首包不会顶掉较新帧；2 s 间隔后允许重新建立序号上下文。重连创建新组装器。
+帧定界：`magic(2) + frame_id(2) + length(4) + JPEG 体`，头部大端，magic 为 `0xCAFE`，length 为 JPEG 体字节数（上限 512 KiB，接收端超限即视为流错位）。frame_id 为 16 位可回绕，S3 全断连清理时复位。无分包概念——TCP 保证有序可靠，丢帧表现为整帧跳过（S3 侧 1 深队列只发最新帧）。
 
-帧完整后检查 SOI、SOF/SOS 顺序、段长、扫描边界及末尾 EOI，再交解码器。JPEG 结构守卫不验证熵数据完整性。SDK 只返回最近 1 s 内的完整帧；UDP 不重传。接收上限是实现约束，未来改变固件分片大小时必须同步接收端。
+发送节奏：S3 逐帧非阻塞 send，每轮 select 循环推进一部分（在飞帧必须发完，否则对端定界错乱）；每轮 send 上限 = 3 次调用 + 8 KiB 字节预算（含头部）；send 返回 EAGAIN（发送缓冲满）触发 50 ms 冷却，冷却期内不启新帧。相机按应用层 15 fps 节拍运行。网络任务为事件驱动（eventfd 唤醒 + 可写监视，2026-11-18 起）：遥测/ACK/新帧入队即时唤醒，发送缓冲可写即时续发，空闲每 100 ms 醒一次做心跳/统计检查。
+
+接收：上位机按定界读满一帧（5 s 读超时判定链路停滞）。JPEG 体先过 SOI/SOF/SOS/段长/EOI 结构守卫再交解码器（守卫不验证熵数据完整性）。SDK 只返回最近 1 s 内的完整帧。视频连接断开/错位时上位机自动重连（2 s 退避），连接期间命令通道不受影响。
 
 ## 4. Python 二进制参考
 
 ```python
 SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBB2x')  # 112 B
-VIDEO_HDR = struct.Struct('>HHHH')                             # 8 B
+VIDEO_REC = struct.Struct('>HHI')                              # 8 B：magic+fid+len
 ```
 
 实现位于 `rover_comm/protocol.py`。CRC16-CCITT-FALSE 多项式 0x1021、初值 0xFFFF，无反射，测试向量 `123456789` 得 0x29B1；不是 KERMIT。
@@ -229,13 +240,15 @@ VIDEO_HDR = struct.Struct('>HHHH')                             # 8 B
 
 | 项目 | 值 |
 | --- | --- |
-| TCP / UDP | 8888 / 8889 |
+| TCP | 8888（命令/遥测）+ 8890（视频）|
 | 本机控制锁 | 127.0.0.1:8892 |
-| TCP 遥测 | 约 25 Hz |
-| S3 视频目标节拍 | 24 fps，实际受硬件/网络影响 |
+| TCP 遥测 | 约 20 Hz |
+| S3 视频帧率 | 传感器原生帧率（无人工节拍），实际受硬件/网络影响 |
 | 默认分辨率 | QVGA 320×240 |
 | 支持分辨率 | QQVGA 160×120、QVGA 320×240、VGA 640×480、SVGA 800×600 |
 | JSON 行上限 | 16384 B |
 | 普通本机发送队列 | 64 个批次，每批最多四条 JSON |
 
 本轮离线测试不提供端到端时延预算或硬件执行保证。最新测试与修复记录见 [REVIEW_AND_REPAIR.md](REVIEW_AND_REPAIR.md)。
+
+视频连接生命周期：Python `connect(host, ..., video_port=8890)` 仅配置视频端口，成功发出 `VIDEO_ON` 后才连接；`VIDEO_OFF` 发出后关闭 socket 并停止重连。`video_port=None` 禁用视频，`VIDEO_ON` 返回 False。视频启用时保留 5s 读取超时与 2s 重连退避，重连使用同一会话配置的端口。JPEG 结构守卫保留（应用层 CRC 已移除：TCP 自带完整性校验）；不再累计帧计数。

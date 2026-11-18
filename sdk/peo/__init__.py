@@ -6,7 +6,7 @@ peo — PEO Rover 组员 SDK（组员唯一入口，PROTOCOL.md §2.4 组员编�
 
 用法：
     import peo
-    peo.connect("192.168.4.1")
+    peo.connect("peo_rover.local")
 
     peo.drive_all(30)
     while peo.fresh and peo.vl53.front_ok and peo.vl53.front_mm > 200:
@@ -100,36 +100,29 @@ class _Sys:
         self._cpu0 = None
         self._cpu1 = None
         self._ram = None
-        self._rtt = None
 
-    def _update(self, info, rtt):
+    def _update(self, info):
         self._cpu0 = info.get("cpu0") if info else None
         self._cpu1 = info.get("cpu1") if info else None
         free = info.get("ram_free") if info else None
         total = info.get("ram_total") if info else None
         self._ram = None if (free is None or not total) else \
             round((total - free) * 100 / total)
-        self._rtt = rtt
 
     @property
     def cpu0(self):
-        self._update(_bridge.client.sys_info, _bridge.client.last_rtt_ms)
+        self._update(_bridge.client.sys_info)
         return self._cpu0
 
     @property
     def cpu1(self):
-        self._update(_bridge.client.sys_info, _bridge.client.last_rtt_ms)
+        self._update(_bridge.client.sys_info)
         return self._cpu1
 
     @property
     def ram(self):
-        self._update(_bridge.client.sys_info, _bridge.client.last_rtt_ms)
+        self._update(_bridge.client.sys_info)
         return self._ram
-
-    @property
-    def rtt_ms(self):
-        self._update(_bridge.client.sys_info, _bridge.client.last_rtt_ms)
-        return self._rtt
 
 
 mpu = _MPU()
@@ -140,8 +133,8 @@ sys = _Sys()
 
 # ---------------- 生命周期 ----------------
 
-def connect(host="192.168.4.1") -> None:
-    """连接 ESP32（TCP 8888 命令/遥测 + UDP 8889 视频 + 心跳 + 单实例锁）。
+def connect(host="peo_rover.local") -> None:
+    """连接 ESP32（TCP 8888 命令/遥测 + TCP 8890 视频 + 心跳 + 单实例锁）。
 
     连接成功后自动下发缓存的 PID 与分辨率配置；F407 软复位后自动重发。
     """
@@ -313,10 +306,6 @@ def sys_reset() -> None:
 
 
 # ---------------- 顶层只读属性 ----------------
-
-def _get_fresh():
-    return _bridge.fresh
-
 
 def __getattr__(name):
     if name == "fresh":

@@ -1,4 +1,4 @@
-"""TCP/UDP client with bounded buffers and independent connection lifetimes."""
+"""TCP client with bounded buffers and independent connection lifetimes."""
 import json
 import logging
 import math
@@ -7,12 +7,11 @@ import threading
 import time
 from collections import deque
 
-from .protocol import TCP_CMD_PORT, UDP_VIDEO_PORT, VIDEO_MAGIC, SensorData, VideoHeader
+from .protocol import TCP_CMD_PORT, VIDEO_TCP_PORT, VIDEO_MAGIC, SensorData, VIDEO_REC
 
 HEARTBEAT_INTERVAL_S = 0.5
 MAX_JSON_LINE = 16384
-MAX_VIDEO_BYTES = 512 * 1024
-MAX_VIDEO_PACKETS = (MAX_VIDEO_BYTES + 1399) // 1400
+MAX_VIDEO_BYTES = 512 * 1024   # 单帧 JPEG 上限（定界头 4B 长度，超限即视为流错位）
 _LOG = logging.getLogger(__name__)
 
 
@@ -76,76 +75,6 @@ def jpeg_structure_ok(data: bytes) -> bool:
     return False
 
 
-class FrameAssembler:
-    """One bounded frame; accept reordered fragments after packet 0.
-
-    A different frame starts only with packet 0. Serial-number ordering rejects
-    late old packet-0 datagrams; after a 2s idle gap the sequence can restart.
-    """
-    def __init__(self):
-        self._frame_id = -1
-        self._total = 0
-        self._packets = {}
-        self._bytes = 0
-        self._frame_start = 0.0
-        self._done = False
-        self.packets_total = self.packets_late = self.packets_bad = 0
-        self.frames_ok = self.frames_aborted = self.frames_bad_jpeg = 0
-        self.last_jpeg_len = 0
-
-    def push(self, hdr: VideoHeader, data: bytes) -> bytes | None:
-        self.packets_total += 1
-        if (hdr.magic != VIDEO_MAGIC or not 1 <= hdr.total_pkt <= MAX_VIDEO_PACKETS
-                or not 0 <= hdr.packet_id < hdr.total_pkt or not 0 <= hdr.frame_id <= 65535
-                or not 0 < len(data) <= 1400):
-            self.packets_bad += 1
-            return None
-        now = time.monotonic()
-        expired = now - self._frame_start > 2.0
-        if hdr.frame_id != self._frame_id or expired:
-            delta = (hdr.frame_id - self._frame_id) & 0xFFFF
-            if hdr.packet_id != 0 or (self._frame_id >= 0 and not expired and delta >= 0x8000):
-                self.packets_late += 1
-                return None
-            if self._packets:
-                self.frames_aborted += 1
-            self._frame_id, self._total = hdr.frame_id, hdr.total_pkt
-            self._packets, self._bytes = {}, 0
-            self._frame_start, self._done = now, False
-        if self._done:
-            self.packets_late += 1
-            return None
-        if hdr.total_pkt != self._total:
-            self.packets_bad += 1
-            return None
-        previous = self._packets.get(hdr.packet_id)
-        if previous is not None:
-            if previous != data:
-                self.packets_bad += 1
-                self._packets.clear()
-                self._done = True
-                self.frames_aborted += 1
-            return None
-        self._bytes += len(data)
-        if self._bytes > MAX_VIDEO_BYTES:
-            self._packets.clear()
-            self._done = True
-            self.packets_bad += 1
-            return None
-        self._packets[hdr.packet_id] = data
-        if len(self._packets) != self._total:
-            return None
-        jpeg = b''.join(self._packets[i] for i in range(self._total))
-        self._packets.clear()
-        self._done = True
-        if not jpeg_structure_ok(jpeg):
-            self.frames_bad_jpeg += 1
-            return None
-        self.frames_ok += 1
-        self.last_jpeg_len = len(jpeg)
-        return jpeg
-
-
 def _sensor_from_json(j: dict) -> SensorData:
     """Reject malformed telemetry; missing measurements are marked invalid."""
     def obj(parent, key):
@@ -184,9 +113,13 @@ def _sensor_from_json(j: dict) -> SensorData:
         last_cmd_status=number(ack.get('status', 0)), link_stale=j.get('link_stale', False) is not False)
 
 
+
 class _Session:
-    def __init__(self, tcp, udp):
-        self.tcp, self.udp = tcp, udp
+    def __init__(self, tcp, video_port):
+        self.tcp, self.video = tcp, None
+        self.video_port = video_port
+        self.video_requested = False
+        self.video_revision = 0  # OFF/ON 切换使正在连接或读取的旧任务失效。
         self.peer = tcp.getpeername()[0]
         self.stop = threading.Event()
         self.ready = threading.Event()
@@ -195,7 +128,6 @@ class _Session:
         self.generation = None
         self.blocked_generation = None
         self.stop_acks = 0
-        self.ping_t = None
         self.threads = []
 
 
@@ -203,7 +135,7 @@ class RoverClient:
     """Callbacks run on worker threads; callback errors cannot kill receivers.
 
     Queue acceptance is not an MCU execution acknowledgment. Normal commands
-    require a telemetry generation; STOP/PING remain available before telemetry.
+    require a telemetry generation; STOP/安全心跳不依赖遥测代次。
     """
     def __init__(self):
         self._state_lock = threading.RLock()
@@ -211,12 +143,10 @@ class RoverClient:
         self._stop_lock = threading.Lock()
         self._session = None
         self._epoch = 0
-        self._tcp = self._udp = None
+        self._tcp = self._video = None
         self._running = False
         self._observed_gen = None
-        self._video_asm = None
         self.sys_info = None
-        self.last_rtt_ms = None
         self.on_sensor = self.on_frame = self.on_ack = self.on_disconnected = None
 
     @property
@@ -250,33 +180,32 @@ class RoverClient:
                 pass
             sock.close()
 
-    def connect(self, host, tcp_port=TCP_CMD_PORT, udp_port=UDP_VIDEO_PORT):
+    def connect(self, host, tcp_port=TCP_CMD_PORT, video_port=VIDEO_TCP_PORT):
+        """只建立命令连接；VIDEO_ON 发出后才连接指定视频端口。
+
+        video_port=None 表示此会话禁用视频（VIDEO_ON 返回 False）。
+        视频线程空闲时阻塞等待，不建立 TCP，也不进行超时重连。
+        """
         with self._connect_lock:
             self.close()
             with self._state_lock:
                 epoch = self._epoch
-            tcp = udp = None
+            tcp = None
             try:
                 tcp = socket.create_connection((host, tcp_port), timeout=5)
                 tcp.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 tcp.settimeout(0.5)  # bound send stalls; receiver handles idle timeouts
-                if udp_port is not None:
-                    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
-                    udp.bind(('0.0.0.0', udp_port))
-                    udp.settimeout(0.5)
-                session = _Session(tcp, udp)
+                session = _Session(tcp, video_port)
                 with self._state_lock:
                     if epoch != self._epoch:
                         raise ConnectionError('Connection cancelled')
                     self._session = session
-                    self._tcp, self._udp, self._running = tcp, udp, True
-                    self._observed_gen = self.sys_info = self.last_rtt_ms = None
-                    self._video_asm = FrameAssembler() if udp else None
+                    self._tcp, self._video, self._running = tcp, None, True
+                    self._observed_gen = self.sys_info = None
                     workers = [('rover-send', self._sender_loop), ('rover-tcp', self._tcp_loop),
                                ('rover-heartbeat', self._heartbeat_loop)]
-                    if udp:
-                        workers.append(('rover-udp', self._udp_loop))
+                    if video_port is not None:
+                        workers.append(('rover-video', self._video_loop))
                     for name, target in workers:
                         thread = threading.Thread(target=target, args=(session,), daemon=True, name=name)
                         session.threads.append(thread)
@@ -284,7 +213,6 @@ class RoverClient:
                 return True
             except OSError as exc:
                 self._dispose(tcp)
-                self._dispose(udp)
                 raise ConnectionError(f'Connection failed: {exc}') from exc
 
     def _close_session(self, session):
@@ -293,15 +221,15 @@ class RoverClient:
                 return
             self._session = None
             self._running = False
-            self._tcp = self._udp = None
-            self._observed_gen = self.sys_info = self.last_rtt_ms = self._video_asm = None
+            self._tcp = self._video = None
+            self._observed_gen = self.sys_info = None
             session.stop.set()
             session.ready.set()  # wake waiters; they also check stop
             with session.condition:
                 session.pending.clear()
                 session.condition.notify_all()
             self._dispose(session.tcp)
-            self._dispose(session.udp)
+            self._dispose(session.video)
             # Serialize reset callbacks before a new session can be installed.
             self._callback(self.on_disconnected)
 
@@ -333,10 +261,13 @@ class RoverClient:
                     if len(objects) != 1:
                         raise ValueError('STOP_ALL must be sent separately')
                     priority = True
-                elif command != 'PING':
+                elif obj.get('type') != 'heartbeat' or command is not None:
                     if session.generation is None:
                         return False
                     obj.setdefault('gen', session.generation)
+                if command == 'VIDEO_ON':
+                    if session.video_port is None:
+                        return False
                 line = json.dumps(obj, separators=(',', ':'), allow_nan=False).encode('utf-8')
                 if len(line) > MAX_JSON_LINE:
                     raise ValueError('Command line exceeds 16384 bytes')
@@ -388,14 +319,6 @@ class RoverClient:
                         return False
             return False
 
-    def ping(self):
-        with self._state_lock:
-            session = self._session
-            if not session:
-                return False
-            session.ping_t = time.monotonic_ns() // 1_000_000
-            return self.send_json({'cmd': 'PING', 't': session.ping_t})
-
     def video_on(self):
         return self.send_json({'cmd': 'VIDEO_ON'})
 
@@ -417,6 +340,27 @@ class RoverClient:
                         return
                     data = session.pending.popleft()
                 session.tcp.sendall(data)  # at most one committed batch may precede STOP
+                # 跟随真正发出的命令更新视频需求，而非仅跟随入队：STOP 可能清掉
+                # 未发送的 VIDEO_ON，不能因此留下没有视频流的永久重连任务。
+                # GUI、SDK、原始 JSON 共用此处；不增加任何往返或 ACK 等待。
+                with self._state_lock:
+                    if self._session is not session:
+                        return
+                    requested = session.video_requested
+                    for line in data.splitlines():
+                        command = json.loads(line).get('cmd')
+                        if command == 'VIDEO_ON':
+                            requested = True
+                        elif command == 'VIDEO_OFF':
+                            requested = False
+                    if requested != session.video_requested:
+                        with session.condition:
+                            session.video_requested = requested
+                            session.video_revision += 1
+                            if not requested:
+                                self._dispose(session.video)  # 打断阻塞 recv。
+                                session.video = self._video = None
+                            session.condition.notify_all()
         except OSError:
             pass
         finally:
@@ -460,9 +404,6 @@ class RoverClient:
             if session is None or self._session is not session:
                 return
             if 'ack' in obj and 'type' not in obj:
-                if obj.get('ack') == 'PING' and session.ping_t is not None and obj.get('t') == session.ping_t:
-                    self.last_rtt_ms = time.monotonic_ns() // 1_000_000 - session.ping_t
-                    session.ping_t = None
                 if obj.get('ack') == 'STOP_ALL' and obj.get('status') == 0:
                     with session.condition:
                         session.stop_acks += 1
@@ -486,26 +427,81 @@ class RoverClient:
             with self._state_lock:
                 if self._session is not session:
                     return
-                if not self.ping():
+                # 单向安全续期：不回 ACK、不携带时间戳、不测 RTT，也不恢复运动。
+                if not self.send_json_batch([{'type': 'heartbeat'}], expected_session=session):
                     self._close_session(session)
                     return
 
-    def _udp_loop(self, session):
-        with self._state_lock:
-            asm = self._video_asm
+    @staticmethod
+    def _recv_exact(sock, length):
+        """读满 length 字节；超时/EOF/错误返回 None（TCP 帧边界不可妥协）。"""
+        parts = []
+        remaining = length
+        try:
+            while remaining > 0:
+                chunk = sock.recv(remaining)
+                if not chunk:
+                    return None
+                parts.append(chunk)
+                remaining -= len(chunk)
+        except OSError:
+            return None
+        return b''.join(parts)
+
+    def _video_loop(self, session):
+        """按需接收 12B 定界头和 JPEG；只有视频开启时才进行 5s 超时/2s 重连。
+
+        每次 ON/OFF 使用独立 revision。关闭/重新开启期间完成的旧连接或旧帧
+        均丢弃，防止旧工作覆盖新 socket；重连始终使用本会话指定的视频端口。
+        """
         while not session.stop.is_set():
+            with session.condition:
+                session.condition.wait_for(lambda: session.stop.is_set() or session.video_requested)
+            with self._state_lock:
+                if self._session is not session or session.stop.is_set():
+                    return
+                if not session.video_requested:
+                    continue
+                revision = session.video_revision
+            sock = None
             try:
-                packet, source = session.udp.recvfrom(65536)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            if source[0] != session.peer or source[1] != UDP_VIDEO_PORT or len(packet) < 8:
-                continue
-            hdr = VideoHeader.parse(packet[:8])
-            jpeg = asm.push(hdr, packet[8:])
-            if jpeg is not None:
+                sock = socket.create_connection((session.peer, session.video_port), timeout=3)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.settimeout(5.0)
                 with self._state_lock:
-                    if self._session is not session:
-                        return
-                    self._callback(self.on_frame, hdr.frame_id, jpeg)
+                    if (self._session is not session or session.stop.is_set()
+                            or not session.video_requested or session.video_revision != revision):
+                        continue
+                    session.video = self._video = sock
+                while not session.stop.is_set():
+                    hdr = self._recv_exact(sock, VIDEO_REC.size)
+                    if hdr is None:
+                        break
+                    magic, fid, length = VIDEO_REC.unpack(hdr)
+                    if magic != VIDEO_MAGIC or not 1 <= length <= MAX_VIDEO_BYTES:
+                        break  # 定界错位不能继续复用字节流，关闭后重连。
+                    body = self._recv_exact(sock, length)
+                    if body is None:
+                        break
+                    with self._state_lock:
+                        if (self._session is not session or not session.video_requested
+                                or session.video_revision != revision):
+                            break
+                        # 结构守卫保留：缺 SOF/SOS/EOI 等坏帧绝不送入解码器。
+                        if not jpeg_structure_ok(body):
+                            continue
+                        self._callback(self.on_frame, fid, body)
+            except OSError:
+                pass  # 视频失败不影响命令/遥测通道。
+            finally:
+                with self._state_lock:
+                    if session.video is sock:
+                        session.video = None
+                        if self._session is session:
+                            self._video = None
+                    self._dispose(sock)
+            # OFF、断连和下一次 ON 都可立即打断退避；关闭期间不会再连接。
+            with session.condition:
+                session.condition.wait_for(
+                    lambda: session.stop.is_set() or not session.video_requested
+                    or session.video_revision != revision, timeout=2.0)

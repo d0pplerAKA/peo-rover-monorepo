@@ -152,32 +152,38 @@ for i in range(560):
 assert win.script_output.document().blockCount() <= 500
 print(f"10) 日志上限 ✓  blockCount={win.script_output.document().blockCount()} ≤ 500")
 
-# 11) 性能/帧率计数
-win._sensor_count = 0
-win._frame_count = 0
-for _ in range(10):
-    win._on_sensor(s)
-win._on_frame(1, bytes(ba.data()))
-win._update_perf()
-assert "10 Hz" in win.lbl_perf.text() and "1 fps" in win.lbl_perf.text()
+# 11) 两个 Tab 只显示 CPU0/CPU1/RAM，断线或缺字段使用占位符。
 from app.i18n import tr
-for key in ("perf_cpu0", "perf_cpu1", "perf_ram", "perf_rtt"):
-    assert f"{tr(key)} -" in win.lbl_perf.text()
-assert win._sensor_count == 0 and win._frame_count == 0
-win.client.sys_info = {"cpu0": 12, "cpu1": 34, "ram_free": 102400, "ram_total": 204800}
-win.client.last_rtt_ms = 23
 win._update_perf()
-assert "0 Hz" in win.lbl_perf.text() and "0 fps" in win.lbl_perf.text()
-assert "CPU0 12%" in win.lbl_perf.text() and "CPU1 34%" in win.lbl_perf.text()
-assert f"{tr('perf_ram')} 50%" in win.lbl_perf.text()
-assert f"{tr('perf_rtt')} 23 ms" in win.lbl_perf.text()
-print("11) 性能显示 ✓ ", win.lbl_perf.text())
+assert win.lbl_perf.text() == "CPU0 -   CPU1 -   RAM -"
+info = {"cpu0": 12, "cpu1": 34, "ram_free": 102400, "ram_total": 204800}
+win.client.sys_info = info
+win._update_perf()
+assert win.lbl_perf.text() == "CPU0 12%   CPU1 34%   RAM 50%"
+assert not hasattr(win, "_sensor_count") and not hasattr(win, "_frame_count")
+import peo
+peo._bridge.client.sys_info = info
+win._update_perf_ide()
+assert win.lbl_perf.text() == "CPU0 12%   CPU1 34%   RAM 50%"
+assert (peo.sys.cpu0, peo.sys.cpu1, peo.sys.ram) == (12, 34, 50)
+assert not hasattr(peo.sys, "rtt_ms")
+win._on_lang_toggle()
+win._update_perf_ide()
+assert win.lbl_perf.text() == "CPU0 12%   CPU1 34%   RAM 50%"
+win._on_lang_toggle()
+peo._bridge.client.sys_info = None
+win._update_perf_ide()
+assert win.lbl_perf.text() == "CPU0 -   CPU1 -   RAM -"
+win.client.sys_info = None
+print("11) 性能显示 ✓ 两个 Tab / 双语只保留 CPU0、CPU1、RAM")
 
-# 12) 心跳常量 + 回调注册
+# 12) 单向安全心跳常量 + 回调注册；PING/RTT/坏帧统计接口已删除。
 from rover_comm.client import HEARTBEAT_INTERVAL_S
 assert 0 < HEARTBEAT_INTERVAL_S <= 1.0
 assert win.client.on_ack is not None
-print(f"12) 心跳 ✓  间隔 {HEARTBEAT_INTERVAL_S}s（ESP32 超时 2s 自动急停）")
+for name in ("ping", "last_rtt_ms", "video_stats"):
+    assert not hasattr(win.client, name)
+print(f"12) 单向安全心跳 ✓  间隔 {HEARTBEAT_INTERVAL_S}s（ESP32 超时 2s 自动急停）")
 
 print()
 print("冒烟测试全部通过 ✓✓✓")

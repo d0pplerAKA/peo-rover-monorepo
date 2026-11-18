@@ -18,8 +18,8 @@ from unittest.mock import patch, Mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'sdk')]
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from rover_comm.client import RoverClient, FrameAssembler, jpeg_structure_ok, _sensor_from_json
-from rover_comm.protocol import SensorData, VideoHeader, VIDEO_MAGIC
+from rover_comm.client import RoverClient, jpeg_structure_ok, _sensor_from_json, MAX_VIDEO_BYTES
+from rover_comm.protocol import SensorData, VIDEO_REC, VIDEO_MAGIC, TCP_CMD_PORT
 import peo
 from peo._bridge import _Bridge, _stop_requested
 
@@ -65,8 +65,6 @@ class FakeTCP:
         for line in data.splitlines():
             obj = json.loads(line)
             self.sent.append(obj)
-            if obj.get('cmd') == 'PING':
-                self.feed({'ack': 'PING', 'status': 0, 't': obj['t']})
             if self.stop_ack and obj.get('cmd') == 'STOP_ALL':
                 self.feed({'ack': 'STOP_ALL', 'status': 0})
 
@@ -79,6 +77,29 @@ class FakeTCP:
     def close(self): self.shutdown()
 
 
+class FakeVideo(FakeTCP):
+    """支持任意分片和阻塞读；关闭或注入异常可打断读取，无真实网络。"""
+    def __init__(self):
+        super().__init__()
+        self.buffer = b''
+
+    def recv(self, size):
+        while not self.buffer:
+            chunk = self.rx.get(timeout=10)
+            if isinstance(chunk, OSError):
+                raise chunk
+            if not chunk:
+                return b''
+            self.buffer = chunk
+        result, self.buffer = self.buffer[:size], self.buffer[size:]
+        return result
+
+    def frame(self, fid, body=JPEG):
+        record = VIDEO_REC.pack(VIDEO_MAGIC, fid, len(body)) + body
+        for i in range(0, len(record), 3):
+            self.rx.put(record[i:i + 3])
+
+
 class ClientTests(unittest.TestCase):
     def setUp(self):
         self.client = RoverClient()
@@ -89,22 +110,24 @@ class ClientTests(unittest.TestCase):
     def connect(self, tcp=None, gen=7):
         tcp = tcp or FakeTCP()
         with patch('rover_comm.client.socket.create_connection', return_value=tcp):
-            self.client.connect('test', udp_port=None)
+            self.client.connect('test', video_port=None)
         if gen is not None:
             tcp.feed({'type': 'sensor', 'gen': gen})
             self.assertTrue(self.client.wait_ready(1))
         return tcp
 
-    def test_heartbeat_uses_firmware_ping(self):
+    def test_one_way_heartbeat_preserves_watchdog_without_ping(self):
         tcp = self.connect()
-        self.assertTrue(eventually(lambda: any(o.get('cmd') == 'PING' for o in tcp.sent)))
-        self.assertFalse(any(o.get('type') == 'heartbeat' for o in tcp.sent))
-        self.assertTrue(eventually(lambda: self.client.last_rtt_ms is not None))
+        self.assertTrue(eventually(lambda: {'type': 'heartbeat'} in tcp.sent))
+        self.assertFalse(any(o.get('cmd') == 'PING' for o in tcp.sent))
+        self.assertFalse(hasattr(self.client, 'ping'))
+        self.assertFalse(hasattr(self.client, 'last_rtt_ms'))
+        self.assertTrue(self.client.connected)  # 无需任何心跳 ACK。
 
     def test_stop_bypasses_full_queue_and_invalidates_old_work(self):
         tcp = self.connect()
         session = self.client._session
-        with session.condition:
+        with self.client._state_lock, session.condition:
             for _ in range(64):
                 session.pending.append(b'{"cmd":"MOTOR"}\n')
             self.assertFalse(self.client.send_json({'cmd': 'PID'}))
@@ -171,15 +194,30 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.client.send_json_batch([{'cmd': 'PID'}] * 5)
 
-    def test_bind_failure_closes_both_sockets(self):
-        tcp, udp = FakeTCP(), Mock()
-        udp.bind.side_effect = OSError('port busy')
-        with patch('rover_comm.client.socket.create_connection', return_value=tcp), \
-                patch('rover_comm.client.socket.socket', return_value=udp):
-            with self.assertRaises(ConnectionError):
-                self.client.connect('test')
+    def test_video_connect_failure_keeps_command_channel(self):
+        """开启视频后连接失败不致命；OFF 可打断退避并阻止重连。"""
+        tcp = FakeTCP()
+        attempts = []
+
+        def create(*a, **kw):
+            if a[0][1] == TCP_CMD_PORT:
+                return tcp
+            attempts.append(a[0])
+            raise OSError('refused')
+
+        with patch('rover_comm.client.socket.create_connection', side_effect=create):
+            self.assertTrue(self.client.connect('test'))
+            tcp.feed({'type': 'sensor', 'gen': 7})
+            self.assertTrue(self.client.wait_ready(1))
+            self.assertTrue(self.client.video_on())
+            self.assertTrue(eventually(lambda: len(attempts) == 1))
+            self.assertTrue(self.client.video_off())
+            self.assertTrue(eventually(lambda: not self.client._session.video_requested))
+            time.sleep(2.2)
+            self.assertEqual(len(attempts), 1)
+        self.assertFalse(tcp.closed)
+        self.client.close()
         self.assertTrue(tcp.closed)
-        udp.close.assert_called_once()
 
     def test_close_cancels_inflight_connect(self):
         entered, release = threading.Event(), threading.Event()
@@ -191,7 +229,7 @@ class ClientTests(unittest.TestCase):
             return tcp
         def connect():
             try:
-                self.client.connect('test', udp_port=None)
+                self.client.connect('test', video_port=None)
             except ConnectionError as exc:
                 errors.append(exc)
         with patch('rover_comm.client.socket.create_connection', side_effect=create):
@@ -205,36 +243,154 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertTrue(tcp.closed)
 
+    def test_idle_default_connection_never_opens_video(self):
+        """跨过旧的 5s 超时 + 2s 重连周期，命令连接仍保持且从未拨号视频。"""
+        tcp = FakeTCP()
+        with patch('rover_comm.client.socket.create_connection', return_value=tcp) as create:
+            self.client.connect('test')
+            time.sleep(7.2)
+            create.assert_called_once_with(('test', TCP_CMD_PORT), timeout=5)
+            self.assertTrue(self.client.connected)
+            self.assertIsNone(self.client._video)
+
+    def test_none_disables_video_and_failed_batch_does_not_enable_it(self):
+        self.connect()
+        self.assertFalse(self.client.video_on())
+        self.assertTrue(self.client.video_off())
+        self.assertFalse(self.client._session.video_requested)
+        self.assertFalse(any(t.name == 'rover-video' for t in self.client._session.threads))
+
+    def test_video_queue_rejection_leaves_demand_unchanged(self):
+        tcp = FakeTCP()
+        with patch('rover_comm.client.socket.create_connection', return_value=tcp) as create:
+            self.client.connect('test')
+            self.assertFalse(self.client.video_on())  # 尚无遥测代次。
+            tcp.feed({'type': 'sensor', 'gen': 7})
+            self.assertTrue(self.client.wait_ready(1))
+            with self.client._state_lock, self.client._session.condition:
+                for _ in range(64):
+                    self.client._session.pending.append(b'{"cmd":"PID"}\n')
+                self.assertFalse(self.client.video_on())
+            self.assertFalse(self.client._session.video_requested)
+            self.assertEqual(create.call_count, 1)
+
+    def test_stop_cancels_queued_video_on_without_opening_video(self):
+        """STOP 清掉尚未发送的 VIDEO_ON 时，接收线程不能残留视频需求。"""
+        tcp = FakeTCP()
+        with patch('rover_comm.client.socket.create_connection', return_value=tcp) as create:
+            self.client.connect('test')
+            tcp.feed({'type': 'sensor', 'gen': 7})
+            self.assertTrue(self.client.wait_ready(1))
+            session = self.client._session
+            with self.client._state_lock, session.condition:
+                self.assertTrue(self.client.video_on())
+                self.assertTrue(self.client.stop_all())
+            self.assertTrue(eventually(lambda: any(o.get('cmd') == 'STOP_ALL' for o in tcp.sent)))
+            self.assertFalse(any(o.get('cmd') == 'VIDEO_ON' for o in tcp.sent))
+            self.assertFalse(session.video_requested)
+            self.assertEqual(create.call_count, 1)
+
+    def test_video_custom_port_guard_off_on_and_retry(self):
+        """SDK/GUI 的原始 JSON 和便捷 API 共享按需生命周期，坏 JPEG 仍拦截。"""
+        tcp, first, second = FakeTCP(), FakeVideo(), FakeVideo()
+        frames, calls = [], []
+        self.client.on_frame = lambda fid, body: frames.append(fid)
+
+        def create(address, **kwargs):
+            calls.append(address)
+            return tcp if address[1] == TCP_CMD_PORT else (first if len(calls) == 2 else second)
+
+        with patch('rover_comm.client.socket.create_connection', side_effect=create):
+            self.client.connect('test', video_port=18890)
+            tcp.feed({'type': 'sensor', 'gen': 7})
+            self.assertTrue(self.client.wait_ready(1))
+            self.assertTrue(self.client.send_json({'cmd': 'VIDEO_ON'}))
+            first.frame(1, b'\xff\xd8\xff\xd9')
+            first.frame(2)
+            self.assertTrue(eventually(lambda: frames == [2]))
+            self.assertTrue(self.client.video_on())  # 重复 ON 不创建第二连接。
+            self.assertEqual(len(calls), 2)
+            first.rx.put(OSError('read timeout'))
+            self.assertTrue(eventually(lambda: first.closed))
+            self.assertTrue(eventually(lambda: self.client._video is second, timeout=3))
+            second.frame(3)
+            self.assertTrue(eventually(lambda: frames == [2, 3]))
+            self.assertEqual(calls[1:], [('192.168.4.1', 18890)] * 2)
+            self.assertTrue(self.client.send_json({'cmd': 'VIDEO_OFF'}))
+            self.assertTrue(eventually(lambda: second.closed))
+            self.assertIsNone(self.client._video)
+            self.assertFalse(hasattr(self.client, 'video_stats'))
+
+    def test_off_on_discards_inflight_video_connect(self):
+        """OFF/ON 发生在 connect 未返回时，旧 socket 必须关闭且不能覆盖新连接。"""
+        tcp, old_video, new_video = FakeTCP(), FakeVideo(), FakeVideo()
+        entered, release = threading.Event(), threading.Event()
+        attempts = []
+
+        def create(address, **kwargs):
+            if address[1] == TCP_CMD_PORT:
+                return tcp
+            attempts.append(address)
+            if len(attempts) == 1:
+                entered.set()
+                release.wait(2)
+                return old_video
+            return new_video
+
+        with patch('rover_comm.client.socket.create_connection', side_effect=create):
+            try:
+                self.client.connect('test')
+                tcp.feed({'type': 'sensor', 'gen': 7})
+                self.assertTrue(self.client.wait_ready(1))
+                self.assertTrue(self.client.video_on())
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(self.client.video_off())
+                self.assertTrue(eventually(lambda: not self.client._session.video_requested))
+                self.assertTrue(self.client.video_on())
+                self.assertTrue(eventually(lambda: self.client._session.video_requested))
+                release.set()
+                self.assertTrue(eventually(lambda: self.client._video is new_video))
+                self.assertTrue(old_video.closed)
+                self.client.close()
+                self.assertTrue(new_video.closed)
+            finally:
+                release.set()
+
+    def test_bad_video_headers_and_partial_frame_close_only_video(self):
+        """错 magic、非法长度、半帧 EOF 都不能污染下一条记录或断开控制链路。"""
+        records = [VIDEO_REC.pack(0, 1, 4),
+                   VIDEO_REC.pack(VIDEO_MAGIC, 1, 0),
+                   VIDEO_REC.pack(VIDEO_MAGIC, 1, MAX_VIDEO_BYTES + 1),
+                   VIDEO_REC.pack(VIDEO_MAGIC, 1, len(JPEG)) + JPEG[:3],
+                   b'\xca\xfe']
+        for record in records:
+            with self.subTest(record=record):
+                tcp, video = FakeTCP(), FakeVideo()
+                frames = []
+                self.client.on_frame = lambda *args: frames.append(args)
+                with patch('rover_comm.client.socket.create_connection', side_effect=[tcp, video]):
+                    self.client.connect('test')
+                    tcp.feed({'type': 'sensor', 'gen': 7})
+                    self.assertTrue(self.client.wait_ready(1))
+                    self.client.video_on()
+                    video.rx.put(record)
+                    video.rx.put(b'')
+                    self.assertTrue(eventually(lambda: video.closed))
+                    self.assertTrue(self.client.connected)
+                    self.assertEqual(frames, [])
+                    self.client.close()
+
 
 class VideoTests(unittest.TestCase):
-    @staticmethod
-    def header(fid, packet, total):
-        return VideoHeader(VIDEO_MAGIC, fid, packet, total)
-
-    def test_changed_total_cannot_crash_or_mix_frame(self):
-        asm = FrameAssembler()
-        asm.push(self.header(1, 0, 3), JPEG[:10])
-        asm.push(self.header(1, 2, 3), JPEG[20:])
-        self.assertIsNone(asm.push(self.header(1, 0, 2), b'bad'))
-        self.assertEqual(asm.push(self.header(1, 1, 3), JPEG[10:20]), JPEG)
-        self.assertEqual(asm.packets_bad, 1)
-
-    def test_late_first_packet_does_not_replace_new_frame(self):
-        asm = FrameAssembler()
-        asm.push(self.header(10, 0, 2), JPEG[:10])
-        asm.push(self.header(9, 0, 2), b'old')
-        self.assertEqual(asm.push(self.header(10, 1, 2), JPEG[10:]), JPEG)
-        self.assertEqual(asm.frames_ok, 1)
-
-    def test_wrap_duplicates_bounds_and_aborted_count(self):
-        asm = FrameAssembler()
-        self.assertEqual(asm.push(self.header(65535, 0, 1), JPEG), JPEG)
-        self.assertIsNone(asm.push(self.header(65535, 0, 1), JPEG))
-        self.assertEqual(asm.push(self.header(0, 0, 1), JPEG), JPEG)
-        self.assertIsNone(asm.push(self.header(1, 0, 65535), b'x'))
-        asm.push(self.header(1, 0, 2), b'x')
-        asm.push(self.header(2, 0, 2), b'y')
-        self.assertEqual(asm.frames_aborted, 1)
+    def test_record_framing_roundtrip(self):
+        """TCP 视频定界：8B 头 magic+fid+len（大端）→ JPEG 体（TCP 自带校验）。"""
+        magic, fid, body = VIDEO_MAGIC, 7, JPEG
+        record = VIDEO_REC.pack(magic, fid, len(body)) + body
+        self.assertEqual(len(record), 8 + len(body))
+        m, f, n = VIDEO_REC.unpack(record[:8])
+        self.assertEqual((m, f, n), (magic, fid, len(body)))
+        self.assertEqual(record[8:], body)
+        self.assertTrue(1 <= n <= MAX_VIDEO_BYTES)
 
     def test_marker_guard_requires_sof_and_checks_multiscan(self):
         self.assertTrue(jpeg_structure_ok(JPEG))
@@ -257,7 +413,7 @@ class SDKTests(unittest.TestCase):
         self.env = patch.dict(os.environ, PEO_CONFIG_PATH=str(Path(self.temp.name) / 'config.json'))
         self.env.start()
         self.original = peo._bridge.client
-        self.fake = Mock(connected=True, sys_info=None, last_rtt_ms=None)
+        self.fake = Mock(connected=True, sys_info=None)
         self.fake.wait_ready.return_value = True
         self.fake.send_json.return_value = True
         self.fake.send_json_batch.return_value = True

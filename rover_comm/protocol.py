@@ -36,16 +36,14 @@ ST_ERR_BADMOTOR = 0x03
 
 # 网络参数（PROTOCOL.md §5）
 TCP_CMD_PORT   = 8888
-UDP_VIDEO_PORT = 8889
+VIDEO_TCP_PORT = 8890     # 视频流走 TCP（2026-11-16 定案；UDP 8889 已退役）
 VIDEO_MAGIC    = 0xCAFE
-AP_SSID        = "PEO_Rover"
-AP_PASSWORD    = "12345678"
 
 # =============================================================================
 # 结构体（与 C 布局逐位对齐，勿动格式串；PROTOCOL.md §1.2/§1.3/§3 有偏移表）
 # =============================================================================
 SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBB2x')   # 112B
-VIDEO_HDR   = struct.Struct('>HHHH')                             # 8B 大端
+VIDEO_REC   = struct.Struct('>HHI')                              # 8B 大端: magic+fid+len（TCP 自带完整性校验，无应用层 CRC）
 
 # =============================================================================
 # CRC16-CCITT-FALSE（poly 0x1021，init 0xFFFF，与 F407 ESP_LINK_CRC16 一致）
@@ -154,33 +152,3 @@ class SensorData:
     last_cmd_status: int = 0
     link_stale: bool = False       # S3 JSON metadata; not part of the 112-byte UART payload
 
-    @classmethod
-    def parse(cls, payload: bytes) -> 'SensorData':
-        """从方向1 帧 payload（112B）解析。"""
-        v = SENSOR_DATA.unpack(payload)
-        return cls(
-            dist_front_mm=v[0], dist_left_mm=v[1], dist_right_mm=v[2],
-            dist_front_status=v[3], dist_left_status=v[4], dist_right_status=v[5],
-            dist_timestamp_ms=v[6],
-            quat_w=v[7], quat_x=v[8], quat_y=v[9], quat_z=v[10],
-            accel_x=v[11], accel_y=v[12], accel_z=v[13],
-            mpu_timestamp_ms=v[14],
-            speed_d100=tuple(v[15:19]), odometer=tuple(v[19:23]),
-            ctrl_timestamp_ms=v[23],
-            current_mA=tuple(v[24:28]), bus_voltage_mV=tuple(v[28:32]),
-            ina_timestamp_ms=v[32],
-            sys_tick_ms=v[33], last_cmd_id=v[34], last_cmd_status=v[35],
-        )
-
-
-@dataclass
-class VideoHeader:
-    """UDP 视频帧头（大端，PROTOCOL.md §3）。"""
-    magic: int = 0
-    frame_id: int = 0
-    packet_id: int = 0
-    total_pkt: int = 0
-
-    @classmethod
-    def parse(cls, data: bytes) -> 'VideoHeader':
-        return cls(*VIDEO_HDR.unpack(data))

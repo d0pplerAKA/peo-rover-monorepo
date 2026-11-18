@@ -58,7 +58,6 @@ sent = []
 class FakeClient:
     connected = True
     sys_info = None
-    last_rtt_ms = None
     def wait_ready(self, timeout=0.5): return True
     def stop_all(self): return True
     def send_json_batch(self, objects):

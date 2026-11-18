@@ -62,7 +62,8 @@ if __name__ == "__main__":
 '''
 import peo
 peo.connect()
-peo.delay(2000)
+peo.delay(500)
+peo.cam.set_resolution("QVGA")
 peo.cam.on()
 
 while True:
