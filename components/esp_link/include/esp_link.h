@@ -128,16 +128,8 @@ extern QueueHandle_t esp_link_sensor_queue;   /* 出：esp_link_snapshot_t（1 �
 void esp_link_request_stop(void);
 /** 启动健康故障：锁 STOP 且永久禁止 resume；普通输入/STOP 不可清除，仅重启恢复。 */
 void esp_link_fatal_fault(void);
-bool esp_link_commands_inhibited(void);
 uint32_t esp_link_command_generation(void);
 bool esp_link_resume_commands(uint32_t observed_generation);
-/** True only after all commands accepted in this still-active generation have
- * completed UART TX (not merely been dequeued). */
-bool esp_link_commands_drained(uint32_t generation);
-
-/** Enqueue a command. Normal commands may return false (busy/inhibited/invalid).
- * STOP_ALL never competes for ordinary queue capacity. */
-bool esp_link_send_command(uint8_t cmd_id, const uint8_t *param, uint8_t param_len);
 /** Enqueue only if the producer's captured epoch is still current. */
 bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
                                           uint8_t param_len, uint32_t generation);

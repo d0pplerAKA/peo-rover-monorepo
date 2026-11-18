@@ -32,7 +32,6 @@ static uint32_t s_generation = 0;
 static bool s_inhibited = false;
 static bool s_fatal = false;          /* 启动健康故障永久锁存，由 s_safety_lock 保护。 */
 static bool s_stop_pending = false;
-static uint32_t s_pending_commands = 0;
 static TaskHandle_t s_tx_task = NULL;   /* 注册/读取均由 s_safety_lock 保护；TX 常驻 */
 static constexpr uint32_t TX_WAKE = 1U; /* 通知只唤醒；STOP 状态与命令队列才是数据源 */
 
@@ -40,7 +39,6 @@ void esp_link_request_stop(void)
 {
     portENTER_CRITICAL(&s_safety_lock);
     ++s_generation;
-    s_pending_commands = 0; // Queued/in-flight old-epoch commands no longer count.
     s_inhibited = true;
     s_stop_pending = true;
     const TaskHandle_t tx_task = s_tx_task;
@@ -53,20 +51,11 @@ void esp_link_fatal_fault(void)
     portENTER_CRITICAL(&s_safety_lock);
     s_fatal = true;
     ++s_generation;
-    s_pending_commands = 0;
     s_inhibited = true;
     s_stop_pending = true;
     const TaskHandle_t tx_task = s_tx_task;
     portEXIT_CRITICAL(&s_safety_lock);
     if (tx_task != NULL) xTaskNotify(tx_task, TX_WAKE, eSetBits);
-}
-
-bool esp_link_commands_inhibited(void)
-{
-    portENTER_CRITICAL(&s_safety_lock);
-    const bool value = s_inhibited;
-    portEXIT_CRITICAL(&s_safety_lock);
-    return value;
 }
 
 uint32_t esp_link_command_generation(void)
@@ -75,15 +64,6 @@ uint32_t esp_link_command_generation(void)
     const uint32_t value = s_generation;
     portEXIT_CRITICAL(&s_safety_lock);
     return value;
-}
-
-bool esp_link_commands_drained(uint32_t generation)
-{
-    portENTER_CRITICAL(&s_safety_lock);
-    const bool drained = generation == s_generation && !s_inhibited &&
-                         !s_stop_pending && s_pending_commands == 0;
-    portEXIT_CRITICAL(&s_safety_lock);
-    return drained;
 }
 
 bool esp_link_resume_commands(uint32_t observed_generation)
@@ -300,23 +280,9 @@ void esp_link_tx_task(void *arg)
             if (!transmit_command(cmd)) {
                 ESP_LOGE(TAG, "UART TX failed; requesting STOP");
                 esp_link_request_stop();
-            } else {
-                portENTER_CRITICAL(&s_safety_lock);
-                if (cmd.generation == s_generation && s_pending_commands != 0)
-                    --s_pending_commands;
-                portEXIT_CRITICAL(&s_safety_lock);
             }
         }
     }
-}
-
-/* ============================================================================
-   4. 便捷接口
-   ============================================================================ */
-bool esp_link_send_command(uint8_t cmd_id, const uint8_t *param, uint8_t param_len)
-{
-    return esp_link_send_command_for_generation(cmd_id, param, param_len,
-                                                esp_link_command_generation());
 }
 
 bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
@@ -333,8 +299,6 @@ bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
     portENTER_CRITICAL(&s_safety_lock);
     const bool allowed = !s_inhibited && generation == s_generation;
     cmd.generation = s_generation;
-    // Count before publishing so TX cannot complete before accounting starts.
-    if (allowed) ++s_pending_commands;
     portEXIT_CRITICAL(&s_safety_lock);
     if (!allowed) return false;
     cmd.cmd_id = cmd_id;
@@ -350,9 +314,5 @@ bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
         if (tx_task != NULL) xTaskNotify(tx_task, TX_WAKE, eSetBits);
         return true;
     }
-    portENTER_CRITICAL(&s_safety_lock);
-    if (cmd.generation == s_generation && s_pending_commands != 0)
-        --s_pending_commands;
-    portEXIT_CRITICAL(&s_safety_lock);
     return false;
 }

@@ -7,10 +7,15 @@ extern "C" {
 
 /**
  * @file    ws2812_led.h
- * @brief   单颗 WS2812 灯珠控制（RMT TX 直驱）。
+ * @brief   单颗 WS2812 状态灯（RMT TX 直驱）+ 手动颜色控制。
  *
- * 控制模型：其它组件一律通过 FreeRTOS 队列调用 ws2812_set_color()，
- * 禁止直接操作 RMT/GPIO。灯珠由独立任务（core1）维护。
+ * 状态语义（2026-11-16 用户定案）：
+ *   - 未连上笔记本热点（PEO_NET_EVT_STA 未置位）：蓝色呼吸（正弦亮度，1.6s 周期）；
+ *   - 连上热点：绿色快闪 3 次 → 绿色常亮；
+ *   - 断连：回到呼吸。
+ * 手动控制：其他组件经 FreeRTOS 队列调用 ws2812_set_color()（1 深 latest-wins），
+ * 连接状态下立即覆盖常亮色；连接状态一变（断连/重连）即回到状态灯语义。
+ * 禁止直接操作 RMT/GPIO。灯由独立任务（core1）维护。
  */
 typedef struct {
     uint8_t r, g, b;      /* 颜色 0-255 */

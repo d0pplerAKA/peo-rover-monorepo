@@ -98,7 +98,7 @@ static inline size_t dcache_line_size(void)
  * fetch the fresh data from PSRAM rather than stale cache contents.
  * Both address and length are aligned to the data cache line size.
  */
-static inline esp_err_t cam_drop_psram_cache(void *addr, size_t len)
+static inline void cam_drop_psram_cache(void *addr, size_t len)
 {
     size_t line = dcache_line_size();
     if (line == 0) {
@@ -106,21 +106,8 @@ static inline esp_err_t cam_drop_psram_cache(void *addr, size_t len)
     }
     uintptr_t start = (uintptr_t)addr & ~(line - 1);
     size_t sync_len = (len + ((uintptr_t)addr - start) + line - 1) & ~(line - 1);
-    return esp_cache_msync((void *)start, sync_len,
+    esp_cache_msync((void *)start, sync_len,
                     ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
-}
-
-/* CPU-authored writes must be written back, never invalidated: M2C would
- * discard the converted pixels and leave stale data in PSRAM. */
-static inline esp_err_t cam_flush_psram_cache(void *addr, size_t len)
-{
-    size_t line = dcache_line_size();
-    if (line == 0) {
-        line = 32; /* sane fallback */
-    }
-    uintptr_t start = (uintptr_t)addr & ~(line - 1);
-    size_t sync_len = (len + ((uintptr_t)addr - start) + line - 1) & ~(line - 1);
-    return esp_cache_msync((void *)start, sync_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
 
 /* Throttle repeated warnings printed from tight loops / ISRs.
@@ -341,17 +328,7 @@ static void cam_task(void *arg)
                                 probe_len = CAM_SOI_PROBE_BYTES;
                             }
                             /* Invalidate cache lines for the DMA buffer before probing */
-                            esp_err_t sync_err = cam_drop_psram_cache(frame_buffer_event->buf, probe_len);
-                            if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                                static uint16_t warn_soi_cache_sync_cnt = 0;
-                                CAM_WARN_THROTTLE(warn_soi_cache_sync_cnt,
-                                                  "CACHE-SYNC - SOI probe failed, frame dropped");
-                                /* 采集侧尚未向消费者发布该帧：先停 DMA，再归还槽位。 */
-                                ll_cam_stop(cam_obj);
-                                cam_obj->state = CAM_STATE_IDLE;
-                                cam_give(frame_buffer_event);
-                                continue;
-                            }
+                            cam_drop_psram_cache(frame_buffer_event->buf, probe_len);
 
                             uint8_t soi_probe[CAM_SOI_PROBE_BYTES];
                             memcpy(soi_probe, frame_buffer_event->buf, probe_len);
@@ -791,7 +768,6 @@ camera_fb_t *cam_take(TickType_t timeout)
 #endif
     /* throttle repeated NO-EOI warnings */
     static uint16_t warn_eoi_miss_cnt = 0;
-    static uint16_t warn_cache_sync_cnt = 0; /* 读帧/转换同步失败共用限流计数。 */
 
     for (;;)
     {
@@ -842,13 +818,7 @@ camera_fb_t *cam_take(TickType_t timeout)
                     goto skip_eoi_check;
                 }
                 uint8_t *probe_start = dma_buffer->buf + dma_buffer->len - probe_len;
-                esp_err_t sync_err = cam_drop_psram_cache(probe_start, probe_len);
-                if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                    CAM_WARN_THROTTLE(warn_cache_sync_cnt,
-                                      "CACHE-SYNC - JPEG tail probe failed, frame dropped");
-                    cam_give(dma_buffer);
-                    continue;
-                }
+                cam_drop_psram_cache(probe_start, probe_len);
                 int off = cam_verify_jpeg_eoi(probe_start, probe_len, true);
                 if (off >= 0) {
                     offset_e = dma_buffer->len - probe_len + off;
@@ -861,13 +831,7 @@ camera_fb_t *cam_take(TickType_t timeout)
                      * marker before the zero padding is the real EOI.  Safe against the stale-frame
                      * case the probe window guards: len = cnt * dma_half_buffer_size, so all of
                      * [0, len) was written by THIS frame's DMA - stale bytes only live beyond len. */
-                    sync_err = cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
-                    if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                        CAM_WARN_THROTTLE(warn_cache_sync_cnt,
-                                          "CACHE-SYNC - JPEG EOI fallback failed, frame dropped");
-                        cam_give(dma_buffer);
-                        continue;
-                    }
+                    cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
                     offset_e = cam_verify_jpeg_eoi(dma_buffer->buf, dma_buffer->len, false);
                 }
             } else {
@@ -878,13 +842,7 @@ camera_fb_t *cam_take(TickType_t timeout)
                 dma_buffer->len = offset_e + JPEG_EOI_MARKER_LEN;
                 if (cam_obj->psram_mode) {
                     /* DMA may bypass cache, ensure full frame is visible */
-                    esp_err_t sync_err = cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
-                    if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                        CAM_WARN_THROTTLE(warn_cache_sync_cnt,
-                                          "CACHE-SYNC - JPEG frame read failed, frame dropped");
-                        cam_give(dma_buffer);
-                        continue;
-                    }
+                    cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
                 }
                 return dma_buffer;
             }
@@ -898,32 +856,10 @@ skip_eoi_check:
         } else if (cam_obj->psram_mode &&
                    cam_obj->in_bytes_per_pixel != cam_obj->fb_bytes_per_pixel) {
             /* currently used only for YUV to GRAYSCALE */
-            /* DMA bypassed the cache: invalidate before the CPU reads pixels. */
-            esp_err_t sync_err = cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
-            if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                CAM_WARN_THROTTLE(warn_cache_sync_cnt,
-                                  "CACHE-SYNC - YUV frame read failed, frame dropped");
-                cam_give(dma_buffer);
-                continue;
-            }
             dma_buffer->len = ll_cam_memcpy(cam_obj, dma_buffer->buf, dma_buffer->buf, dma_buffer->len);
-            /* The conversion is CPU-authored; write it back to PSRAM. */
-            sync_err = cam_flush_psram_cache(dma_buffer->buf, dma_buffer->len);
-            if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                CAM_WARN_THROTTLE(warn_cache_sync_cnt,
-                                  "CACHE-SYNC - converted frame writeback failed, frame dropped");
-                cam_give(dma_buffer);
-                continue;
-            }
         } else if (cam_obj->psram_mode) {
             /* DMA may bypass cache, ensure full frame is visible to the app */
-            esp_err_t sync_err = cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
-            if (sync_err != ESP_OK && sync_err != ESP_ERR_NOT_SUPPORTED) {
-                CAM_WARN_THROTTLE(warn_cache_sync_cnt,
-                                  "CACHE-SYNC - frame read failed, frame dropped");
-                cam_give(dma_buffer);
-                continue;
-            }
+            cam_drop_psram_cache(dma_buffer->buf, dma_buffer->len);
         }
 
         return dma_buffer;

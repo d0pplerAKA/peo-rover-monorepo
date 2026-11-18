@@ -5,10 +5,10 @@
 
 /**
  * @file    camera_service.h
- * @brief   PEO Rover - OV5640 摄像头服务：抓帧 -> JPEG -> esp_net UDP 视频流
+ * @brief   PEO Rover - OV2640 摄像头服务：抓帧 -> JPEG -> esp_net TCP 视频流
  *
  * camera_task（优先级 3）：按 PEO_PINMAP.h 的 PEO_PM_CAM_* 引脚初始化
- * esp32-camera，循环抓 JPEG 帧交 esp_net_send_video() 分片发送（UDP 8889）。
+ * esp32-camera，循环抓 JPEG 帧交 esp_net_send_video() 定界发送（TCP 8890）。
  * 初始化/回退失败：清理驱动后待命，新分辨率请求可触发自愈；任务不退出。
  */
 

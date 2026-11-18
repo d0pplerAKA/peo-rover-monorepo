@@ -136,24 +136,7 @@ static void send_ack(const char *cmd_name, uint8_t status)
     char *out = ok ? cJSON_PrintUnformatted(ack) : NULL;
     cJSON_Delete(ack);
     if (out != NULL)
-    {
-        if (xQueueSend(esp_net_ack_queue, &out, 0) != pdTRUE)
-            free(out);
-    }
-}
-
-/* PING 独立回包，不改变普通 ACK 格式，也不恢复运动。 */
-static void send_ping_ack(double timestamp)
-{
-    cJSON *ack = cJSON_CreateObject();
-    if (!ack) return;
-    bool ok = cJSON_AddStringToObject(ack, "ack", "PING") &&
-              cJSON_AddNumberToObject(ack, "status", 0) &&
-              cJSON_AddNumberToObject(ack, "t", timestamp);
-    char *out = ok ? cJSON_PrintUnformatted(ack) : NULL;
-    cJSON_Delete(ack);
-    if (out != NULL && xQueueSend(esp_net_ack_queue, &out, 0) != pdTRUE)
-        free(out);
+        esp_net_send_ack(out);  /* Transfers ownership even when the ACK queue is full. */
 }
 
 /** v1.5 可选线代次：缺失时保留消息本地代次；存在但不是有限 uint32 整数
@@ -188,14 +171,6 @@ static void handle_command(const cJSON *root, uint32_t generation,
     {
         esp_link_request_stop();
         send_ack(jc->valuestring, 0);
-        return;
-    }
-    /* 诊断命令无条件回包：在 gen 校验和 STOP 恢复逻辑之前处理。 */
-    if (strcmp(jc->valuestring, "PING") == 0)
-    {
-        esp_net_note_client_activity(slot, received_ms, false);
-        const cJSON *jt = cJSON_GetObjectItem(root, "t");
-        send_ping_ack(cJSON_IsNumber(jt) ? (double)jt->valuedouble : 0.0);
         return;
     }
     const cJSON *jgen = cJSON_GetObjectItem(root, "gen");
@@ -323,7 +298,7 @@ void cmd_parser_task(void *arg)
             continue;
         if (!msg.line) continue;
         /* 保留无 gen 消息在解析前/后的两次本地代次判定。必须先解析 JSON，
-           才能识别 STOP/PING 豁免，以及使用线 gen 的命令。 */
+           才能识别 STOP/单向心跳豁免，以及使用线 gen 的命令。 */
         const bool local_generation_current = msg.generation == esp_link_command_generation();
         cJSON *root = cJSON_ParseWithOpts(msg.line, NULL, true);
         /* 正常/非法 JSON 共用释放点：先归还完整行预算，再释放字符串，避免重复归还。 */
@@ -334,9 +309,19 @@ void cmd_parser_task(void *arg)
 
         const cJSON *jc = cJSON_GetObjectItem(root, "cmd");
         const bool stop_all = cJSON_IsString(jc) && strcmp(jc->valuestring, "STOP_ALL") == 0;
-        const bool ping = cJSON_IsString(jc) && strcmp(jc->valuestring, "PING") == 0;
+        /* 安全心跳仅续期，不回包、不恢复运动，也不执行命令。
+           不依赖 gen，保证 STOP 后等待新遥测期间仍可维持连接。 */
+        const cJSON *jt = cJSON_GetObjectItem(root, "type");
+        const bool heartbeat = jc == NULL && cJSON_IsString(jt) &&
+                               strcmp(jt->valuestring, "heartbeat") == 0;
+        if (heartbeat)
+        {
+            esp_net_note_client_activity(msg.slot, msg.received_ms, false);
+            cJSON_Delete(root);
+            continue;
+        }
         const bool tagged_work = cJSON_GetObjectItem(root, "gen") != NULL && jc != NULL;
-        if (!stop_all && !ping && !tagged_work &&
+        if (!stop_all && !tagged_work &&
             (!local_generation_current || msg.generation != esp_link_command_generation()))
         {
             cJSON_Delete(root);

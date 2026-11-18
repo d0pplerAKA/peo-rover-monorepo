@@ -8,7 +8,7 @@
  *
  * 2026-11-15：gamepad（C3 手柄桥）与 macro（宏引擎）字段已随组件废弃删除。
  *
- * 每轮延时 40ms 后非破坏性 peek 最新传感器快照，名义采样频率 25Hz。
+ * 每 50ms 非破坏性 peek 最新传感器快照，名义回报频率 20Hz。
  */
 
 #include "telemetry.h"
@@ -22,30 +22,33 @@
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <freertos/idf_additions.h>
-#include <cJSON.h>
+#include <cmath>
+#include <float.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "telemetry";
 
-/* cJSON does not free an item when AddItem fails. Keep ownership explicit. */
-static bool add_item(cJSON *parent, const char *name, cJSON *item)
-{
-    if (!item) return false;
-    if (name ? cJSON_AddItemToObject(parent, name, item) : cJSON_AddItemToArray(parent, item))
-        return true;
-    cJSON_Delete(item);
-    return false;
-}
+static constexpr size_t JSON_MAX = 1024;
+/* Binary32 %.4f: sign + 39 integer digits + dot + 4 decimals + NUL = 46.
+   Worst complete line (including link_stale and newline):
+   prefix 70 + dist 104 + imu 348 + wheels 135 + power 96 + cmd_ack 34
+   + sys/closing/newline 76 = 863 bytes; with NUL = 864, leaving 160 bytes. */
+static constexpr size_t JSON_FLOAT_MAX = 46;
+static_assert(FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128,
+              "JSON float capacity assumes IEEE binary32 sensors");
+static_assert(sizeof(size_t) <= sizeof(uint32_t), "JSON RAM capacity assumes at most 32-bit size_t");
+static_assert(JSON_MAX >= 864, "JSON buffer must hold the worst complete sensor line");
 
-static bool add_dist(cJSON *dist, const char *name, uint16_t mm, uint8_t status)
-{
-    cJSON *node = cJSON_AddObjectToObject(dist, name);
-    return node && cJSON_AddNumberToObject(node, "mm", mm) &&
-           cJSON_AddBoolToObject(node, "ok", status == 0);
-}
+struct sys_sample_t {
+    unsigned cpu0, cpu1;
+    size_t ram_free, ram_total;
+};
 
 /* 仅由 telemetry 任务采样；首轮为 0，不足 1 秒保持上轮值。 */
-static bool add_sys(cJSON *root)
+static sys_sample_t sample_sys(void)
 {
     static bool sampled = false;
     static int64_t last_us = 0;
@@ -72,56 +75,65 @@ static bool add_sys(cJSON *root)
         last_us = now_us;
         sampled = true;
     }
-    cJSON *sys = cJSON_AddObjectToObject(root, "sys");
-    return sys && cJSON_AddNumberToObject(sys, "cpu0", cpu[0]) &&
-           cJSON_AddNumberToObject(sys, "cpu1", cpu[1]) &&
-           cJSON_AddNumberToObject(sys, "ram_free", heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) &&
-           cJSON_AddNumberToObject(sys, "ram_total", heap_caps_get_total_size(MALLOC_CAP_INTERNAL));
+    /* RAM stays fresh on every generated frame; only CPU is cached at 1 Hz. */
+    return {cpu[0], cpu[1], heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            heap_caps_get_total_size(MALLOC_CAP_INTERNAL)};
 }
 
 /** Return a complete owned JSON string, or NULL; never publish an OOM-truncated object. */
 static char *build_json(const esp_link_sensor_t *s, bool link_stale)
 {
-    cJSON *root = cJSON_CreateObject();
-    if (!root) return NULL;
-    bool ok = [&]() -> bool {
-        if (!cJSON_AddStringToObject(root, "type", "sensor") ||
-            !cJSON_AddNumberToObject(root, "tick", s->sys_tick_ms) ||
-            !cJSON_AddNumberToObject(root, "gen", esp_link_command_generation())) return false;
-        /* 仅过期时添加可选标记；其余字段/结构保持原样，不把信封元数据外发。 */
-        if (link_stale && !cJSON_AddBoolToObject(root, "link_stale", true)) return false;
-        cJSON *dist = cJSON_AddObjectToObject(root, "dist");
-        if (!dist || !add_dist(dist, "front", s->dist_front_mm, s->dist_front_status) ||
-            !add_dist(dist, "left", s->dist_left_mm, s->dist_left_status) ||
-            !add_dist(dist, "right", s->dist_right_mm, s->dist_right_status)) return false;
-
-        cJSON *imu = cJSON_AddObjectToObject(root, "imu");
-        double quat[] = {s->quat_w, s->quat_x, s->quat_y, s->quat_z};
-        double accel[] = {s->accel_x, s->accel_y, s->accel_z};
-        if (!imu || !add_item(imu, "quat", cJSON_CreateDoubleArray(quat, 4)) ||
-            !add_item(imu, "accel_g", cJSON_CreateDoubleArray(accel, 3))) return false;
-
-        cJSON *wheels = cJSON_AddObjectToObject(root, "wheels");
-        int speed[] = {s->speed_d100[0], s->speed_d100[1], s->speed_d100[2], s->speed_d100[3]};
-        int odo[] = {s->odometer[0], s->odometer[1], s->odometer[2], s->odometer[3]};
-        if (!wheels || !add_item(wheels, "speed_d100", cJSON_CreateIntArray(speed, 4)) ||
-            !add_item(wheels, "odometer", cJSON_CreateIntArray(odo, 4))) return false;
-
-        cJSON *power = cJSON_AddObjectToObject(root, "power");
-        int current[] = {s->current_mA[0], s->current_mA[1], s->current_mA[2], s->current_mA[3]};
-        int voltage[] = {s->bus_voltage_mV[0], s->bus_voltage_mV[1], s->bus_voltage_mV[2], s->bus_voltage_mV[3]};
-        if (!power || !add_item(power, "current_mA", cJSON_CreateIntArray(current, 4)) ||
-            !add_item(power, "bus_voltage_mV", cJSON_CreateIntArray(voltage, 4))) return false;
-
-        cJSON *ack = cJSON_AddObjectToObject(root, "cmd_ack");
-        if (!ack || !cJSON_AddNumberToObject(ack, "id", s->last_cmd_id) ||
-            !cJSON_AddNumberToObject(ack, "status", s->last_cmd_status)) return false;
-
-        if (!add_sys(root)) return false;
-        return true;
-    }();
-    char *out = ok ? cJSON_PrintUnformatted(root) : NULL;
-    cJSON_Delete(root);
+    char *out = (char *)malloc(JSON_MAX);
+    if (!out) return NULL;
+    const uint32_t generation = esp_link_command_generation();
+    const float values[] = {s->quat_w, s->quat_x, s->quat_y, s->quat_z,
+                            s->accel_x, s->accel_y, s->accel_z};
+    char imu[7][JSON_FLOAT_MAX];
+    for (size_t i = 0; i < 7; ++i)
+    {
+        if (!std::isfinite(values[i]))
+        {
+            strcpy(imu[i], "null");  /* Preserve cJSON's NaN/Inf representation. */
+            continue;
+        }
+        /* This target's Picolibc uses the fixed C locale (decimal point '.'). */
+        const int n = snprintf(imu[i], sizeof(imu[i]), i < 4 ? "%.4f" : "%.3f",
+                               (double)values[i]);
+        if (n < 0 || (size_t)n >= sizeof(imu[i]))
+        {
+            free(out);
+            return NULL;
+        }
+    }
+    const sys_sample_t sys = sample_sys();
+    const int n = snprintf(out, JSON_MAX,
+        "{\"type\":\"sensor\",\"tick\":%" PRIu32 ",\"gen\":%" PRIu32 "%s,"
+        "\"dist\":{\"front\":{\"mm\":%u,\"ok\":%s},"
+                    "\"left\":{\"mm\":%u,\"ok\":%s},"
+                    "\"right\":{\"mm\":%u,\"ok\":%s}},"
+        "\"imu\":{\"quat\":[%s,%s,%s,%s],\"accel_g\":[%s,%s,%s]},"
+        "\"wheels\":{\"speed_d100\":[%" PRId32 ",%" PRId32 ",%" PRId32 ",%" PRId32 "],"
+                      "\"odometer\":[%" PRId32 ",%" PRId32 ",%" PRId32 ",%" PRId32 "]},"
+        "\"power\":{\"current_mA\":[%d,%d,%d,%d],\"bus_voltage_mV\":[%u,%u,%u,%u]},"
+        "\"cmd_ack\":{\"id\":%u,\"status\":%u},"
+        "\"sys\":{\"cpu0\":%u,\"cpu1\":%u,\"ram_free\":%zu,\"ram_total\":%zu}}\n",
+        s->sys_tick_ms, generation, link_stale ? ",\"link_stale\":true" : "",
+        (unsigned)s->dist_front_mm, s->dist_front_status == 0 ? "true" : "false",
+        (unsigned)s->dist_left_mm, s->dist_left_status == 0 ? "true" : "false",
+        (unsigned)s->dist_right_mm, s->dist_right_status == 0 ? "true" : "false",
+        imu[0], imu[1], imu[2], imu[3], imu[4], imu[5], imu[6],
+        s->speed_d100[0], s->speed_d100[1], s->speed_d100[2], s->speed_d100[3],
+        s->odometer[0], s->odometer[1], s->odometer[2], s->odometer[3],
+        (int)s->current_mA[0], (int)s->current_mA[1], (int)s->current_mA[2], (int)s->current_mA[3],
+        (unsigned)s->bus_voltage_mV[0], (unsigned)s->bus_voltage_mV[1],
+        (unsigned)s->bus_voltage_mV[2], (unsigned)s->bus_voltage_mV[3],
+        (unsigned)s->last_cmd_id, (unsigned)s->last_cmd_status,
+        sys.cpu0, sys.cpu1, sys.ram_free, sys.ram_total);
+    if (n < 0 || (size_t)n >= JSON_MAX)
+    {
+        free(out);
+        return NULL;
+    }
     return out;
 }
 
@@ -140,12 +152,13 @@ void telemetry_task(void *arg)
     {
         /* 无客户端 → 阻塞静止、零广播（esp_net accept 时置位唤醒） */
         xEventGroupWaitBits(eg, PEO_NET_EVT_CLIENT, pdFALSE, pdTRUE, portMAX_DELAY);
+        TickType_t last_wake = xTaskGetTickCount();
         while (xEventGroupGetBits(eg) & PEO_NET_EVT_CLIENT)
         {
         /* Latest-value mailbox（单读者：telemetry）。 */
-        /* 25Hz 遥测：50Hz 时 ~30KB/s 生产速率 0.3s 就能顶爆积压上限；25Hz 减半，
-           给 TCP 排水留时间（传感器数据本身 ~10Hz 更新，25Hz 已足够顺滑）。 */
-        vTaskDelay(pdMS_TO_TICKS(40));
+        /* 20Hz 遥测：固定 50ms 节拍，避免 JSON 处理时间累积到周期中。
+           重新连接时重置节拍基准；sys 对象及传感器数据格式保持不变。 */
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
         esp_link_snapshot_t sn;
         const bool have_sensor = xQueuePeek(esp_link_sensor_queue, &sn, 0) == pdTRUE;
         if (!have_sensor)
@@ -176,8 +189,7 @@ void telemetry_task(void *arg)
         if (json == NULL)
             continue;
 
-        if (xQueueSend(esp_net_tx_queue, &json, 0) != pdTRUE)
-            free(json);   /* 广播队列满：丢弃本帧，等下帧 */
+        esp_net_publish_telemetry(json);  /* Always transfers ownership; do not free here. */
         }
     }
 }
