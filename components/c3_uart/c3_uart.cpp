@@ -46,10 +46,10 @@ static uint16_t c3_crc16(const uint8_t *data, uint16_t len)
 
 void c3_uart_init(void)
 {
-    static_assert(sizeof(c3_gamepad_payload_t) == 24,
-                  "gamepad payload must be 24B (PROTOCOL.md §1.4)");
+    static_assert(sizeof(c3_gamepad_payload_t) == 26,
+                  "gamepad payload must be 26B (PROTOCOL.md §1.4)");
 
-    /* UART 初始化（8-N-1，无流控，与 S3 端 c3_link 一致） */
+    /* UART 初始化（8-N-1，无流控，与 F407 端 USART3 一致） */
     uart_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.baud_rate  = PEO_PM_C3_BAUDRATE;
@@ -72,16 +72,16 @@ bool c3_uart_send_gamepad(const c3_gamepad_payload_t *p)
     if (p == NULL)
         return false;
 
-    uint8_t frame[3 + 1 + sizeof(c3_gamepad_payload_t) + 2];   /* 30B */
+    uint8_t frame[3 + 1 + sizeof(c3_gamepad_payload_t) + 2];   /* 32B: SOF2+LEN1+type1+body26+CRC2 */
     frame[0] = C3_FRAME_SOF0;
     frame[1] = C3_FRAME_SOF1;
-    frame[2] = (uint8_t)(1 + sizeof(c3_gamepad_payload_t));    /* LEN = 25 */
+    frame[2] = (uint8_t)(1 + sizeof(c3_gamepad_payload_t));    /* LEN = 27 = type+body */
     frame[3] = C3_TYPE_GAMEPAD_STATE;
     memcpy(&frame[4], p, sizeof(c3_gamepad_payload_t));
 
     const uint16_t crc = c3_crc16(frame, (uint16_t)(4 + sizeof(c3_gamepad_payload_t)));
-    frame[28] = (uint8_t)crc;
-    frame[29] = (uint8_t)(crc >> 8);
+    frame[sizeof(frame) - 2] = (uint8_t)crc;         /* frame[30] CRC 低字节 */
+    frame[sizeof(frame) - 1] = (uint8_t)(crc >> 8);  /* frame[31] CRC 高字节 */
 
     const int sent = uart_write_bytes(PEO_PM_C3_UART, frame, sizeof(frame));
     const esp_err_t drained = uart_wait_tx_done(PEO_PM_C3_UART, pdMS_TO_TICKS(100));

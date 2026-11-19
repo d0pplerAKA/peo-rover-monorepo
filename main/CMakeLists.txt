@@ -2,4 +2,5 @@ idf_component_register(SRCS "main.cpp"
                        INCLUDE_DIRS "."
                        REQUIRES arduino-esp32
                                 xbox_service
-                                c3_uart)
+                                c3_uart
+                                led_status)
