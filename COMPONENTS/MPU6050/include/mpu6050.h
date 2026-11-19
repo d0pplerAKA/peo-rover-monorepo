@@ -42,6 +42,7 @@ int _MLPrintLog(int priority, const char *tag, const char *fmt, ...);
 uint8_t MPU6050_Init(void);                                     /* 0=成功；1=身份校验失败；2=DMP配置失败（不启动） */
 uint8_t MPU6050_DMP_Init(void);                                 /* 0 = 配置成功             */
 uint8_t MPU6050_Start(void);                                    /* 0 = 启动成功，开始触发中断 */
+uint8_t MPU6050_Stop(void);                                     /* 0 = 停止成功；1 = 停止失败 */
 uint8_t run_self_test(void);                                   /* 自检 + 偏置校准 */
 uint8_t MPU6050_GetSelfTest(void);                             /* 0=通过 1=未通过 2=未运行 */
 uint8_t MPU6050_GetInitStatus(void);                           /* 0=成功 1=WHO_AM_I失败 2=DMP失败 3=未运行 */

@@ -40,6 +40,9 @@
 #define GAMEPAD_STALE_MS      (500U)    /* C3 失联判定（>此值无有效帧 -> 停车） */
 #define GAMEPAD_DEADZONE      (500)     /* 摇杆死区（中值 32768，±500 内归零） */
 #define GAMEPAD_SPEED_MAX     (4424)    /* 满速 0.01 cm/s（≈44.24 cm/s） */
+#define GAMEPAD_TRIGGER_MAX   (1023)   /* 扳机满量程 */
+#define GAMEPAD_BOOST_SPEED   (2212)   /* LB/RB 单侧加速量（0.01 cm/s，半速） */
+#define GAMEPAD_STRAFE_SIGN   (1)      /* 平移方向符号：上板若 LT/RT 反了改 -1 */
 
 /* ============================================================================
    锁状态
@@ -50,7 +53,12 @@
 /* ============================================================================
    按键位图（与 C3 xbox_service.h XB_BTN_* 位序一致）
    ============================================================================ */
-#define GAMEPAD_BTN_XBOX      ((uint16_t)(1U << 15))   /* 急停键（双源，永远生效） */
+#define GAMEPAD_BTN_A         ((uint16_t)(1U << 0))
+#define GAMEPAD_BTN_B         ((uint16_t)(1U << 1))    /* 急停键（B 键，双源，永远生效） */
+#define GAMEPAD_BTN_X         ((uint16_t)(1U << 2))   /* INA3221 轮询 toggle */
+#define GAMEPAD_BTN_Y         ((uint16_t)(1U << 3))   /* VL53 测距 toggle */
+#define GAMEPAD_BTN_LB        ((uint16_t)(1U << 4))   /* 右侧两轮加速 */
+#define GAMEPAD_BTN_RB        ((uint16_t)(1U << 5))   /* 左侧两轮加速 */
 
 /* ============================================================================
    手柄 payload（26B packed，与 C3 c3_gamepad_payload_t 逐字节一致）
@@ -90,7 +98,7 @@ uint8_t GAMEPAD_IsConnected(void);
 /**
  * @brief  失联检测 + 锁仲裁 + 摇杆映射（main 主循环调，~100Hz 节拍）。
  * @note   锁关闭（手操）时把摇杆映射成四轮目标速度；锁开启（自主）时跳过
- *         （上位机命令接管）。急停键（XBOX）双源永远生效，越过锁。
+ *         （上位机命令接管）。急停键（B 键）双源永远生效，越过锁。
  */
 void GAMEPAD_Process(void);
 

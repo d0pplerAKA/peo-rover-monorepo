@@ -221,6 +221,17 @@ uint8_t MPU6050_Start(void)
 }
 
 /**
+ * @brief  停止 DMP 引擎（toggle 关闭用）。
+ * @return 0 = 成功；1 = mpu_set_dmp_state(0) 失败。
+ */
+uint8_t MPU6050_Stop(void)
+{
+    if (mpu_set_dmp_state(0))
+        return 1;
+    return 0;
+}
+
+/**
  * @brief  MPU6050 自检：跑 gyro + accel 自检，通过后把测得的偏置写入 DMP。
  * @return 0 = 通过并写入偏置；1 = 自检未通过。
  */

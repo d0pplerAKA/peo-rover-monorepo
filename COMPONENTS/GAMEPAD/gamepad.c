@@ -12,6 +12,10 @@
 
 #include "COMPONENTS/CONTROL/include/control.h"
 #include "COMPONENTS/TIMER/include/timer.h"
+#include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
+#include "COMPONENTS/TOF400C/include/tof400c.h"
+#include "COMPONENTS/INA3221/include/ina3221.h"
+#include "COMPONENTS/MPU6050/include/mpu6050.h"
 
 #include <string.h>
 
@@ -53,6 +57,16 @@ static uint16_t CRC16_Calc(const uint8_t *data, uint16_t len)
 static volatile gamepad_payload_t g_pad;
 static volatile uint32_t g_last_rx_ms = 0;
 static volatile uint8_t  g_prev_lock  = GAMEPAD_LOCK_MANUAL;
+static uint16_t g_prev_buttons = 0;   /* 上一帧按键，用于上升沿检测 */
+#if PEO_ENABLE_TOF400C
+static uint8_t  g_vl53_on = 1;        /* VL53 测距当前开/关（上电即开） */
+#endif
+#if PEO_ENABLE_INA3221
+static uint8_t  g_ina_on  = 1;        /* INA3221 轮询当前开/关（上电即开） */
+#endif
+#if PEO_ENABLE_MPU6050
+static uint8_t  g_dmp_on  = 1;        /* DMP 姿态当前开/关（上电即开） */
+#endif
 
 /* ============================================================================
    DMA 循环接收（USART3_RX -> DMA1_Stream1 Ch4）
@@ -140,6 +154,14 @@ static int32_t map_axis(uint16_t raw)
         return (v + dz) * GAMEPAD_SPEED_MAX / (32768 - dz);
 }
 
+/* 扳机映射：0~1023（未按=0）→ 速度 0~4424，单调线性。 */
+static int32_t map_trigger(uint16_t raw)
+{
+    if (raw > GAMEPAD_TRIGGER_MAX)
+        raw = GAMEPAD_TRIGGER_MAX;
+    return (int32_t)raw * GAMEPAD_SPEED_MAX / GAMEPAD_TRIGGER_MAX;
+}
+
 /* ============================================================================
    初始化
    ============================================================================ */
@@ -211,6 +233,47 @@ uint8_t GAMEPAD_IsConnected(void)
     return g_pad.connected;
 }
 
+static void toggle_vl53(void)
+{
+#if PEO_ENABLE_TOF400C
+    g_vl53_on = !g_vl53_on;
+    if (g_vl53_on)
+    {
+        TOF400C_StartRanging_Interrupt(TOF400C_FRONT);
+        TOF400C_StartRanging_Interrupt(TOF400C_LEFT);
+        TOF400C_StartRanging_Interrupt(TOF400C_RIGHT);
+    }
+    else
+    {
+        TOF400C_StopRanging_Interrupt(TOF400C_FRONT);
+        TOF400C_StopRanging_Interrupt(TOF400C_LEFT);
+        TOF400C_StopRanging_Interrupt(TOF400C_RIGHT);
+    }
+#endif
+}
+
+static void toggle_ina(void)
+{
+#if PEO_ENABLE_INA3221
+    g_ina_on = !g_ina_on;
+    if (g_ina_on)
+        INA3221_PollInit();
+    else
+        INA3221_Stop();
+#endif
+}
+
+static void toggle_dmp(void)
+{
+#if PEO_ENABLE_MPU6050
+    g_dmp_on = !g_dmp_on;
+    if (g_dmp_on)
+        MPU6050_Start();
+    else
+        MPU6050_Stop();
+#endif
+}
+
 void GAMEPAD_Process(void)
 {
     gamepad_payload_t pad;
@@ -221,7 +284,7 @@ void GAMEPAD_Process(void)
 
     uint32_t now = TIMER_GetTick();
     uint8_t  lock = pad.lock;
-    int32_t  throttle, steer, left, right;
+    int32_t  throttle, steer, strafe, m1, m2, m3, m4;
 
     /* 锁切换瞬间停车（避免控制权切换时的速度突变）。 */
     if (lock != g_prev_lock)
@@ -230,7 +293,7 @@ void GAMEPAD_Process(void)
         g_prev_lock = lock;
     }
 
-    if (pad.buttons & GAMEPAD_BTN_XBOX)
+    if (pad.buttons & GAMEPAD_BTN_B)
     {
         CONTROL_StopAll();            /* 急停键（双源，越过锁） */
         return;
@@ -251,21 +314,44 @@ void GAMEPAD_Process(void)
         CONTROL_StopAll();            /* 手柄断连 / 输入过期 */
         return;
     }
-    /* 摇杆映射：左摇杆上下=前进/后退油门，右摇杆左右=单边（右轮）差速。 */
+    /* 摇杆 + 扳机映射 */
     throttle = map_axis(pad.joy_ly);
     steer    = map_axis(pad.joy_rx);
+    strafe   = GAMEPAD_STRAFE_SIGN *
+               (map_trigger(pad.trigger_rt) - map_trigger(pad.trigger_lt));  /* 向右正 */
 
-    left  = throttle;                 /* 左轮 = 油门 */
-    right = throttle + steer;         /* 右轮 = 油门 + 差速 */
+    /* 麦克纳姆合成（M1=左前/M2=右前/M3=左后/M4=右后）：差速转向 + 平移对角叠加。
+       对角：M1/M4 一对（+strafe），M2/M3 一对（-strafe）。 */
+    m1 = throttle + strafe;               /* 左前 */
+    m2 = throttle + steer - strafe;       /* 右前 */
+    m3 = throttle - strafe;               /* 左后 */
+    m4 = throttle + steer + strafe;       /* 右后 */
 
-    if (left  >  GAMEPAD_SPEED_MAX) left  =  GAMEPAD_SPEED_MAX;
-    if (left  < -GAMEPAD_SPEED_MAX) left  = -GAMEPAD_SPEED_MAX;
-    if (right >  GAMEPAD_SPEED_MAX) right =  GAMEPAD_SPEED_MAX;
-    if (right < -GAMEPAD_SPEED_MAX) right = -GAMEPAD_SPEED_MAX;
+    /* LB=右侧两轮加速，RB=左侧两轮加速。 */
+    if (pad.buttons & GAMEPAD_BTN_LB) { m2 += GAMEPAD_BOOST_SPEED; m4 += GAMEPAD_BOOST_SPEED; }
+    if (pad.buttons & GAMEPAD_BTN_RB) { m1 += GAMEPAD_BOOST_SPEED; m3 += GAMEPAD_BOOST_SPEED; }
 
-    /* M1/M3 = 左轮，M2/M4 = 右轮（MOTOR_M1..M4 = 0..3）。四轮原子一次写完。 */
+    /* 限幅 */
+    if (m1 >  GAMEPAD_SPEED_MAX) m1 =  GAMEPAD_SPEED_MAX;
+    if (m1 < -GAMEPAD_SPEED_MAX) m1 = -GAMEPAD_SPEED_MAX;
+    if (m2 >  GAMEPAD_SPEED_MAX) m2 =  GAMEPAD_SPEED_MAX;
+    if (m2 < -GAMEPAD_SPEED_MAX) m2 = -GAMEPAD_SPEED_MAX;
+    if (m3 >  GAMEPAD_SPEED_MAX) m3 =  GAMEPAD_SPEED_MAX;
+    if (m3 < -GAMEPAD_SPEED_MAX) m3 = -GAMEPAD_SPEED_MAX;
+    if (m4 >  GAMEPAD_SPEED_MAX) m4 =  GAMEPAD_SPEED_MAX;
+    if (m4 < -GAMEPAD_SPEED_MAX) m4 = -GAMEPAD_SPEED_MAX;
+
     {
-        const int32_t targets[4] = { left, right, left, right };
+        const int32_t targets[4] = { m1, m2, m3, m4 };
         CONTROL_SetTargetSpeedAll(targets);
+    }
+
+    /* 按键上升沿：Y/X/A 分别 toggle 测距/电流/姿态。 */
+    {
+        uint16_t edge = (g_prev_buttons ^ pad.buttons) & pad.buttons;
+        g_prev_buttons = pad.buttons;
+        if (edge & GAMEPAD_BTN_Y) toggle_vl53();
+        if (edge & GAMEPAD_BTN_X) toggle_ina();
+        if (edge & GAMEPAD_BTN_A) toggle_dmp();
     }
 }

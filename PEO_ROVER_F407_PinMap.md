@@ -1,6 +1,7 @@
 # PEO Rover — STM32F407VGT6 引脚分配总表（Pin Map）
 
-> 版本 v2.26 · 2026-11-14（esp_link 方向2 协议：手柄数据包移除，改纯命令帧）
+> 版本 v2.31 · 2026-11-18（v2.27 pinmap 重排同步）
+> ⚠️ v2.27 起 pinmap 重大重排：本文档 §2.1/§2.3 定时器表已同步；§3 端口清单、§1 需求表、TFT/SPI2 段可能过时，权威源 = `COMPONENTS/PEO_PINMAP.H`。（v2.27 pinmap 重排同步：编码器 M3/M4 交换、PWM 重排、TFT 移除、I2C2 改 PB10/11、新增 USART3）
 > 芯片：STM32F407VGT6（LQFP100）· 开发板：**DevEBox STM32F4XX-M**（板载 8MHz HSE → 168MHz）
 > 依据：RM0090 Rev 21 + stm32-base.org 板卡资料（J4 TFT 座 = 8×1 排母：1=3V3 2=GND 3=SDI/PB15 4=SCL/PB13 5=CS/PB12 6=SDO/PB14 7=D/C/PC5 8=BLK/PB1，**无 RST 脚**）
 > v1.3 变更：M2 PWM 从 TIM3_CH3/CH4(PB0/PB1) 挪至 TIM9_CH1/CH2(PA2/PA3)，PB1 归还 TFT BLK
@@ -19,7 +20,7 @@
 > **v2.7 变更：移除 ESP32 通讯（USART2 PD5/PD6 + DMA1 Stream5/6，暂不接）；NVIC 改 Group2；DELAY/I2C/TOF400C/VL53L1X/TIMER 组件落地。**
 > **v2.8–v2.15 变更：组件落地（MOTOR/ENCODER/CONTROL/SENSOR_HUB/eMPL DMP），无引脚/外设映射变化。**
 > **v2.16 变更：BUILTIN_LED 新增 PA1（板载 LED D2）。**
-> **v2.17 变更：I2C2 重新启用（备用脚 PF1=SCL / PF0=SDA，绕开被 M1 PWM 占用的 PB10/11），挂 2 片 INA3221（0x40/0x41）电流监测。I2C 最终分配：I2C1=MPU6050、I2C2=INA3221×2、I2C3=VL53L1X×3。**
+> **v2.17 变更：I2C2 重新启用（备用脚 PB10=SCL / PB11=SDA，绕开被 M1 PWM 占用的 PB10/11），挂 2 片 INA3221（0x40/0x41）电流监测。I2C 最终分配：I2C1=MPU6050、I2C2=INA3221×2、I2C3=VL53L1X×3。**
 > **v2.18 变更：ESP32 通讯重新接入（USART2 PD5/PD6 + TIM14 上报定时器）。**
 > **v2.19 变更：main.c 模块启用开关（PEO_ENABLE_*）+ boot banner。**
 > **v2.20 变更：boot banner/dbg_f3 迁入 SENSOR_HUB；PEO_ENABLE_* 宏迁到 sensor_hub.h；main.c 只做接线。**
@@ -54,9 +55,9 @@
 | 调试串口 | 1 | USART1（外部 USB-TTL） | 115200 |
 | TFT 屏 | 1 | SPI2 引脚组 | 板载 J4 排座 |
 | MPU6050 整车震动（预留） | 1 | I2C1（独占） | MPU6050（0x68） |
-| INA3221 多路电流 | 2 | I2C2（PF1/PF0 备用脚） | INA3221（0x40/0x41，测 M1-M4 电机电流） |
+| INA3221 多路电流 | 2 | I2C2（PB10/PB11 备用脚） | INA3221（0x40/0x41，测 M1-M4 电机电流） |
 
-> MPU6050 独占 I2C1（IMU 采样率高、需干净带宽）；INA3221 独占 I2C2 备用脚（PF1=SCL/PF0=SDA，绕开被 M1 PWM 占的 PB10/11）。
+> MPU6050 独占 I2C1（IMU 采样率高、需干净带宽）；INA3221 独占 I2C2 备用脚（PB10=SCL/PB11=SDA，绕开被 M1 PWM 占的 PB10/11）。
 
 ---
 
@@ -68,10 +69,10 @@
 
 | 电机 | 编码器定时器（CH1/CH2，纯编码器 ARR=0xFFFF） | PWM 定时器（各 2 路，独立 ARR） |
 |---|---|---|
-| M1 左前 | TIM1（PE9 / PE11） | TIM2_CH3/CH4（PB10 / PB11） |
-| M2 左后 | TIM3（PA6 / PA7） | TIM5_CH3/CH4（PA2 / PA3） |
-| M3 右前 | TIM8（PC6 / PC7） | TIM9_CH1/CH2（PE5 / PE6） |
-| M4 右后 | TIM4（PD12 / PD13） | **TIM10_CH1（PB8）+ TIM11_CH1（PB9）** |
+| M1 左前 | TIM1（PE9 / PE11） | TIM5_CH3/CH4（PA2 / PA3） |
+| M2 右前 | TIM3（PA6 / PA7） | TIM9_CH1/CH2（PE5 / PE6） |
+| M3 左后 | TIM4（PD12 / PD13） | TIM12_CH1/CH2（PB14 / PB15） |
+| M4 右后 | TIM8（PC6 / PC7） | **TIM10_CH1（PB8）+ TIM11_CH1（PB9）** |
 
 - **4 编码器全部纯编码器**：ARR=0xFFFF，16 位差分，**零中断**。
 - **8 路 PWM 拆到 5 个定时器**（v1.9）：M4 用 TIM10+11 两个单路定时器，因为 TIM12 的 PB14/15 让给了 TFT。其余 M1/M2/M3 各 1 个定时器 2 路相邻。
@@ -88,12 +89,12 @@
 
 | PWM | 电机 | 定时器/通道 | 引脚 | AF | 接 DRV8871 |
 |---|---|---|---|---|---|
-| PWM1 | M1 | TIM2_CH3 | PB10 | AF1 | M1-IN1 |
-| PWM2 | M1 | TIM2_CH4 | PB11 | AF1 | M1-IN2 |
-| PWM3 | M2 | TIM5_CH3 | PA2 | AF2 | M2-IN1 |
-| PWM4 | M2 | TIM5_CH4 | PA3 | AF2 | M2-IN2 |
-| PWM5 | M3 | TIM9_CH1 | PE5 | AF3 | M3-IN1 |
-| PWM6 | M3 | TIM9_CH2 | PE6 | AF3 | M3-IN2 |
+| PWM1 | M1 | TIM5_CH3 | PA2 | AF2 | M1-IN1 |
+| PWM2 | M1 | TIM5_CH4 | PA3 | AF2 | M1-IN2 |
+| PWM3 | M2 | TIM9_CH1 | PE5 | AF3 | M2-IN1 |
+| PWM4 | M2 | TIM9_CH2 | PE6 | AF3 | M2-IN2 |
+| PWM5 | M3 | TIM12_CH1 | PB14 | AF9 | M3-IN1 |
+| PWM6 | M3 | TIM12_CH2 | PB15 | AF9 | M3-IN2 |
 | PWM7 | M4 | TIM10_CH1 | PB8 | AF3 | M4-IN1 |
 | PWM8 | M4 | TIM11_CH1 | PB9 | AF3 | M4-IN2 |
 
@@ -228,7 +229,7 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 |---|---|---|
 | 定时器 | TIM1/3/4/8（编码器）+ TIM2/5/9/10/11（PWM）= **9 个** | TIM6/7/12/13/14（TIM12 引脚被 TFT 占） |
 | USART | USART1 | USART2/UART4/5/6 |
-| I2C | I2C1（MPU6050 独占）+ I2C3（VL53×3）+ I2C2（INA3221，PF1/PF0 备用脚） | 无（I2C1/2/3 全用） |
+| I2C | I2C1（MPU6050 独占）+ I2C3（VL53×3）+ I2C2（INA3221，PB10/PB11 备用脚） | 无（I2C1/2/3 全用） |
 | SPI | SPI1 板载 FLASH 占；SPI2 → TFT | SPI3 空闲 |
 | GPIO | 39 个（含 XSHUT×3 + INT×4 + I2C3） | 30 个 |
 
@@ -259,7 +260,7 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 7. **SD 卡槽弃用**：PC8-12/PD2 现空闲。
 8. **VL53L1X XSHUT**：PC0/1/2 上电先全拉低，逐个释放改址，改址完成前不发测距命令。
 8b. **VL53L1X INT**：PE0/1/2 配 EXTI0/1/2 上升沿（GPIO1 默认高有效）；MPU6050 INT = PE3 配 EXTI3。4 个 INT 全独立 EXTI 线（无共享向量）。
-9. **I2C 分配**：I2C1=MPU6050 独占（0x68）；I2C2=INA3221×2（0x40/0x41，PF1/PF0 备用脚）；I2C3=VL53×3（0x52/54/56）。
+9. **I2C 分配**：I2C1=MPU6050 独占（0x68）；I2C2=INA3221×2（0x40/0x41，PB10/PB11 备用脚）；I2C3=VL53×3（0x52/54/56）。
 
 ---
 
@@ -270,5 +271,5 @@ PA8 = I2C3_SCL、PC9 = I2C3_SDA（AF4，4.7kΩ 上拉），400kHz。
 - [x] TFT 屏 → 恢复 J4 座 6 信号脚（SPI2），RST 飞线 PE12
 - [x] **VL53L1X 多片寻址方案**：恢复 XSHUT×3（PC0/1/2），XSHUT 分时上电改址到 0x52/54/56
 - [x] **MPU6050 引脚**：I2C1（0x68，AD0 可选 0x69），独占；INT=PE3(EXTI3)
-- [x] **INA3221 引脚**：I2C2 备用脚（PF1=SCL/PF0=SDA），2 片（0x40/0x41）测 M1-M4
+- [x] **INA3221 引脚**：I2C2 备用脚（PB10=SCL/PB11=SDA），2 片（0x40/0x41）测 M1-M4
 - [x] 电流监测 → INA3221（I2C2 备用脚，2 片测 4 电机）

@@ -136,7 +136,7 @@
 #define PEO_PM_ENC1_CH2_PIN     GPIO_Pin_11
 #define PEO_PM_ENC1_CH2_SRC     GPIO_PinSource11
 
-/** ENCODER M2 - right rear (TIM3 CH1/CH2 = PA6/PA7, AF2, pure encoder) **/
+/** ENCODER M2 - right front (TIM3 CH1/CH2 = PA6/PA7, AF2, pure encoder) **/
 #define PEO_PM_ENC2_TIM         TIM3
 #define PEO_PM_ENC2_ARR         (0xFFFFU)                  /* full 16-bit range, delta reads */
 #define PEO_PM_ENC2_AF          GPIO_AF_TIM3
@@ -147,7 +147,7 @@
 #define PEO_PM_ENC2_CH2_PIN     GPIO_Pin_7
 #define PEO_PM_ENC2_CH2_SRC     GPIO_PinSource7
 
-/** ENCODER M3 - left (TIM4 CH1/CH2 = PD12(59)/PD13(60), AF2) **/
+/** ENCODER M3 - left rear (TIM4 CH1/CH2 = PD12(59)/PD13(60), AF2) **/
 #define PEO_PM_ENC3_TIM                  TIM4
 #define PEO_PM_ENC3_ARR         (0xFFFFU)                  /* pure encoder, 16-bit delta */
 #define PEO_PM_ENC3_AF                   GPIO_AF_TIM4
@@ -158,7 +158,7 @@
 #define PEO_PM_ENC3_CH2_PIN              GPIO_Pin_13
 #define PEO_PM_ENC3_CH2_SRC              GPIO_PinSource13
 
-/** ENCODER M4 - right (TIM8 CH1/CH2 = PC6(63)/PC7(64), AF3) **/
+/** ENCODER M4 - right rear (TIM8 CH1/CH2 = PC6(63)/PC7(64), AF3) **/
 #define PEO_PM_ENC4_TIM                  TIM8
 #define PEO_PM_ENC4_ARR         (0xFFFFU)                  /* pure encoder, 16-bit delta */
 #define PEO_PM_ENC4_AF                   GPIO_AF_TIM8

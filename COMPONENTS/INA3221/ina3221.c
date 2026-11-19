@@ -127,6 +127,12 @@ void INA3221_PollInit(void)
     TIM_Cmd(INA3221_TIM, ENABLE);
 }
 
+/* 停止 TIM7 轮询（toggle 关闭用）。 */
+void INA3221_Stop(void)
+{
+    TIM_Cmd(INA3221_TIM, DISABLE);
+}
+
 /**
  * @brief  TIM7 update interrupt = INA3221 轮询（SENSOR_RATE_INA_HZ）。
  * @note   覆盖 startup_stm32f40xx.s 的 [WEAK] TIM7_IRQHandler。
