@@ -13,8 +13,11 @@
  *                          (COMPONENTS/NVIC).
  *   4. Component inits   - each module only configures its own peripheral
  *                          (GPIO/timers/USART/DMA/EXTI...), never RCC/NVIC.
- *      Sensors (I2C3/VL53L1X, MPU6050 DMP) come LAST: they start EXTI
- *      interrupts, so they must not fire into later init code.
+ *   5. Sensors (VL53L1X/INA3221/MPU6050) are Init-ONLY here: start/stop is
+ *      owned by the gamepad (Y/X/A toggle), NOT main. They configure EXTI
+ *      channels, so they must not fire into later init code.
+ *   6. CONTROL_Init() comes AFTER sensors: the 1 kHz control loop is the
+ *      only always-on loop besides sensors, so it starts last.
  ******************************************************************************
  */
 #include "stm32f4xx.h"
@@ -62,28 +65,24 @@ int main(void)
     MOTOR_Init();
 #endif
 
-    /* 7. 1 kHz control loop (TIM6 - after encoders/motors, ISR reads them) */
-#if PEO_ENABLE_CONTROL
-    CONTROL_Init();
-#endif
-
-    /* 8-9. Sensors (LAST: they configure EXTI channels; interrupts are
-       started later via MPU6050_Start() / TOF400C_StartRanging_Interrupt()) */
+    /* 7. Sensors: Init ONLY — start/stop is owned by the gamepad toggle
+          (Y = VL53 range, X = INA3221 current, A = MPU6050 DMP), not here. */
 #if PEO_ENABLE_TOF400C
     TOF400C_Init();          /* 3x VL53L1X (EXTI0/1/2, I2C3 init implicit) */
-    TOF400C_StartRanging_Interrupt(TOF400C_FRONT);
-    TOF400C_StartRanging_Interrupt(TOF400C_LEFT);
-    TOF400C_StartRanging_Interrupt(TOF400C_RIGHT);
 #endif
+
 #if PEO_ENABLE_INA3221
     INA3221_Init();          /* INA3221 current monitor (I2C2, PB10=SCL/PB11=SDA) */
-    INA3221_PollInit();      /* TIM7 轮询读电流电压 -> sensorhub（SENSOR_RATE_INA_HZ） */
 #endif
+
 #if PEO_ENABLE_MPU6050
-    if (MPU6050_Init() == 0)
-        MPU6050_Start();
-    else
-        printf("[MPU6050] init failed, not started\r\n");
+    MPU6050_Init();
+#endif
+
+    /* 8. 1 kHz control loop (TIM6) — LAST: the only always-on loop besides
+          sensors; its ISR reads encoders + writes PWM, so it starts after them. */
+#if PEO_ENABLE_CONTROL
+    CONTROL_Init();
 #endif
 
     /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 命令接收 */

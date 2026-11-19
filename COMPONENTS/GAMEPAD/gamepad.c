@@ -59,13 +59,13 @@ static volatile uint32_t g_last_rx_ms = 0;
 static volatile uint8_t  g_prev_lock  = GAMEPAD_LOCK_MANUAL;
 static uint16_t g_prev_buttons = 0;   /* 上一帧按键，用于上升沿检测 */
 #if PEO_ENABLE_TOF400C
-static uint8_t  g_vl53_on = 1;        /* VL53 测距当前开/关（上电即开） */
+static uint8_t  g_vl53_on = 0;        /* VL53 测距当前开/关（上电关，手柄 Y 开启） */
 #endif
 #if PEO_ENABLE_INA3221
-static uint8_t  g_ina_on  = 1;        /* INA3221 轮询当前开/关（上电即开） */
+static uint8_t  g_ina_on  = 0;        /* INA3221 轮询当前开/关（上电关，手柄 X 开启） */
 #endif
 #if PEO_ENABLE_MPU6050
-static uint8_t  g_dmp_on  = 1;        /* DMP 姿态当前开/关（上电即开） */
+static uint8_t  g_dmp_on  = 0;        /* DMP 姿态当前开/关（上电关，手柄 A 开启） */
 #endif
 
 /* ============================================================================
