@@ -3,7 +3,7 @@
  * @brief   PEO Rover - 上位机命令解析：TCP JSON 行 -> esp_link 命令帧
  *
  * 支持命令（PROTOCOL.md §2.1）：
- *   {"cmd":"LED_TOGGLE"} / {"cmd":"SENSOR_RESET"} / {"cmd":"STOP_ALL"}
+ *   {"cmd":"LED_TOGGLE"} / {"cmd":"LED_ON"} / {"cmd":"LED_OFF"} / {"cmd":"STOP_ALL"}
  *   {"cmd":"ODOMETER_RESET"}
  *   {"cmd":"MOTOR","motor":0,"speed":500}
  *   {"cmd":"MOTOR_CLOSED","motor":1,"speed_d100":4000}
@@ -41,13 +41,14 @@ typedef struct
 
 static const cmd_entry_t k_cmd_table[] = {
     { "LED_TOGGLE",      ESP_CMD_LED_TOGGLE },
-    { "SENSOR_RESET",    ESP_CMD_SENSOR_RESET },
     { "MOTOR",           ESP_CMD_MOTOR },
     { "PID",             ESP_CMD_PID },
     { "MOTOR_CLOSED",    ESP_CMD_MOTOR_CLOSED },
     { "STOP_ALL",        ESP_CMD_STOP_ALL },
     { "ODOMETER_RESET",  ESP_CMD_ODOMETER_RESET },
     { "SYS_RESET",       ESP_CMD_SYS_RESET },
+    { "LED_ON",          ESP_CMD_LED_ON },
+    { "LED_OFF",         ESP_CMD_LED_OFF },
 };
 
 static int8_t cmd_find(const char *name)
@@ -121,7 +122,7 @@ static uint8_t pack_param(uint8_t id, const cJSON *root, uint8_t *param)
         }
         return 5;
 
-    default:    /* LED_TOGGLE / SENSOR_RESET / STOP_ALL / ODOMETER_RESET：无参数 */
+    default:    /* LED_TOGGLE / STOP_ALL / ODOMETER_RESET：无参数 */
         return 0;
     }
 }

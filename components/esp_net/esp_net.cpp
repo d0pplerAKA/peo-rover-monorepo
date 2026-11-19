@@ -1091,6 +1091,10 @@ void esp_net_task(void *arg)
         const int64_t stat_now = esp_timer_get_time();
         if (stat_now - s_stat_last_us >= 1000000LL)
         {
+            /* WiFi 未连接时不打印仪表盘（数据全 0 无意义，且不干扰重连日志观察）；
+               窗口/快照照常推进，连上后从下一窗口恢复正常打印。 */
+            const bool sta_up = s_conn_eg &&
+                (xEventGroupGetBits(s_conn_eg) & PEO_NET_EVT_STA) != 0;
             const float secs = (float)(stat_now - s_stat_last_us) / 1000000.0f;
             const uint32_t ve = s_video_eagain_cnt - s_stat_eagain_v_snap;
             const uint32_t te = s_telemetry_eagain_cnt - s_stat_eagain_t_snap;
@@ -1101,8 +1105,11 @@ void esp_net_task(void *arg)
                行宽恒定；尾部留 2 空格兜底。
                teldrop 顺序固定 = 覆盖/忙/alloc；select = 本窗口 select 调用次数/秒
                （空闲 ~10/s；若达数百/s 说明忙等，细分类在异常日志中另打）。 */
+            const char *last_cmd = esp_link_last_command_name();
+            if (sta_up)
+            {
             printf("\rnet: video %3lu fps %6.1f KB/s | telemetry %5.1f KB/s | eagain +%4lu +%4lu"
-                   " | teldrop +%4lu/+%4lu/+%4lu | select %4lu/s  ",
+                   " | teldrop +%4lu/+%4lu/+%4lu | select %4lu/s | cmd %-15s  ",
                    (unsigned long)s_stat_v_frames,
                    (double)((float)s_stat_v_bytes / secs / 1024.0f),
                    (double)((float)s_stat_t_bytes / secs / 1024.0f),
@@ -1110,7 +1117,8 @@ void esp_net_task(void *arg)
                    (unsigned long)(tel_overwrite - s_stat_tel_overwrite_snap),
                    (unsigned long)(tel_busy - s_stat_tel_busy_snap),
                    (unsigned long)(tel_alloc - s_stat_tel_alloc_snap),
-                   (unsigned long)s_stat_select.calls);
+                   (unsigned long)s_stat_select.calls,
+                   last_cmd ? last_cmd : "-");
             fflush(stdout);
             /* 忙等/异常细分类不进常驻行：出现时打一行诊断（1s 节流已由窗口天然保证） */
             if (s_stat_select.backoff != 0 || s_stat_select.error != 0)
@@ -1120,6 +1128,7 @@ void esp_net_task(void *arg)
                          (unsigned long)s_stat_select.timeout, (unsigned long)s_stat_select.eventfd,
                          (unsigned long)s_stat_select.readable, (unsigned long)s_stat_select.writable,
                          (unsigned long)s_stat_select.error, (unsigned long)s_stat_select.backoff);
+            }
             }
             s_stat_v_frames = 0;
             s_stat_v_bytes = 0;

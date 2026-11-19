@@ -16,6 +16,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <atomic>
 #include <freertos/event_groups.h>
 #include <driver/uart.h>
 #include <esp_log.h>
@@ -145,8 +146,8 @@ void esp_link_queues_init(void)
 
 void esp_link_rx_task(void *arg)
 {
-    static_assert(sizeof(esp_link_sensor_t) == 112,
-                  "SensorData_t must be 112 bytes (PROTOCOL.md §1.2)");
+    static_assert(sizeof(esp_link_sensor_t) == 116,
+                  "SensorData_t must be 116 bytes (PROTOCOL.md §1.2)");
 
     ESP_LOGI(TAG, "rx task starting");
 
@@ -211,6 +212,33 @@ void esp_link_rx_task(void *arg)
     }
 }
 
+/* 最近成功发送的命令名（net stats 仪表盘显示用）：
+   atomic<const char*> 跨核安全；指针指向静态字符串字面量，生命周期=程序。
+   ID->名字表须与 cmd_parser.cpp 的 k_cmd_table（名字->ID 方向）保持同步。 */
+static std::atomic<const char *> s_last_cmd_name{nullptr};
+
+static const char *cmd_name_for(uint8_t id)
+{
+    switch (id)
+    {
+    case ESP_CMD_LED_TOGGLE:      return "LED_TOGGLE";
+    case ESP_CMD_MOTOR:           return "MOTOR";
+    case ESP_CMD_PID:             return "PID";
+    case ESP_CMD_MOTOR_CLOSED:    return "MOTOR_CLOSED";
+    case ESP_CMD_STOP_ALL:        return "STOP_ALL";
+    case ESP_CMD_ODOMETER_RESET:  return "ODOMETER_RESET";
+    case ESP_CMD_SYS_RESET:       return "SYS_RESET";
+    case ESP_CMD_LED_ON:          return "LED_ON";
+    case ESP_CMD_LED_OFF:         return "LED_OFF";
+    default:                      return NULL;
+    }
+}
+
+const char *esp_link_last_command_name(void)
+{
+    return s_last_cmd_name.load();
+}
+
 /* ============================================================================
    3. TX：命令队列 -> 命令帧（每帧一条，帧后停顿触发 F407 IDLE 组帧）
    ============================================================================ */
@@ -232,7 +260,26 @@ static bool transmit_command(const esp_link_cmd_t &cmd)
     const esp_err_t drained = uart_wait_tx_done(PEO_PM_ESP_UART, pdMS_TO_TICKS(100));
     // FIFO acceptance is NOT wire completion. Two ticks guarantee one full idle tick.
     vTaskDelay(pdMS_TO_TICKS(2));
-    return sent == (int)size && drained == ESP_OK;
+    const bool ok = sent == (int)size && drained == ESP_OK;
+    if (ok) s_last_cmd_name.store(cmd_name_for(cmd.cmd_id));   /* 仪表盘显示到下一命令更新 */
+    return ok;
+}
+
+/* 失联自停心跳：发一个 LEN=0 空帧（SOF+LEN(0)+CRC）。F407 端 CRC 通过即刷新
+   deadman 看门狗（空帧不触发任何命令）；S3 每 200ms 发一次。 */
+static bool transmit_heartbeat(void)
+{
+    uint8_t frame[ESP_LINK_FRAME_OVH];
+    frame[0] = ESP_LINK_SOF0;
+    frame[1] = ESP_LINK_SOF1;
+    frame[2] = 0;                          /* LEN = 0：空帧心跳 */
+    const uint16_t crc = esp_link_crc16(frame, 3);
+    frame[3] = (uint8_t)crc;
+    frame[4] = (uint8_t)(crc >> 8);
+    const int sent = uart_write_bytes(PEO_PM_ESP_UART, frame, sizeof(frame));
+    const esp_err_t drained = uart_wait_tx_done(PEO_PM_ESP_UART, pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(2));          /* 触发 F407 USART2 IDLE 组帧 */
+    return sent == (int)sizeof(frame) && drained == ESP_OK;
 }
 
 void esp_link_tx_task(void *arg)
@@ -267,8 +314,10 @@ void esp_link_tx_task(void *arg)
             /* 队列优先，通知只作唤醒信号。成功入队与 STOP 都发送通知，
                因而“查空队列到进入等待”之间到达的工作也能唤醒本任务。
                清除通知后回到循环，重新检查 STOP，再非阻塞查队列；
-               即使通知已合并/过时，也不会跳过队列或丢失唤醒。 */
-            xTaskNotifyWait(0, UINT32_MAX, NULL, portMAX_DELAY);
+               即使通知已合并/过时，也不会跳过队列或丢失唤醒。
+               失联自停：200ms 无命令/通知则发空帧心跳给 F407（deadman 喂狗）。 */
+            if (xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(200)) == pdFALSE)
+                transmit_heartbeat();
             continue;
         }
         portENTER_CRITICAL(&s_safety_lock);

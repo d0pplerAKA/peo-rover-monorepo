@@ -31,16 +31,20 @@
 
 static const char *TAG = "telemetry";
 
+/* S3 固件版本号（随遥测上报，供上位机核对三端版本匹配） */
+#define PEO_S3_FW  (28U)
+
 static constexpr size_t JSON_MAX = 1024;
 /* Binary32 %.4f: sign + 39 integer digits + dot + 4 decimals + NUL = 46.
    Worst complete line (including link_stale and newline):
    prefix 70 + dist 104 + imu 348 + wheels 135 + power 96 + cmd_ack 34
-   + sys/closing/newline 76 = 863 bytes; with NUL = 864, leaving 160 bytes. */
+   + control_mode 18 + fw_version 18 + s3_fw 12 + sys/closing/newline 76
+   = 911 bytes; with NUL = 912, leaving 112 bytes. */
 static constexpr size_t JSON_FLOAT_MAX = 46;
 static_assert(FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128,
               "JSON float capacity assumes IEEE binary32 sensors");
 static_assert(sizeof(size_t) <= sizeof(uint32_t), "JSON RAM capacity assumes at most 32-bit size_t");
-static_assert(JSON_MAX >= 864, "JSON buffer must hold the worst complete sensor line");
+static_assert(JSON_MAX >= 912, "JSON buffer must hold the worst complete sensor line");
 
 struct sys_sample_t {
     unsigned cpu0, cpu1;
@@ -116,6 +120,10 @@ static char *build_json(const esp_link_sensor_t *s, bool link_stale)
                       "\"odometer\":[%" PRId32 ",%" PRId32 ",%" PRId32 ",%" PRId32 "]},"
         "\"power\":{\"current_mA\":[%d,%d,%d,%d],\"bus_voltage_mV\":[%u,%u,%u,%u]},"
         "\"cmd_ack\":{\"id\":%u,\"status\":%u},"
+        "\"control_mode\":%u,"
+        "\"lock\":%u,"
+        "\"fw_version\":%u,"
+        "\"s3_fw\":%u,"
         "\"sys\":{\"cpu0\":%u,\"cpu1\":%u,\"ram_free\":%zu,\"ram_total\":%zu}}\n",
         s->sys_tick_ms, generation, link_stale ? ",\"link_stale\":true" : "",
         (unsigned)s->dist_front_mm, s->dist_front_status == 0 ? "true" : "false",
@@ -128,6 +136,9 @@ static char *build_json(const esp_link_sensor_t *s, bool link_stale)
         (unsigned)s->bus_voltage_mV[0], (unsigned)s->bus_voltage_mV[1],
         (unsigned)s->bus_voltage_mV[2], (unsigned)s->bus_voltage_mV[3],
         (unsigned)s->last_cmd_id, (unsigned)s->last_cmd_status,
+        (unsigned)s->control_mode,
+        (unsigned)s->lock,
+        (unsigned)s->fw_version, (unsigned)PEO_S3_FW,
         sys.cpu0, sys.cpu1, sys.ram_free, sys.ram_total);
     if (n < 0 || (size_t)n >= JSON_MAX)
     {
@@ -147,6 +158,9 @@ void telemetry_task(void *arg)
         return;
     }
     ESP_LOGI(TAG, "task up");
+
+    /* 锁驱动遥测降速计数器（手操 2Hz / 自主 20Hz） */
+    unsigned tick = 0;
 
     while (1)
     {
@@ -178,6 +192,15 @@ void telemetry_task(void *arg)
 
         /* 保留快照 peek；无客户端时跳过 JSON 分配/序列化及入队，下一轮仍按原节拍延时。 */
         if (!esp_net_has_client()) continue;
+
+        /* 锁驱动遥测降速：锁关闭（手操 lock=0）→ 2Hz；锁开启（自主 lock=1）→ 20Hz。
+           固定 50ms 节拍 peek（保持快照新鲜），手操时每 10 拍（500ms）发布一次。 */
+        if (sn.sensor.lock == 0 && (tick % 10) != 0)
+        {
+            ++tick;
+            continue;
+        }
+        ++tick;
 
         const uint32_t gen_before = esp_link_command_generation();
         char *json = build_json(&sn.sensor, link_stale);

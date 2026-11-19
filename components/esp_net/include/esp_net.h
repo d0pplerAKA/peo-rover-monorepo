@@ -32,7 +32,7 @@
 /* 笔记本热点 STA 模式（2026-11-16 用户定案：不再回 S3 软 AP）。
    SSID/密码 = 用户笔记本移动热点的名称与密码，烧录前必须按实际填写。 */
 #define PEO_NET_STA_SSID        "Y9000X"
-#define PEO_NET_STA_PASS        "66666666"
+#define PEO_NET_STA_PASS        "88888888"
 #define PEO_NET_MDNS_HOSTNAME   "peo_rover"      /* 上位机按 peo_rover.local 解析 */
 #define PEO_NET_TCP_PORT        8888
 #define PEO_NET_VIDEO_PORT      8890    /* TCP 视频流（2026-11-16 定案；UDP 8889 已退役） */

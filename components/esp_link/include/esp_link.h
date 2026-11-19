@@ -34,14 +34,13 @@
 #define ESP_LINK_SOF1           0x55
 #define ESP_LINK_FRAME_OVH      5       /* SOF(2) + LEN(1) + CRC(2) */
 #define ESP_LINK_MAX_PAYLOAD    64      /* F407 command RX limit; NOT telemetry */
-#define ESP_LINK_RX_PAYLOAD_SIZE 112U    /* F407 SensorData_t wire size */
+#define ESP_LINK_RX_PAYLOAD_SIZE 116U    /* F407 SensorData_t wire size */
 #define ESP_LINK_STALE_MS        500U    /* 50Hz 上报下约 25 帧；按本地接收年龄判断 */
 
 /* ============================================================================
    命令 ID（与 F407 esp_link.h 一致）
    ============================================================================ */
 #define ESP_CMD_LED_TOGGLE      0x01
-#define ESP_CMD_SENSOR_RESET    0x02
 #define ESP_CMD_MOTOR           0x03    /* motor(1) + speed(2, int16 LE) */
 #define ESP_CMD_PID             0x04    /* kp(4, f32 LE) + ki(4, f32 LE) */
 #define ESP_CMD_MOTOR_CLOSED    0x05    /* motor(1) + speed_d100(4, int32 LE) */
@@ -49,6 +48,8 @@
 #define ESP_CMD_ODOMETER_RESET  0x07
 #define ESP_CMD_SYS_RESET       0x08    /* 全车软复位：F407 NVIC_SystemReset()（2026-11-16 定案，
                                           PROTOCOL §1.3；上位机 SDK 检测 fresh 恢复沿重发 PID/CAM_RES） */
+#define ESP_CMD_LED_ON          0x09    /* 板载 LED 点亮（绝对状态） */
+#define ESP_CMD_LED_OFF         0x0A    /* 板载 LED 熄灭（绝对状态） */
 
 #define ESP_CMD_PARAM_MAX       8
 
@@ -91,7 +92,10 @@ typedef struct __attribute__((packed))
     uint32_t sys_tick_ms;
     uint8_t  last_cmd_id;           /* 最近命令 ID（回显） */
     uint8_t  last_cmd_status;       /* 0=OK，非0=错误码 */
-    uint8_t  pad2[2];               /* 尾部对齐 padding */
+    uint8_t  control_mode;          /* 控制模式：0=闭环，1=开环 */
+    uint8_t  fw_version;            /* F407 固件版本号（递增整数，28=v2.28） */
+    uint8_t  lock;                  /* 控制权锁：0=手操（手柄），1=自主（上位机） */
+    uint8_t  pad2[3];               /* 尾部对齐 padding（116B） */
 } esp_link_sensor_t;
 
 /** 本地快照信封（仅用于队列；不参与 112B SensorData_t 线协议）。 */
@@ -126,6 +130,9 @@ extern QueueHandle_t esp_link_sensor_queue;   /* 出：esp_link_snapshot_t（1 �
  * Caller must require deliberate fresh input, never automatically resume old work.
  */
 void esp_link_request_stop(void);
+
+/** 最近一次成功发送给 F407 的命令名（无则 NULL；net stats 仪表盘显示，直到下一条命令更新） */
+const char *esp_link_last_command_name(void);
 /** 启动健康故障：锁 STOP 且永久禁止 resume；普通输入/STOP 不可清除，仅重启恢复。 */
 void esp_link_fatal_fault(void);
 uint32_t esp_link_command_generation(void);
