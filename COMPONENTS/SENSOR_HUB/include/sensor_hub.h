@@ -52,12 +52,21 @@
    ----------------------------------------------------------------------------
    控制 main 里各模块 Init 的编译/调用；boot banner 的 MODULES 节自动同步。
    集中在此（而非 main.c），因为 print_boot_banner() 也需要读这些开关。
+
+   动力控制三件套依赖关系（重要）：
+     MOTOR   = 电机 PWM 输出 —— 开环/闭环的基础，两者都需要，独立开关。
+     CONTROL = 1kHz 闭环控制循环（TIM6 中断：读编码器 → 速度 PI → PWM）。
+     ENCODER = 编码器测速 —— 闭环速度反馈输入，数据只在 CONTROL 循环里消费。
+   - 开环 = MOTOR 单独（直接 PWM，无需 CONTROL/ENCODER）。
+   - 闭环 = MOTOR + CONTROL（ENCODER 自动跟随，见下）。
+   - ENCODER 只在闭环时需要 → 令 PEO_ENABLE_ENCODER = PEO_ENABLE_CONTROL 自动跟随，
+     无需单独配置：CONTROL=1 即闭环（ENCODER 自动开）、CONTROL=0 即开环（ENCODER 自动关）。
    ============================================================================ */
-#define PEO_ENABLE_ENCODER    0
-#define PEO_ENABLE_MOTOR      0
-#define PEO_ENABLE_CONTROL    0
-#define PEO_ENABLE_TOF400C    0
-#define PEO_ENABLE_INA3221    0
+#define PEO_ENABLE_MOTOR      1    /* 电机 PWM：开环/闭环都需 */
+#define PEO_ENABLE_CONTROL    0    /* 闭环控制：置 1 跑 1kHz PI + 编码器测速 */
+#define PEO_ENABLE_ENCODER    PEO_ENABLE_CONTROL  /* 编码器：跟随闭环，自动 = CONTROL */
+#define PEO_ENABLE_TOF400C    1
+#define PEO_ENABLE_INA3221    1
 #define PEO_ENABLE_MPU6050    1
 
 /* F407 固件版本号（随 SensorData 上报，供上位机核对三端版本匹配） */
