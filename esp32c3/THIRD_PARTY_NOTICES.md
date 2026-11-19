@@ -29,12 +29,18 @@ Each component retains its own license. The MIT license of this project
 - **Source**: h2zero (github.com/h2zero/esp-nimble-cpp); fetched by the
   IDF Component Manager, not vendored.
 
-## 4. asukiaaa XboxSeriesXControllerESP32 (vendored under components/xbox_controller/)
+## 4. asukiaaa Xbox controller libraries (vendored under components/xbox_controller/)
 
-- **Purpose**: Xbox Series X controller BLE client library (HID reports,
-  connection management, vibration).
-- **License**: MIT.
-- **Source**: asukiaaa (github.com/asukiaaa/arduino-XboxSeriesXControllerESP32).
+All files below are from Asuki Kono's MIT-licensed repositories, combined
+into one local component:
+
+- XboxSeriesXControllerESP32 (main BLE client) — MIT, Copyright (c) 2022 Asuki Kono
+- XboxSeriesXHIDReportBuilder — MIT
+- XboxControllerNotificationParser (+ Elite2 variant) — MIT
+
+- **License**: MIT (full text in `components/xbox_controller/LICENSE`).
+- **Source**: github.com/asukiaaa/arduino-XboxSeriesXControllerESP32 and
+  related repositories.
 
 ---
 
