@@ -1,0 +1,22 @@
+# ESP-IDF 构建产物
+build/
+
+# IDF Component Manager 下载的第三方依赖（通过 idf_component.yml + dependencies.lock 重建）
+managed_components/
+
+# 备份与弃用文件
+sdkconfig.bak*
+sdkconfig.old
+*.bak
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 编辑器
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,12 @@
+# ESP32-C3 SuperMini: 4MB flash, no PSRAM. Flash mode left at DIO default (all-compatible fallback).
+CONFIG_IDF_TARGET="esp32c3"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_FREERTOS_HZ=1000
+# Arduino: no loopTask (app_main assembles its own FreeRTOS task)
+CONFIG_AUTOSTART_ARDUINO=n
+# 与 S3 工程对齐：Arduino(C++) 编译 IDF C 头文件触发 missing-field-initializers 等
+# -Werror；S3 sdkconfig 已开启此项（Kconfig 默认 n，新工程必须显式开启）
+CONFIG_COMPILER_DISABLE_DEFAULT_ERRORS=y
