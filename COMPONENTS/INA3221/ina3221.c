@@ -33,9 +33,10 @@
 #define INA3221_SHUNT_LSB_UV      40U     /* 分流电压 LSB = 40 uV  */
 #define INA3221_BUS_LSB_MV        8U      /* 总线电压 LSB = 8 mV   */
 
-/* 配置寄存器：CH3/CH2/CH1 EN[2:0]=111 全开；MODE[5:3]=111 连续测分流+总线；
-   AVG[14:12]=000 1次平均；VBUSCT[11:9]/VSHCT[8:6]=000 140us（默认）。 */
-#define INA3221_CONFIG_CONTINUOUS (0x003FU)
+/* 配置寄存器 0x00：RST(bit15)=0；CH1en(bit14)=1、CH2en(bit13)=1、CH3en(bit12)=0；
+   AVG[11:9]=000 1次平均；VBUSCT[8:6]=000 140us；VSHCT[5:3]=000 140us；
+   MODE[2:0]=111 连续测分流+总线，仅使能 CH1/CH2。 */
+#define INA3221_CONFIG_CONTINUOUS (0x6007U)
 
 
 
@@ -48,8 +49,11 @@ static void INA3221_Config(uint8_t addr)
 }
 
 
-/** 读制造商 ID，验证芯片在线并打印 */
-static void INA3221_CheckId(uint8_t addr)
+/* 初始化状态：ADDR_A/ADDR_B，0=found，1=NOT found，3=未运行。 */
+static uint8_t g_init_status[2] = {3, 3};
+
+/** 读制造商 ID 验证芯片在线；成功静默（boot banner 统一显示），失败打印。 */
+static void INA3221_CheckId(uint8_t addr, uint8_t idx)
 {
     uint8_t id[2] = {0, 0};
     uint16_t manuf;
@@ -58,9 +62,12 @@ static void INA3221_CheckId(uint8_t addr)
     manuf = ((uint16_t)id[0] << 8) | id[1];
 
     if (manuf == INA3221_MANUFACT_ID)
-        printf("[INA3221 @0x%02X] found (ID=0x%04X)\r\n", (unsigned)addr, (unsigned)manuf);
+        g_init_status[idx] = 0;   /* found，成功静默 */
     else
+    {
+        g_init_status[idx] = 1;
         printf("[INA3221 @0x%02X] NOT found (ID=0x%04X)\r\n", (unsigned)addr, (unsigned)manuf);
+    }
 }
 
 
@@ -72,10 +79,10 @@ void INA3221_Init(void)
     I2C_INA_Init();   /* I2C2 @ 400 kHz, PB10=SCL/PB11=SDA */
 
     INA3221_Config(PEO_PM_INA3221_ADDR_A);
-    INA3221_CheckId(PEO_PM_INA3221_ADDR_A);
+    INA3221_CheckId(PEO_PM_INA3221_ADDR_A, 0);
 
     INA3221_Config(PEO_PM_INA3221_ADDR_B);
-    INA3221_CheckId(PEO_PM_INA3221_ADDR_B);
+    INA3221_CheckId(PEO_PM_INA3221_ADDR_B, 1);
 }
 
 
@@ -96,6 +103,14 @@ void INA3221_Init(void)
  *         这里只做 peripheral-side 配置（TIM_TimeBaseInit + TIM_ITConfig），
  *         与 CONTROL 组件用 TIM6 的方式一致。
  */
+/** 读取某片初始化状态：0=found，1=NOT found，3=未运行。 */
+uint8_t INA3221_GetInitStatus(uint8_t idx)
+{
+    if (idx >= 2)
+        return 3;
+    return g_init_status[idx];
+}
+
 void INA3221_PollInit(void)
 {
     TIM_TimeBaseInitTypeDef tb;
@@ -121,14 +136,16 @@ void INA3221_PollInit(void)
 /* 突发读一片 INA3221 的 0x01 起 8 字节（SHUNT_CH1,BUS_CH1,SHUNT_CH2,BUS_CH2，
    寄存器自动增量），解析出 2 个电机的电流 mA + 电压 mV。
    替代原来「每寄存器单独读」的 8 次事务 -> 2 次（~920µs -> ~500µs @400kHz）。 */
-static void ina_read_two_motors(uint8_t addr, int16_t *cur0, uint16_t *vol0,
+/* 返回 0=读取失败，1=成功；失败时不写输出参数。 */
+static uint8_t ina_read_two_motors(uint8_t addr, int16_t *cur0, uint16_t *vol0,
                                 int16_t *cur1, uint16_t *vol1)
 {
     uint8_t  raw[8];
     int16_t  shunt0, shunt1;
     uint16_t bus0, bus1;
 
-    I2C_INA_ReadBytes(addr, INA3221_REG_SHUNT_CH1, raw, 8);
+    if (I2C_INA_ReadBytes(addr, INA3221_REG_SHUNT_CH1, raw, 8) != NO_ERROR)
+        return 0;
 
     /* 分流电压寄存器低 3 位为保留（恒 0），右移 3 位得到 bit[15:3] 有符号数据，
        否则电流会放大 8 倍（0x07D0=100mA 会算成 800mA）。 */
@@ -142,12 +159,14 @@ static void ina_read_two_motors(uint8_t addr, int16_t *cur0, uint16_t *vol0,
     *vol0 = (uint16_t)((bus0 >> 3) * INA3221_BUS_LSB_MV);   /* (raw>>3)*8 mV */
     *cur1 = (int16_t)((float)shunt1 * INA3221_SHUNT_LSB_UV / PEO_PM_INA3221_RSHUNT_MOHM);
     *vol1 = (uint16_t)((bus1 >> 3) * INA3221_BUS_LSB_MV);
+    return 1;
 }
 
 void TIM7_IRQHandler(void)
 {
     int16_t  cur[4];
     uint16_t vol[4];
+    uint8_t  ok_a, ok_b;
 
     if (TIM_GetITStatus(INA3221_TIM, TIM_IT_Update) == RESET)
         return;
@@ -155,8 +174,10 @@ void TIM7_IRQHandler(void)
     TIM_ClearITPendingBit(INA3221_TIM, TIM_IT_Update);
 
     /* 2 次突发读（每片 8 字节）替代 8 次单寄存器读 */
-    ina_read_two_motors(PEO_PM_INA3221_ADDR_A, &cur[0], &vol[0], &cur[1], &vol[1]);  /* M1/M2 */
-    ina_read_two_motors(PEO_PM_INA3221_ADDR_B, &cur[2], &vol[2], &cur[3], &vol[3]);  /* M3/M4 */
+    ok_a = ina_read_two_motors(PEO_PM_INA3221_ADDR_A, &cur[0], &vol[0], &cur[1], &vol[1]);  /* M1/M2 */
+    ok_b = ina_read_two_motors(PEO_PM_INA3221_ADDR_B, &cur[2], &vol[2], &cur[3], &vol[3]);  /* M3/M4 */
 
-    SENSOR_PushIna(cur, vol);
+    /* 两片均成功才发布四路数据；任一失败则保留上一轮数据和时间戳。 */
+    if (ok_a == 1 && ok_b == 1)
+        SENSOR_PushIna(cur, vol);
 }

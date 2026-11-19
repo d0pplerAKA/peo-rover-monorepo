@@ -23,6 +23,11 @@
 static volatile float   g_qw, g_qx, g_qy, g_qz;   /* 姿态四元数 (w,x,y,z) */
 static volatile float   g_ax, g_ay, g_az;         /* 原始加速度（单位 g）*/
 
+/* 自检结果缓存：0=通过(gyro+accel)，1=未通过(数据可能仍有效但可信度降低)，2=未运行。 */
+static volatile uint8_t g_self_test_result = 2;
+/* 初始化状态：0=成功，1=WHO_AM_I 失败，2=DMP 失败，3=未运行。 */
+static volatile uint8_t g_init_status = 3;
+
 /* MPU 安装矩阵：单位阵 = 芯片轴与车体轴对齐；若斜装需改成旋转矩阵。 */
 static const signed char gyro_orientation[9] = { 1, 0, 0,
                                                  0, 1, 0,
@@ -96,7 +101,7 @@ int _MLPrintLog(int priority, const char *tag, const char *fmt, ...)
     (void)priority;
 
     va_start(args, fmt);
-    vsprintf(buf, fmt, args);   /* MPL 日志都短（<128 字节） */
+    vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
     if (tag != 0 && tag[0] != '\0')
@@ -136,23 +141,40 @@ static void MPU6050_FIFO_Ready_Cb(void)
 
 /**
  * @brief  MPU6050 上电：初始化 I2C1，校验 WHO_AM_I，再初始化 DMP。
+ * @return 0 = 成功；1 = WHO_AM_I 读取失败或不匹配；2 = DMP 配置失败。
  */
-void MPU6050_Init(void)
+uint8_t MPU6050_Init(void)
 {
-//    uint8_t who = 0, ret = 0;
+    uint8_t who = 0;
+    uint8_t dmp_status;
+    uint32_t ret;
 
     I2C_MPU_Init();   /* I2C1 @ 400 kHz */
-/*
     ret = I2C_MPU_ReadBytes(PEO_PM_MPU6050_ADDR, MPU6050_WHO_AM_I_REG, 1, &who);
-    if (ret == NO_ERROR)
-        printf("[MPU6050] WHO_AM_I = 0x%02X\n", who);
-    else
-        printf("[MPU6050] WHO_AM_I read failed, err=%d\n", ret);
-*/
-    if (MPU6050_DMP_Init() == 0) ;
-//        printf("[MPU6050] DMP configured (call MPU6050_Start() to begin)\n");
-//    else
-//        printf("[MPU6050] DMP init FAILED\n");
+    if (ret != NO_ERROR)
+    {
+        printf("[MPU6050] WHO_AM_I read failed, err=%lu\r\n", (unsigned long)ret);
+        g_init_status = 1;
+        return 1;
+    }
+    if (who != MPU6050_WHO_AM_I_EXP)
+    {
+        printf("[MPU6050] WHO_AM_I mismatch: got=0x%02X, expected=0x%02X\r\n",
+               (unsigned)who, (unsigned)MPU6050_WHO_AM_I_EXP);
+        g_init_status = 1;
+        return 1;
+    }
+
+    dmp_status = MPU6050_DMP_Init();
+    if (dmp_status != 0)
+    {
+        printf("[MPU6050] DMP init failed, step=%u\r\n", (unsigned)dmp_status);
+        g_init_status = 2;
+        return 2;
+    }
+
+    g_init_status = 0;   /* 成功：不打印（boot banner 统一显示） */
+    return 0;
 }
 
 /**
@@ -177,6 +199,8 @@ uint8_t MPU6050_DMP_Init(void)
     if (dmp_enable_feature(DMP_FEATURE_6X_LP_QUAT | DMP_FEATURE_SEND_RAW_ACCEL))
                                                            return 7;
     if (dmp_set_fifo_rate(MPU6050_SAMPLE_HZ))              return 8;
+
+    g_self_test_result = run_self_test();   /* 存自检结果，boot banner 显示 */
 
     /* 注意：DMP 引擎不在这里启动——调用 MPU6050_Start() 才会开始产出数据、
        触发 EXTI3 中断，这样上电配置阶段不会被中断打扰。 */
@@ -208,7 +232,10 @@ uint8_t run_self_test(void)
     unsigned short accel_sens;
 
     res = mpu_run_self_test(gyro, accel);
-    if (res != 0x3)         /* 0x3 = gyro(bit0) + accel(bit1) 都通过 */
+    /* bit0=gyro, bit1=accel, bit2=compass。MPU6050 无磁力计（AK89xx_SECONDARY 未定义），
+       库对 bit2 无条件置位，故「都通过」的正确返回值是 0x07 而非 0x03。
+       用位掩码只判 bit0+bit1，忽略 bit2。 */
+    if ((res & 0x03) != 0x03)
         return 1;
 
     /* 把自检得到的偏置按灵敏度换算成 DMP 需要的格式，再写入 DMP。 */
@@ -216,13 +243,33 @@ uint8_t run_self_test(void)
     gyro[0] = (long)(gyro[0] * gyro_sens);
     gyro[1] = (long)(gyro[1] * gyro_sens);
     gyro[2] = (long)(gyro[2] * gyro_sens);
-    dmp_set_gyro_bias(gyro);
+    if (dmp_set_gyro_bias(gyro))
+        return 1;   /* 偏置写入 DMP 失败 */
 
     mpu_get_accel_sens(&accel_sens);
     accel[0] *= accel_sens;
     accel[1] *= accel_sens;
     accel[2] *= accel_sens;
-    dmp_set_accel_bias(accel);
+    if (dmp_set_accel_bias(accel))
+        return 1;   /* 偏置写入 DMP 失败 */
 
     return 0;
+}
+
+/**
+ * @brief  读取最近一次自检结果。
+ * @return 0 = 通过（gyro+accel 均通过）；1 = 未通过（数据可能仍有效但可信度降低）；2 = 未运行。
+ */
+uint8_t MPU6050_GetSelfTest(void)
+{
+    return g_self_test_result;
+}
+
+/**
+ * @brief  读取初始化状态。
+ * @return 0=成功；1=WHO_AM_I 失败；2=DMP 失败；3=未运行。
+ */
+uint8_t MPU6050_GetInitStatus(void)
+{
+    return g_init_status;
 }

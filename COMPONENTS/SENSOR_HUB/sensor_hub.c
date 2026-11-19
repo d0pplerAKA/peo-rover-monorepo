@@ -10,6 +10,8 @@
 #include "COMPONENTS/CONTROL/include/control.h"      /* boot banner: PEO_CTRL_KP/KI/LOOP_HZ */
 #include "COMPONENTS/GAMEPAD/include/gamepad.h"     /* lock 状态上报（GetHub） */
 #include "COMPONENTS/TOF400C/include/tof400c.h"      /* boot banner: PEO_PM_VL53_DISTANCE_MODE 等 */
+#include "COMPONENTS/MPU6050/include/mpu6050.h"      /* boot banner: MPU6050_GetSelfTest/GetInitStatus */
+#include "COMPONENTS/INA3221/include/ina3221.h"      /* boot banner: INA3221_GetInitStatus */
 #include <stdio.h>                                   /* boot banner / dbg_f3: printf */
 
 /* 活动数据包：各传感器 ISR 通过 Push 接口写入 */
@@ -89,8 +91,13 @@ void SENSOR_PushIna(int16_t *current_mA, uint16_t *bus_voltage_mV)
  */
 void SENSOR_SetCmdAck(uint8_t cmd_id, uint8_t status)
 {
+    uint32_t primask = __disable_irq();
+
     g_sensor_data.last_cmd_id     = cmd_id;
     g_sensor_data.last_cmd_status = status;
+
+    if (!primask)
+        __enable_irq();
 }
 
 /**
@@ -125,6 +132,14 @@ static void dbg_f3(float v)
     char sign = (iv < 0) ? '-' : ' ';
     if (iv < 0) iv = -iv;
     printf("%c%ld.%03ld", sign, iv / 1000, iv % 1000);
+}
+
+/* 初始化状态字符串：0=成功 PASS，3=未运行 N/A，其他=失败 FAIL。 */
+static const char *init_status_str(uint8_t s)
+{
+    if (s == 0) return "PASS";
+    if (s == 3) return "N/A";
+    return "FAIL";
 }
 
 /* 全面的 boot 诊断信息：时钟/构建/驱动参数/传感器配置/模块状态 */
@@ -170,18 +185,32 @@ void print_boot_banner(void)
     printf("  @ %u Hz\r\n", (unsigned)PEO_CTRL_LOOP_HZ);
     printf("-------------------------------------------------\r\n");
     printf("  SENSORS (I2C)\r\n");
-    printf("    MPU6050 : I2C1 @ 0x%02X  (DMP)\r\n", (unsigned)PEO_PM_MPU6050_ADDR);
-    printf("    VL53L1X : I2C3 @ 0x%02X / 0x%02X / 0x%02X\r\n",
+    {
+        const char *st;
+        uint8_t     s = MPU6050_GetSelfTest();
+        if (s == 0)      st = "PASS";
+        else if (s == 1) st = "FAIL (low confidence)";
+        else             st = "N/A";
+        printf("    MPU6050 : I2C1 @ 0x%02X  (DMP)  init=%s  self-test=%s\r\n",
+               (unsigned)PEO_PM_MPU6050_ADDR,
+               init_status_str(MPU6050_GetInitStatus()), st);
+    }
+    printf("    VL53L1X : I2C3 @ 0x%02X/0x%02X/0x%02X  init=%s/%s/%s\r\n",
            (unsigned)PEO_PM_VL53_FRONT_ADDR,
            (unsigned)PEO_PM_VL53_LEFT_ADDR,
-           (unsigned)PEO_PM_VL53_RIGHT_ADDR);
+           (unsigned)PEO_PM_VL53_RIGHT_ADDR,
+           init_status_str(TOF400C_GetInitStatus(TOF400C_FRONT)),
+           init_status_str(TOF400C_GetInitStatus(TOF400C_LEFT)),
+           init_status_str(TOF400C_GetInitStatus(TOF400C_RIGHT)));
     printf("              DM=%s  TB=%u ms  IMP=%u ms  -> ~%u Hz\r\n",
            (PEO_PM_VL53_DISTANCE_MODE == 1) ? "Short" : "Long",
            (unsigned)PEO_PM_VL53_TIMING_BUDGET_MS,
            (unsigned)PEO_PM_VL53_INTER_MEAS_MS,
            (unsigned)(1000U / PEO_PM_VL53_INTER_MEAS_MS));
-    printf("    INA3221 : I2C2 @ 0x%02X + 0x%02X  (2x, 4 motor current)\r\n",
-           (unsigned)PEO_PM_INA3221_ADDR_A, (unsigned)PEO_PM_INA3221_ADDR_B);
+    printf("    INA3221 : I2C2 @ 0x%02X + 0x%02X  init=%s/%s  (2x, 4 motor current)\r\n",
+           (unsigned)PEO_PM_INA3221_ADDR_A, (unsigned)PEO_PM_INA3221_ADDR_B,
+           init_status_str(INA3221_GetInitStatus(0)),
+           init_status_str(INA3221_GetInitStatus(1)));
     printf("-------------------------------------------------\r\n");
     printf("  MODULES\r\n");
     printf("    ENCODER=%s  MOTOR=%s  CONTROL=%s  TOF400C=%s  INA3221=%s\r\n",

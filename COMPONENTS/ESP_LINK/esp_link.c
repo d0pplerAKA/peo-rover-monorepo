@@ -16,7 +16,9 @@
 #include "COMPONENTS/CONTROL/include/control.h"
 #include "COMPONENTS/MOTOR/include/motor.h"
 #include "COMPONENTS/TIMER/include/timer.h"
+#include "COMPONENTS/GAMEPAD/include/gamepad.h"
 
+#include <math.h>
 #include <string.h>
 
 /* ============================================================================
@@ -73,6 +75,10 @@ static void ESP_LINK_SendHub(void)
     uint16_t     len  = (uint16_t)sizeof(SensorData_t);
     uint16_t     flen = (uint16_t)(len + ESP_LINK_FRAME_OVH);
 
+    /* DMA 仍持有上一帧缓冲时，必须在写入任何字节之前跳过本次发送。 */
+    if (DMA_GetCmdStatus(PEO_DMA_ESP_TX_STREAM) != DISABLE)
+        return;
+
     SENSOR_GetHub(&hub);
 
     buf[0] = ESP_LINK_SOF0;
@@ -83,11 +89,6 @@ static void ESP_LINK_SendHub(void)
     crc = ESP_LINK_CRC16(buf, (uint16_t)(3 + len));
     buf[3 + len]     = (uint8_t)(crc & 0xFFU);       /* CRC 低字节在前 */
     buf[3 + len + 1] = (uint8_t)(crc >> 8);
-
-    /* 若上一次 DMA 发送未完成（Normal 模式发完 EN 位自动清），跳过本次，
-       避免打断/截断上一帧。 */
-    if (DMA_GetCmdStatus(PEO_DMA_ESP_TX_STREAM) != DISABLE)
-        return;
 
     /* 启动 DMA 发送（单次模式，发 flen 字节后自动停）。
        RM0090 重配置序列：禁流 -> 等 EN 实际清零 -> 清全部标志 -> 配长度 -> 使能。 */
@@ -114,8 +115,10 @@ static void ESP_LINK_SendHub(void)
 static uint32_t g_rx_dma_buf[ESP_LINK_RX_BUF_SIZE / 4];
 
 /* 失联自停：最后收到有效帧（CRC 通过）的时间戳（SysTick ms）。
-   0 = 尚未收到任何有效帧（不监督）。S3 每 200ms 发空帧心跳。 */
+   g_rx_seen = 0 表示尚未收到有效帧（不监督），时间戳 0 也是有效值。
+   S3 每 200ms 发空帧心跳。 */
 static volatile uint32_t g_last_rx_ms = 0;
+static volatile uint8_t  g_rx_seen = 0;
 
 /* 前置声明：HandleCmd 定义在 ProcessFrame 之后 */
 static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len);
@@ -158,6 +161,7 @@ static void ESP_LINK_ProcessRx(uint16_t len)
         return;                                            /* CRC 错 */
 
     g_last_rx_ms = TIMER_GetTick();   /* 有效帧（含空帧心跳）刷新失联看门狗 */
+    g_rx_seen = 1;
     ESP_LINK_ProcessFrame(&buf[3], payload_len);
 }
 
@@ -170,16 +174,33 @@ static void ESP_LINK_ProcessRx(uint16_t len)
 static ESP_Cmd_t          g_cmd_queue[ESP_CMD_QUEUE_SIZE];
 static volatile uint8_t   g_cmd_head = 0;   /* 写指针（IDLE 中断） */
 static volatile uint8_t   g_cmd_tail = 0;   /* 读指针（主循环）   */
+static volatile uint8_t   g_stop_requested = 0;   /* STOP 独立请求，不占队列槽 */
 
-/** 中断里调：解析一条命令并入队（只入队，不执行）。 */
+/** 中断里调：STOP 设置独立请求，其余命令入队（不执行业务）。 */
 static void ESP_LINK_HandleCmd(const uint8_t *cmd, uint8_t len)
 {
     uint8_t cmd_id    = cmd[0];
     uint8_t param_len = (uint8_t)(len - 1);
 
+    if (cmd_id == ESP_CMD_STOP_ALL)
+    {
+        g_stop_requested = 1;
+        return;
+    }
+
     /* 入队失败（队满 / 参数超长）才在中断里回显错误 */
     if (!ESP_LINK_PushCommand(cmd_id, &cmd[1], param_len))
         SENSOR_SetCmdAck(cmd_id, ESP_CMD_ERR_INVALID);
+}
+
+uint8_t ESP_LINK_StopPending(void)
+{
+    return g_stop_requested;
+}
+
+void ESP_LINK_ClearStop(void)
+{
+    g_stop_requested = 0;
 }
 
 uint8_t ESP_LINK_PushCommand(uint8_t id, const uint8_t *param, uint8_t param_len)
@@ -214,6 +235,15 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
 {
     uint8_t status = ESP_CMD_OK;
 
+    /* 手操锁下拒绝上位机运动/调参命令；STOP 和其他命令不受锁限制。 */
+    if ((cmd->id == ESP_CMD_MOTOR || cmd->id == ESP_CMD_PID ||
+         cmd->id == ESP_CMD_MOTOR_CLOSED) &&
+        GAMEPAD_GetLock() == GAMEPAD_LOCK_MANUAL)
+    {
+        SENSOR_SetCmdAck(cmd->id, ESP_CMD_ERR_INVALID);
+        return;
+    }
+
     switch (cmd->id)
     {
         case ESP_CMD_LED_TOGGLE:
@@ -230,6 +260,7 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
 
         case ESP_CMD_MOTOR:
         {
+#if PEO_ENABLE_MOTOR && PEO_ENABLE_CONTROL
             uint8_t motor;
             int16_t speed;
             if (cmd->param_len < 3) { status = ESP_CMD_ERR_BADLEN; break; }
@@ -238,6 +269,9 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
             CONTROL_SetMode(CONTROL_MODE_OPEN);   /* 开环直驱，绕过 PI */
             MOTOR_SetSpeed(motor, speed);
+#else
+            status = ESP_CMD_ERR_INVALID;   /* 电机/CONTROL 未启用，运动命令拒绝 */
+#endif
             break;
         }
 
@@ -247,20 +281,34 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
             if (cmd->param_len < 8) { status = ESP_CMD_ERR_BADLEN; break; }
             memcpy(&kp, cmd->param,     4);
             memcpy(&ki, cmd->param + 4, 4);
+            if (!isfinite(kp) || !isfinite(ki) || kp < 0.0f || ki < 0.0f)
+            {
+                status = ESP_CMD_ERR_INVALID;
+                break;
+            }
             CONTROL_SetGains(kp, ki);
             break;
         }
 
         case ESP_CMD_MOTOR_CLOSED:
         {
+#if PEO_ENABLE_MOTOR && PEO_ENABLE_CONTROL
             uint8_t motor;
             int32_t speed_d100;
             if (cmd->param_len < 5) { status = ESP_CMD_ERR_BADLEN; break; }
             motor = cmd->param[0];
             memcpy(&speed_d100, cmd->param + 1, 4);
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
+            if (speed_d100 > GAMEPAD_SPEED_MAX || speed_d100 < -GAMEPAD_SPEED_MAX)
+            {
+                status = ESP_CMD_ERR_INVALID;
+                break;
+            }
             CONTROL_SetMode(CONTROL_MODE_CLOSED);   /* 切回闭环 */
             CONTROL_SetTargetSpeed(motor, speed_d100);
+#else
+            status = ESP_CMD_ERR_INVALID;   /* 电机/CONTROL 未启用，运动命令拒绝 */
+#endif
             break;
         }
 
@@ -430,8 +478,8 @@ void TIM8_TRG_COM_TIM14_IRQHandler(void)
         ESP_LINK_SendHub();   /* 打包 + 启动 DMA 发送（非阻塞） */
 
         /* 失联自停（deadman）：S3 掉电/死机时 F407 收不到心跳空帧，
-           超过 ESP_LINK_DEADMAN_MS 自动停车。首帧前（g_last_rx_ms==0）不监督。 */
-        if (g_last_rx_ms != 0 &&
+           超过 ESP_LINK_DEADMAN_MS 自动停车。首帧前（g_rx_seen==0）不监督。 */
+        if (g_rx_seen &&
             (uint32_t)(TIMER_GetTick() - g_last_rx_ms) > ESP_LINK_DEADMAN_MS)
         {
             CONTROL_StopAll();

@@ -219,8 +219,13 @@ int16_t CONTROL_GetPwm(uint8_t motor)
  */
 void CONTROL_SetGains(float kp, float ki)
 {
+    uint32_t primask = __disable_irq();
+
     g_pi_kp = kp;
     g_pi_ki = ki;
+
+    if (!primask)
+        __enable_irq();
 }
 
 /**
@@ -229,6 +234,7 @@ void CONTROL_SetGains(float kp, float ki)
 void CONTROL_StopAll(void)
 {
     uint8_t m;
+    uint32_t primask = __disable_irq();
 
     for (m = 0; m < 4; m++)
     {
@@ -238,11 +244,15 @@ void CONTROL_StopAll(void)
         MOTOR_Coast(m);
     }
     g_mode = CONTROL_MODE_CLOSED;   /* 急停回到闭环安全态 */
+
+    if (!primask)
+        __enable_irq();
 }
 
 void CONTROL_SetMode(uint8_t mode)
 {
     uint8_t m;
+    uint32_t primask;
 
     if (mode != CONTROL_MODE_OPEN && mode != CONTROL_MODE_CLOSED)
         return;
@@ -250,6 +260,7 @@ void CONTROL_SetMode(uint8_t mode)
     if (g_mode == mode)
         return;   /* 同模式无操作 */
 
+    primask = __disable_irq();
     g_mode = mode;
 
     /* 切模式复位 PI 积分，避免切回闭环瞬间 PWM 突变。 */
@@ -258,6 +269,9 @@ void CONTROL_SetMode(uint8_t mode)
         g_pi_u[m]      = 0.0f;
         g_pi_e_prev[m] = 0.0f;
     }
+
+    if (!primask)
+        __enable_irq();
 }
 
 uint8_t CONTROL_GetMode(void)

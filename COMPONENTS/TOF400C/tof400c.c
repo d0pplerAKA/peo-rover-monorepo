@@ -5,6 +5,8 @@
 uint8_t TOF400C_ranging_flag[3] = {TOF400C_OFF, TOF400C_OFF, TOF400C_OFF};
 const uint8_t TOF400C_target_addr[3] = {PEO_PM_VL53_FRONT_ADDR, PEO_PM_VL53_LEFT_ADDR, PEO_PM_VL53_RIGHT_ADDR};
 VL53L1X_Result_t TOF400C_result[3];
+/* 初始化状态：front/left/right，0=成功，非0=失败，3=未运行。 */
+static uint8_t TOF400C_init_status[3] = {3, 3, 3};
 
 void TOF400C_Init(void)
 {
@@ -59,7 +61,10 @@ void TOF400C_Init(void)
     {
         printf("[VL53] RIGHT init failed -> offline\n");
         GPIO_ResetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_RIGHT_XSHUT_PIN);
+        TOF400C_init_status[TOF400C_RIGHT] = 1;
     }
+    else
+        TOF400C_init_status[TOF400C_RIGHT] = 0;
 
     GPIO_SetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_LEFT_XSHUT_PIN);
     delay_ms(10);
@@ -67,7 +72,10 @@ void TOF400C_Init(void)
     {
         printf("[VL53] LEFT init failed -> offline\n");
         GPIO_ResetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_LEFT_XSHUT_PIN);
+        TOF400C_init_status[TOF400C_LEFT] = 1;
     }
+    else
+        TOF400C_init_status[TOF400C_LEFT] = 0;
 
     GPIO_SetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_FRONT_XSHUT_PIN);
     delay_ms(10);
@@ -75,7 +83,10 @@ void TOF400C_Init(void)
     {
         printf("[VL53] FRONT init failed -> offline\n");
         GPIO_ResetBits(PEO_PM_VL53_XSHUT_PORT, PEO_PM_VL53_FRONT_XSHUT_PIN);
+        TOF400C_init_status[TOF400C_FRONT] = 1;
     }
+    else
+        TOF400C_init_status[TOF400C_FRONT] = 0;
 }
 
 
@@ -186,6 +197,9 @@ uint8_t TOF400C_BOOT_Init(uint8_t assigned_addr)
 
 void TOF400C_StartRanging_Interrupt(uint8_t index)
 {
+    if (index >= 3)
+        return;
+
     if(TOF400C_ranging_flag[index] == TOF400C_OFF)
     {
         TOF400C_ranging_flag[index] = TOF400C_ON;
@@ -199,13 +213,25 @@ void TOF400C_StopRanging_Interrupt(uint8_t index)
     TOF400C_ranging_flag[index] = TOF400C_OFF;
 }
 
+/** 读取某路传感器初始化状态：0=成功，非0=失败，3=未运行。 */
+uint8_t TOF400C_GetInitStatus(uint8_t index)
+{
+    if (index >= 3)
+        return 3;
+    return TOF400C_init_status[index];
+}
+
 void EXTI0_IRQHandler(void) // Front
 {
+    int8_t status;
+
     if(EXTI_GetFlagStatus(EXTI_Line0) != RESET)
     {
         EXTI_ClearITPendingBit(EXTI_Line0);
         
-        VL53L1X_GetResult((uint16_t) TOF400C_target_addr[TOF400C_FRONT], &TOF400C_result[TOF400C_FRONT]);
+        status = VL53L1X_GetResult((uint16_t) TOF400C_target_addr[TOF400C_FRONT], &TOF400C_result[TOF400C_FRONT]);
+        if (status != 0)
+            return;
 
         VL53L1X_ClearInterrupt((uint16_t) TOF400C_target_addr[TOF400C_FRONT]);
 
@@ -220,11 +246,15 @@ void EXTI0_IRQHandler(void) // Front
 
 void EXTI1_IRQHandler(void) // Left
 {
+    int8_t status;
+
     if(EXTI_GetFlagStatus(EXTI_Line1) != RESET)
     {
         EXTI_ClearITPendingBit(EXTI_Line1);
         
-        VL53L1X_GetResult((uint16_t) TOF400C_target_addr[TOF400C_LEFT], &TOF400C_result[TOF400C_LEFT]);
+        status = VL53L1X_GetResult((uint16_t) TOF400C_target_addr[TOF400C_LEFT], &TOF400C_result[TOF400C_LEFT]);
+        if (status != 0)
+            return;
 
         VL53L1X_ClearInterrupt((uint16_t) TOF400C_target_addr[TOF400C_LEFT]);
 
@@ -239,11 +269,15 @@ void EXTI1_IRQHandler(void) // Left
 
 void EXTI2_IRQHandler(void) // Right
 {
+    int8_t status;
+
     if(EXTI_GetFlagStatus(EXTI_Line2) != RESET)
     {
         EXTI_ClearITPendingBit(EXTI_Line2);
         
-        VL53L1X_GetResult((uint16_t) TOF400C_target_addr[TOF400C_RIGHT], &TOF400C_result[TOF400C_RIGHT]);
+        status = VL53L1X_GetResult((uint16_t) TOF400C_target_addr[TOF400C_RIGHT], &TOF400C_result[TOF400C_RIGHT]);
+        if (status != 0)
+            return;
 
         VL53L1X_ClearInterrupt((uint16_t) TOF400C_target_addr[TOF400C_RIGHT]);
 

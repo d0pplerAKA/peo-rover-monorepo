@@ -121,6 +121,12 @@ uint8_t ESP_LINK_PushCommand(uint8_t id, const uint8_t *param, uint8_t param_len
  */
 uint8_t ESP_LINK_PopCommand(ESP_Cmd_t *out);
 
+/** @brief 查询独立 STOP 请求（不占命令队列槽）。 */
+uint8_t ESP_LINK_StopPending(void);
+
+/** @brief 清除独立 STOP 请求，主循环处理停车前调用。 */
+void ESP_LINK_ClearStop(void);
+
 /**
  * @brief  执行一条命令并回显 ACK（在 main 主循环调）。
  * @param  cmd  要执行的命令（来自 ESP_LINK_PopCommand）。

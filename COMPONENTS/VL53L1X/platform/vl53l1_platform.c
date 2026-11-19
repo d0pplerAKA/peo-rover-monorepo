@@ -39,6 +39,7 @@
 #include <math.h>
 
 #include "COMPONENTS/I2C/include/i2c.h"
+#include "COMPONENTS/TIMER/include/timer.h"
 
 
 int8_t VL53L1_WriteMulti(uint16_t dev, uint16_t index, uint8_t *pdata, uint32_t count)
@@ -58,22 +59,12 @@ int8_t VL53L1_WrByte(uint16_t dev, uint16_t index, uint8_t data)
 
 int8_t VL53L1_WrWord(uint16_t dev, uint16_t index, uint16_t data)
 {
-	uint8_t status = 0;
-
 	uint8_t sbuf[2];
 
 	sbuf[0] = (uint8_t) (data >> 8);
 	sbuf[1] = (uint8_t) (data & 0xff);
 
-	if(index % 2 == 1)
-	{
-		status = VL53L1_WriteMulti(dev, index, &sbuf[0], 1);
-		status = VL53L1_WriteMulti(dev, index, &sbuf[1], 1);
-	}
-
-	status = VL53L1_WriteMulti(dev, index, sbuf, 2);
-
-	return status;
+	return VL53L1_WriteMulti(dev, index, sbuf, 2);
 }
 
 int8_t VL53L1_WrDWord(uint16_t dev, uint16_t index, uint32_t data)
@@ -125,7 +116,9 @@ int8_t VL53L1_RdDWord(uint16_t dev, uint16_t index, uint32_t *data)
 
 int8_t VL53L1_WaitMs(uint16_t dev, int32_t wait_ms)
 {
-	delay_ms(wait_ms);
+	if (wait_ms <= 0)
+		return 0;
+	mdelay((unsigned long)wait_ms);
 
 	return 0;
 }

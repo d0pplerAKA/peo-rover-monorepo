@@ -77,6 +77,7 @@ extern VL53L1X_Result_t TOF400C_result[3];
 void TOF400C_Init(void);
 uint8_t TOF400C_BOOT_Init(uint8_t assigned_addr);   /* 0=成功, 非0=失败步骤 */
 void TOF400C_StartRanging_Interrupt(uint8_t index);
+uint8_t TOF400C_GetInitStatus(uint8_t index);   /* 0=成功 非0=失败 3=未运行 */
 void TOF400C_StopRanging_Interrupt(uint8_t index);
 
 

@@ -213,8 +213,14 @@ uint8_t GAMEPAD_IsConnected(void)
 
 void GAMEPAD_Process(void)
 {
+    gamepad_payload_t pad;
+    uint32_t primask = __disable_irq();
+    pad = g_pad;
+    if (!primask)
+        __enable_irq();
+
     uint32_t now = TIMER_GetTick();
-    uint8_t  lock = g_pad.lock;
+    uint8_t  lock = pad.lock;
     int32_t  throttle, steer, left, right;
 
     /* 锁切换瞬间停车（避免控制权切换时的速度突变）。 */
@@ -224,30 +230,30 @@ void GAMEPAD_Process(void)
         g_prev_lock = lock;
     }
 
-    /* 锁开启（自主）：上位机命令接管，手柄映射跳过。 */
-    if (lock == GAMEPAD_LOCK_AUTO)
-        return;
-
-    /* 锁关闭（手操）：C3 失联 / 手柄断连 / 急停键 -> 停车。 */
-    if ((uint32_t)(now - g_last_rx_ms) >= GAMEPAD_STALE_MS)
-    {
-        CONTROL_StopAll();            /* C3 失联 */
-        return;
-    }
-    if (!g_pad.connected || !g_pad.input_fresh)
-    {
-        CONTROL_StopAll();            /* 手柄断连 / 输入过期 */
-        return;
-    }
-    if (g_pad.buttons & GAMEPAD_BTN_XBOX)
+    if (pad.buttons & GAMEPAD_BTN_XBOX)
     {
         CONTROL_StopAll();            /* 急停键（双源，越过锁） */
         return;
     }
 
+    /* 锁开启（自主）：上位机命令接管，手柄映射跳过。 */
+    if (lock == GAMEPAD_LOCK_AUTO)
+        return;
+
+    /* 锁关闭（手操）：C3 失联 / 手柄断连 -> 停车。 */
+    if ((uint32_t)(now - g_last_rx_ms) >= GAMEPAD_STALE_MS)
+    {
+        CONTROL_StopAll();            /* C3 失联 */
+        return;
+    }
+    if (!pad.connected || !pad.input_fresh)
+    {
+        CONTROL_StopAll();            /* 手柄断连 / 输入过期 */
+        return;
+    }
     /* 摇杆映射：左摇杆上下=前进/后退油门，右摇杆左右=单边（右轮）差速。 */
-    throttle = map_axis(g_pad.joy_ly);
-    steer    = map_axis(g_pad.joy_rx);
+    throttle = map_axis(pad.joy_ly);
+    steer    = map_axis(pad.joy_rx);
 
     left  = throttle;                 /* 左轮 = 油门 */
     right = throttle + steer;         /* 右轮 = 油门 + 差速 */

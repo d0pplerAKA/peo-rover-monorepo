@@ -38,6 +38,7 @@ void I2C_TOF_Init(void)    // TOF400C
 }
 
 
+/* sl_addr 已是 8-bit 地址（7-bit<<1），不再二次左移。 */
 uint8_t I2C_TOF_WriteByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t byte_write)
 {
     uint8_t index_H = (uint8_t) (reg_addr >> 8);
@@ -70,7 +71,7 @@ uint8_t I2C_TOF_WriteByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t byte_write
         
         counter--;
     }
-    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Transmitter);
+    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)sl_addr, I2C_Direction_Transmitter);
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_VL53_I2C, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
@@ -127,6 +128,7 @@ uint8_t I2C_TOF_WriteByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t byte_write
     return NO_ERROR;
 }
 
+/* sl_addr 已是 8-bit 地址（7-bit<<1），不再二次左移。 */
 uint8_t I2C_TOF_ReadByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_receive)
 {
     uint8_t index_H = (uint8_t) (reg_addr >> 8);
@@ -160,7 +162,7 @@ uint8_t I2C_TOF_ReadByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_recei
         
         counter--;
     }
-    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Transmitter);
+    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)sl_addr, I2C_Direction_Transmitter);
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_VL53_I2C, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
@@ -212,7 +214,7 @@ uint8_t I2C_TOF_ReadByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_recei
         
         counter--;
     }
-    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Receiver);
+    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)sl_addr, I2C_Direction_Receiver);
     I2C_AcknowledgeConfig(PEO_PM_VL53_I2C, DISABLE);  /* 单字节：清 ADDR 前禁 ACK */
 
     counter = I2C_Timeout;
@@ -249,6 +251,7 @@ uint8_t I2C_TOF_ReadByte(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_recei
 }
 
 
+/* sl_addr 已是 8-bit 地址（7-bit<<1），不再二次左移。 */
 uint8_t I2C_TOF_WriteBytes(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_buffer_write, uint32_t byte_num)
 {
     uint8_t index_H = (uint8_t) (reg_addr >> 8);
@@ -280,7 +283,7 @@ uint8_t I2C_TOF_WriteBytes(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_buf
         
         counter--;
     }
-    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Transmitter);
+    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)sl_addr, I2C_Direction_Transmitter);
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_VL53_I2C, I2C_EVENT_MASTER_TRANSMITTER_MODE_SELECTED) != SUCCESS)
@@ -342,6 +345,7 @@ uint8_t I2C_TOF_WriteBytes(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_buf
     return NO_ERROR;
 }
 
+/* sl_addr 已是 8-bit 地址（7-bit<<1），不再二次左移。 */
 uint8_t I2C_TOF_ReadBytes(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_buffer_receive, uint32_t byte_num)
 {
     uint8_t index_H = (uint8_t) (reg_addr >> 8);
@@ -377,7 +381,7 @@ uint8_t I2C_TOF_ReadBytes(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_buff
         
         counter--;
     }
-    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Transmitter);
+    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)sl_addr, I2C_Direction_Transmitter);
 
 
     counter = I2C_Timeout;
@@ -430,7 +434,7 @@ uint8_t I2C_TOF_ReadBytes(uint8_t sl_addr, uint16_t reg_addr, uint8_t *byte_buff
         
         counter--;
     }
-    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)(sl_addr << 1), I2C_Direction_Receiver);
+    I2C_Send7bitAddress(PEO_PM_VL53_I2C, (uint8_t)sl_addr, I2C_Direction_Receiver);
 
     counter = I2C_Timeout;
     while(I2C_CheckEvent(PEO_PM_VL53_I2C, I2C_EVENT_MASTER_RECEIVER_MODE_SELECTED) != SUCCESS)

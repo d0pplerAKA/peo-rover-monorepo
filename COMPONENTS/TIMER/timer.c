@@ -65,18 +65,23 @@ unsigned long get_tick(unsigned long *count)
 
 /**
  * @brief  eMPL Motion Driver platform function (inv_mpu.c: #define delay_ms mdelay).
- *         Blocking ms delay on the SysTick counter. The subtraction is
- *         unsigned, so it stays correct across a 32-bit counter wrap.
+ *         Blocking ms delay on DWT, split into chunks of at most 1000 ms.
+ *         Unsigned subtraction handles a 32-bit counter wrap.
  */
 void mdelay(unsigned long ms)
 {
     /* DWT 周期计数器忙等（不依赖 SysTick）：可在中断上下文安全使用。
        否则 EXTI3 内 FIFO 溢出 -> mpu_reset_fifo -> mdelay(50) 会因 SysTick
        优先级更低、抢不进 EXTI3 而永久等待（死锁）。无符号减法处理 CYCCNT 回绕。 */
-    uint32_t cycles = (uint32_t)(ms * (PEO_PM_SYSCLK_HZ / 1000UL));
-    uint32_t start  = DWT->CYCCNT;
-    while ((DWT->CYCCNT - start) < cycles)
+    while (ms > 0)
     {
-        /* spin */
+        uint32_t chunk = (ms > 1000UL) ? 1000UL : (uint32_t)ms;
+        uint32_t cycles = chunk * (PEO_PM_SYSCLK_HZ / 1000UL);
+        uint32_t start = DWT->CYCCNT;
+        while ((DWT->CYCCNT - start) < cycles)
+        {
+            /* spin */
+        }
+        ms -= chunk;
     }
 }

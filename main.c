@@ -71,14 +71,19 @@ int main(void)
        started later via MPU6050_Start() / TOF400C_StartRanging_Interrupt()) */
 #if PEO_ENABLE_TOF400C
     TOF400C_Init();          /* 3x VL53L1X (EXTI0/1/2, I2C3 init implicit) */
+    TOF400C_StartRanging_Interrupt(TOF400C_FRONT);
+    TOF400C_StartRanging_Interrupt(TOF400C_LEFT);
+    TOF400C_StartRanging_Interrupt(TOF400C_RIGHT);
 #endif
 #if PEO_ENABLE_INA3221
     INA3221_Init();          /* INA3221 current monitor (I2C2, PB10=SCL/PB11=SDA) */
     INA3221_PollInit();      /* TIM7 轮询读电流电压 -> sensorhub（SENSOR_RATE_INA_HZ） */
 #endif
 #if PEO_ENABLE_MPU6050
-    MPU6050_Init();          /* MPU6050 DMP (PE3/EXTI3, start via MPU6050_Start()) */
-    MPU6050_Start();
+    if (MPU6050_Init() == 0)
+        MPU6050_Start();
+    else
+        printf("[MPU6050] init failed, not started\r\n");
 #endif
 
     /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 命令接收 */
@@ -95,6 +100,14 @@ int main(void)
 
     while (1)
     {
+        /* 独立 STOP 请求优先处理，不受普通命令队列满影响。 */
+        if (ESP_LINK_StopPending())
+        {
+            ESP_LINK_ClearStop();
+            CONTROL_StopAll();
+            SENSOR_SetCmdAck(ESP_CMD_STOP_ALL, ESP_CMD_OK);
+        }
+
         /* ── 命令消费：中断只入队，这里出队执行（自主链路）──
            命令来源：上位机（WiFi -> ESP32 -> USART2）。 */
         ESP_Cmd_t cmd;
