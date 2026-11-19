@@ -1,10 +1,10 @@
-# ESP-IDF 构建产物
+# ESP-IDF build artifacts
 build/
 
-# IDF Component Manager 下载的第三方依赖（通过 idf_component.yml + dependencies.lock 重建）
+# Third-party deps downloaded by IDF Component Manager (rebuilt from idf_component.yml + dependencies.lock)
 managed_components/
 
-# 备份与弃用文件
+# Backup and deprecated files
 sdkconfig.bak*
 sdkconfig.old
 *.bak
@@ -13,7 +13,7 @@ sdkconfig.old
 __pycache__/
 *.py[cod]
 
-# 编辑器
+# Editors
 .vscode/
 .idea/
 

@@ -1,8 +1,8 @@
 # ============================================================
-# PEO Rover (STM32F407) - Keil MDK 工程 .gitignore
+# PEO Rover (STM32F407) - Keil MDK project .gitignore
 # ============================================================
 
-# --- Keil 编译产物（Objects/Listings 每次编译重生成）---
+# --- Keil build artifacts (Objects/Listings regenerated on every build) ---
 Objects/
 Listings/
 build_cmd.log
@@ -19,21 +19,21 @@ build_cmd.log
 *.sct
 *.bak
 
-# --- Keil 用户特定文件（GUI 布局 / 工程选项，含本机路径）---
+# --- Keil user-specific files (GUI layout / project options, contain local paths) ---
 *.uvguix.*
 *.uvoptx
 
-# --- VS Code / Keil 插件日志与锁文件 ---
+# --- VS Code / Keil plugin logs and lock files ---
 .vscode/keil-assistant.log
 .vscode/uv4.log.lock
 
-# --- 第三方 SDK 下载（VL53L0X/VL53L1X API，可从官方重新下载）---
+# --- Third-party SDK downloads (VL53L0X/VL53L1X API, re-downloadable from vendor) ---
 TEMP/
 
-# --- 操作系统杂物 ---
+# --- OS junk ---
 Thumbs.db
 Desktop.ini
 
-# --- 构建日志（build.bat 每次编译重写）---
+# --- Build logs (rewritten by build.bat on every build) ---
 build_log.txt
 build_vl53.log
