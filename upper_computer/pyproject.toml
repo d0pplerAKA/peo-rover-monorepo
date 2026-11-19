@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peo-rover-sdk"
+version = "1.0.1"
+description = "PEO Rover host-side control SDK and TCP/UDP client"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+vision = ["numpy>=2.0", "opencv-python>=4.10"]
+
+[tool.setuptools]
+packages = ["peo", "rover_comm"]
+package-dir = {peo = "sdk/peo", rover_comm = "rover_comm"}
