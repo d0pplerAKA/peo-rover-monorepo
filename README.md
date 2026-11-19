@@ -1,86 +1,143 @@
-# PEO Rover — STM32F407 主控固件 / Main Controller Firmware
+# PEO Rover — STM32F407 Main Controller Firmware
 
-> **一句话定位 / One-line role**：F407 是整台无人车的「大脑」，负责一切与物理世界直接相关的动作——驱动四个麦克纳姆轮、闭环控制轮速、采集传感器数据，并把所有状态上报给上层。
->
-> The F407 is the "brain" of the rover — it drives the four mecanum wheels, closes the wheel-speed control loop, reads every sensor, and reports all state upward.
+> **One-line role**: The F407 is the "execution core" of the four-node system — it drives the four mecanum wheels, closes the wheel-speed loop, reads every sensor, and arbitrates the manual vs. autonomous control sources on board the vehicle.
 
 ---
 
-## 工程意义 / Why This Project Exists
+## 1. Project Overview
 
-**中文**：上层（上位机 / WiFi 桥 / 手柄桥）只负责「想往哪走、走多快」，真正把指令变成电机动作、把物理世界测回来的，是这块 STM32F407。它需要：
-1. 以 1 kHz 的高频稳定地闭环控制四个轮子的转速，而不是「给个电压随它跑」；
-2. 把分散的传感器（姿态、电流、测距、编码器）汇总成一致的遥测包；
-3. 在手操（Xbox 手柄）和自主（上位机脚本）两种控制源之间做仲裁，保证同一时刻只有一方能驱车。
+The F407 (STM32F407VGT6, Keil MDK + ST Standard Peripheral Library, C) handles everything that touches the physical world. It has two upstream links: USART2 to the ESP32-S3 (upper-computer commands relayed over WiFi) and USART3 directly to the ESP32-C3 (Xbox gamepad state frames). The upstream nodes only decide *how the rover should move*; this firmware turns those decisions into motor motion and measures the physical world back.
 
-**English**: The upper layers (upper computer / WiFi bridge / gamepad bridge) only decide *where to go and how fast*. This STM32F407 is what actually turns those commands into motor motion and measures the physical world back. It must:
-1. Close the speed loop on all four wheels at a steady 1 kHz — not just "apply a voltage and hope";
-2. Aggregate scattered sensors (attitude, current, distance, encoders) into one consistent telemetry packet;
-3. Arbitrate between the two control sources — manual (Xbox gamepad) and autonomous (upper-computer script) — so only one side can drive at a time.
+The firmware = `main.c` + 17 components under `COMPONENTS/`, all feature-trimmed by macro switches centralized in `sensor_hub.h`.
 
----
+## 2. Why This Project Exists
 
-## 功能与作用 / What It Does
+1. **1 kHz speed closed loop**: the four wheels are not "apply a voltage and hope" — a TIM6 1 kHz loop closes the speed loop per wheel (incremental PI + sliding-window speed measurement), which mecanum driving demands because all four wheel speeds must match precisely.
+2. **On-board arbitration**: the two control sources — manual (Xbox gamepad) and autonomous (upper-computer script) — are arbitrated on the F407 via a control lock. Only one side can drive at a time; the emergency-stop key always bypasses the lock from either source.
+3. **Sensor aggregation**: MPU6050 (attitude), INA3221×2 (current), VL53L1X×3 (distance), and quadrature encoders×4 are all read by the F407 and packed into one 50 Hz telemetry frame.
+4. **Independent safety net**: the F407 has its own deadman stop — it does not depend on the S3 or C3 staying alive; if either upstream link dies, the rover stops itself.
 
-| 功能 Function | 说明 Description |
+## 3. What It Does
+
+| Feature | Implementation |
 |---|---|
-| 四轮麦克纳姆控制 Mecanum drive | 前进/后退、原地旋转、左右平移（M1=左前 / M2=右前 / M3=左后 / M4=右后） |
-| 速度闭环 PID | 增量式 PI 控制器 + 滑动窗口测速（TIM6 1 kHz 调度） |
-| 传感器采集 | MPU6050（姿态/DMP）、INA3221（四路电流/电压）、VL53L1X（×3 测距）、正交编码器（×4） |
-| 控制源仲裁 | 手操（手柄）与自主（上位机）的锁仲裁，急停键双源越过锁 |
-| 双串口通讯 | USART2 ↔ ESP32-S3（921600）、USART3 ↔ ESP32-C3（115200） |
-| 帧协议 | SOF `0xAA 0x55` + LEN + PAYLOAD + CRC16-CCITT |
+| Mecanum drive | forward/backward + rotate + strafe (M1=front-left / M2=front-right / M3=rear-left / M4=rear-right) |
+| Speed closed loop | TIM6 1 kHz incremental PI × 4 wheels, sliding-window measurement (N=10, quantization step 1.03 cm/s) |
+| Open-loop drive | MOTOR command drives PWM per-mille directly (±1000), for encoder-less bring-up |
+| Gamepad mapping | sticks/triggers → four-wheel synthesis (deadzone 500, LB/RB side boost, B = emergency stop) |
+| Control lock | flipped by C3's Share long-press; F407 arbitrates: manual mode rejects upper-computer motion commands, lock flip stops instantly |
+| Sensor acquisition | MPU6050 (100 Hz) / INA3221×2 (10 Hz) / VL53L1X×3 (~13 Hz), off at boot, toggled by gamepad Y/X/A |
+| Telemetry | TIM14 50 Hz whole-frame upload of the 116-byte `SensorData_t` |
+| Onboard LED | boot-complete indicator + upper-computer LED commands (0x01/0x09/0x0A) |
+| Debug UART | USART1 115200 with printf redirection |
 
----
-
-## 与其它三端的联系 / Connections to the Other Three Nodes
+## 4. Connections to the Other Three Nodes
 
 ```
-                        ┌──────────────────────────────────────┐
-                        │      上位机 Upper Computer (PC)       │
-                        │   PySide6 GUI + peo SDK（组员脚本）   │
-                        └──────────────────┬───────────────────┘
-                                WiFi STA   │ TCP 8888 命令/遥测
-                                            │ TCP 8890 视频
-                        ┌──────────────────▼───────────────────┐
-                        │     ESP32-S3（WiFi 桥 Bridge）        │
-                        │  JSON↔esp_link 帧透传 + 视频 + 遥测    │
-                        └──────────────────┬───────────────────┘
-                                            │ USART2 (921600)   ← 本工程通过这条链路收命令、发遥测
-                        ┌──────────────────▼───────────────────┐
-                        │  STM32F407（主控 Main Controller）  ★ │
-                        │  电机 + 速度闭环 + 传感器 + 锁仲裁      │
-                        └──────────────────┬───────────────────┘
-                                            │ USART3 (115200)   ← 本工程通过这条链路收手柄状态
-                        ┌──────────────────▼───────────────────┐
-                        │   ESP32-C3（手柄 BLE 桥 Gamepad）     │
-                        │  NimBLE 连 Xbox → 摇杆/按键帧          │
-                        └──────────────────────────────────────┘
+                       ┌──────────────────────────────────┐
+                       │    Upper Computer (PC, Python)    │
+                       │  PySide6 GUI + peo SDK scripts    │
+                       └───────────────┬──────────────────┘
+                             WiFi STA  │ TCP 8888 cmd/telemetry
+                                        │ TCP 8890 video
+                       ┌───────────────▼──────────────────┐
+                       │   ESP32-S3 (WiFi bridge, relay)   │
+                       └───────────────┬──────────────────┘
+                                        │ USART2 921600 (esp_link frames)
+                       ┌───────────────▼──────────────────┐
+                       │  STM32F407 (controller, this) ★  │
+                       │  motors + loop + sensors + lock   │
+                       └───────────────┬──────────────────┘
+                                        │ USART3 115200 (gamepad frames 100 Hz)
+                       ┌───────────────▼──────────────────┐
+                       │   ESP32-C3 (Xbox BLE bridge)      │
+                       └───────────────┬──────────────────┘
+                                        │ BLE
+                                  Xbox gamepad
 ```
 
-- **↔ 上位机（经 S3）**：F407 收到上位机的运动/PID 命令并执行；同时把传感器快照（50 Hz）经 S3 转发给上位机。
-- **↔ ESP32-S3**：USART2 是 F407 唯一的「命令入口 + 遥测出口」，S3 是纯透传路由器。
-- **↔ ESP32-C3**：USART3 接收 Xbox 手柄的摇杆/按键状态帧（无论手柄连否 C3 都发心跳）。
-- **安全兜底**：F407 自带 deadman（失联超时停车），不依赖 S3/C3 存活。
+- **↔ ESP32-S3**: USART2 is the F407's only command input and telemetry output (50 Hz up / commands down). The S3 relays blindly.
+- **↔ ESP32-C3**: USART3 receives 100 Hz gamepad state frames (32 B, sent regardless of gamepad connection — doubles as the C3 heartbeat). Mapping and arbitration happen on the F407; the C3 sends raw values only.
+- **↔ Upper computer**: no direct link — everything goes through the S3.
+- **Safety net**: the F407 deadman-stops each link independently — S3 silent >500 ms → stop; C3 silent >500 ms → stop.
 
----
+## 5. Main Implementation
 
-## 技术栈 / Tech Stack
+### 5.1 Component structure (main.c + 17 components)
 
-- MCU：STM32F407VGT6（DevEBox 开发板）
-- 工具链：Keil MDK + ST 标准外设库（StdPeriph，非 HAL/CubeMX），C 语言
-- 调试：ST-Link（SWD）+ 外部 USB-TTL 串口 printf
+| Component | Responsibility |
+|---|---|
+| main.c | init orchestration + main loop (STOP first → command consumer → gamepad processing, 5 ms tick) |
+| CONTROL | TIM6 1 kHz wheel loop: encoder deltas → odometry → sliding-window speed → incremental PI×4 → PWM |
+| ESP_LINK | USART2 frame protocol: CRC16/DMA RX-TX/command queue/independent STOP flag/deadman/TIM14 reporting |
+| GAMEPAD | USART3 gamepad frames, lock arbitration, mecanum mapping, sensor toggles |
+| SENSOR_HUB | telemetry data hub: `SensorData_t` layout, sensor push APIs, interrupt-safe consistent snapshot |
+| MOTOR | 8 PWM channels (20 kHz) driving 4×DRV8871 IN1/IN2 |
+| ENCODER | 4 quadrature encoders (TIM1/3/4/8, TI12 ×4), 16-bit delta reads |
+| MPU6050 | eMPL DMP attitude glue (WHO_AM_I check, self-test, EXTI3 FIFO callback) |
+| INA3221 | 2×INA3221 (0x40/0x41) continuous conversion + TIM7 10 Hz polling |
+| TOF400C | 3×VL53L1X (sequential XSHUT release + re-addressing) + EXTI result reads |
+| I2C / NVIC / RCC / TIMER / DELAY / USART / BUILTIN_LED | bus, interrupt, clock, timestamp, debug console, LED infrastructure |
+| PEO_PINMAP.H | single source of board facts (clock tree/pins/timers/encoder constants/I2C addresses, 551-line macro header) |
 
-## 构建 / Build
+### 5.2 Frame protocol (esp_link)
 
-用 Keil MDK 打开 `peo_rover_f407.uvprojx` 编译，或用命令行：
+`SOF(0xAA 0x55) + LEN(1B) + PAYLOAD + CRC16(2B)`, CRC16-CCITT (poly 0x1021 / init 0xFFFF), CRC low byte first. Direction 1 (F407→S3) = 50 Hz sensor frame (triggered by TIM14, PAYLOAD = 116-byte `SensorData_t` memcpy'd whole, 121 B total on the wire); direction 2 (S3→F407) = command frame (`cmd_id(1B) + param(≤8B)`, exactly one command per frame), LEN=0 empty frame = heartbeat (only refreshes the link timestamp).
 
-```powershell
-& 'C:/Users/Danny/AppData/Local/Keil_v5/UV4/UV4.exe' -b peo_rover_f407.uvprojx -j0 -o build_log.txt
-```
+Command set (0x02 deprecated):
 
-引脚映射与定时器分配见 `PEO_ROVER_F407_PinMap.md`。
+| ID | Command | Behavior |
+|---|---|---|
+| 0x01 | LED_TOGGLE | toggle onboard LED |
+| 0x03 | MOTOR | open-loop PWM per-mille; switches to open-loop mode when CONTROL exists |
+| 0x04 | PID | kp/ki (float), validated finite & ≥0, shared by all four wheels |
+| 0x05 | MOTOR_CLOSED | closed-loop target speed (0.01 cm/s, clamped ±4424), switches to closed-loop mode |
+| 0x06 | STOP_ALL | **bypasses the queue** — independent flag handled first by the main loop |
+| 0x07 | ODOMETER_RESET | zero all four odometers |
+| 0x08 | SYS_RESET | spins 200000 cycles to flush UART, then soft reset |
+| 0x09/0x0A | LED_ON/LED_OFF | absolute LED state |
 
----
+### 5.3 Speed closed loop (CONTROL)
 
-Copyright (c) 2026 Danny — MIT License
+- TIM6: PSC=83 → 1 MHz, ARR=999 → **1 kHz** (highest NVIC preemption priority).
+- Incremental PI: `u[n]=u[n-1]+Kp·(e[n]-e[n-1])+Ki·e[n]`, u clamped to ±1000 (output clamping = built-in anti-windup); defaults Kp=0.25 / Ki=0.005.
+- Speed measurement: sliding window N=10 (`PEO_CTRL_SPEED_WINDOW_TICKS`), `speed = sum×1031/N`, quantization step 1.03 cm/s.
+- Units: 0.01 cm/s, max speed 4424 (≈44.24 cm/s); encoders 11 PPR × 4 (quadrature) × 45:1 gearbox = 1980 CPR.
+
+### 5.4 Gamepad mapping and lock arbitration (GAMEPAD)
+
+- Frame: 100 Hz, 32 B from the C3 (26 B body: seq/disc_gen/connected/battery/input_fresh/sticks×4/triggers×2/button bitmap/lock).
+- Mapping: `throttle=map_axis(joy_ly)`, `steer=map_axis(joy_rx)`, `strafe=GAMEPAD_STRAFE_SIGN×(map_trigger(rt)−map_trigger(lt))`; mecanum synthesis `m1=t+s, m2=t+steer−s, m3=t−s, m4=t+steer+s`; deadzone ±500; LB/RB side boost +2212 (half speed).
+- Buttons: B = emergency stop (**always bypasses the lock from either source**), Y/X/A = VL53 / INA3221 / MPU6050 toggles (rising edge, manual mode only).
+- Lock: flipped by C3's Share long-press, reported in the frame's `lock` field; the F407 arbitrates — manual mode rejects upper-computer MOTOR/PID/MOTOR_CLOSED (returns INVALID), lock flip stops instantly, autonomous mode skips gamepad mapping.
+
+### 5.5 Sensors
+
+| Sensor | Bus/Address | Rate | Start/stop |
+|---|---|---|---|
+| MPU6050 | I2C1 (PB6/PB7), 0x68 | 100 Hz (EXTI3 FIFO) | A-key toggle |
+| INA3221×2 | I2C2 (PB10/PB11), 0x40+0x41 | 10 Hz (TIM7) | X-key toggle |
+| VL53L1X×3 | I2C3 (PA8/PC9), 0x52/0x54/0x56 | ~13 Hz each (EXTI0/1/2) | Y-key toggle |
+
+All sensors are **init-only at boot and off by default**; the gamepad keys turn them on. Data converges in SENSOR_HUB and is uploaded as one 50 Hz frame.
+
+## 6. What Each Feature Affects and Constrains
+
+- **Macro matrix** (`sensor_hub.h`): `MOTOR=1 / CONTROL=0 / ENCODER=CONTROL / TOF=1 / INA=1 / MPU=1`. The current default is the **open-loop configuration** — with `CONTROL=0`: encoders are not initialized (ENCODER auto-follows), `MOTOR_CLOSED` is rejected at compile time, and both the upper-computer MOTOR command and the gamepad fall back to `MOTOR_SetSpeed` direct drive (no speed feedback). Switching open/closed loop only requires the MOTOR+CONTROL macros; ENCODER follows automatically.
+- **Closed-loop dependencies**: the speed loop needs MOTOR + CONTROL + ENCODER all enabled; the `MOTOR` command switches to open-loop mode and `MOTOR_CLOSED` switches back — modes are toggled live by commands.
+- **Lock arbitration constraints**: in manual mode the upper computer cannot move the rover (only STOP/LED/reset); the lock flip forces a stop to avoid a speed jump across the handover.
+- **Sensor toggles are manual-mode-only**: autonomous mode skips toggle logic; all off at boot.
+- **The stop path coasts, it does not brake**: `CONTROL_StopAll()` → `MOTOR_Coast` (IN1=IN2=0); every emergency path (STOP_ALL / gamepad B / link loss) coasts. Same in the open-loop configuration.
+- **Dual deadman links**: S3 silent (>500 ms without a valid frame, including the 200 ms empty-frame heartbeat) → stop; C3 silent (>500 ms without a frame, or connected=0/input_fresh=0) → stop — the F407 never depends on upstream being alive.
+- **PID is shared across all four wheels**: one Kp/Ki pair controls all wheels; per-wheel gains are not supported.
+- **DRV8871 has no nFAULT routed**: stall/over-current is inferred indirectly from INA3221 current monitoring.
+
+## 7. Tech Stack & Build
+
+- MCU: STM32F407VGT6 (DevEBox board); Keil MDK + ST Standard Peripheral Library (StdPeriph), C.
+- Debug: ST-Link (SWD) + USART1 printf.
+- Build: open `peo_rover_f407.uvprojx` in Keil MDK; CLI: `UV4.exe -b peo_rover_f407.uvprojx -j0`.
+
+## 8. License
+
+Copyright (c) 2026 Danny — MIT License (see `LICENSE`).
