@@ -4,19 +4,41 @@
 #include <stdint.h>
 
 /**
- * @file    camera_service.h
- * @brief   PEO Rover - OV2640 摄像头服务：抓帧 -> JPEG -> esp_net TCP 视频流
+ * @file  camera_service.h
+ * @brief OV2640 camera service: capture -> JPEG -> esp_net TCP video stream.
  *
- * camera_task（优先级 3）：按 PEO_PINMAP.h 的 PEO_PM_CAM_* 引脚初始化
- * esp32-camera，循环抓 JPEG 帧交 esp_net_send_video() 定界发送（TCP 8890）。
- * 初始化/回退失败：清理驱动后待命，新分辨率请求可触发自愈；任务不退出。
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * camera_task (priority 3) initializes esp32-camera using the PEO_PM_CAM_*
+ * pins from PEO_PINMAP.h, then loops capturing JPEG frames and hands each to
+ * esp_net_send_video() for framed delivery over TCP 8890.
+ *
+ * If init or rollback fails, the driver is cleaned up and the task stays on
+ * standby; a new resolution request can trigger self-healing. The task never
+ * exits.
  */
 
 void camera_task(void *arg);
 
-/* ---- 分辨率热切换（配合上位机 {"cmd":"CAM_RES","res":"QVGA"}，PROTOCOL §2）---- */
-bool camera_queues_init(void);                                    /* 任务创建前调用；分辨率队列创建失败返回 false */
-bool camera_resolution_from_name(const char *name, uint8_t *out); /* "QQVGA"/"QVGA"/"VGA"/"SVGA" -> framesize_t */
-bool camera_request_resolution(uint8_t framesize);                /* 队列不存在返回 false；活动/待命均可入队（1深覆盖） */
+/* ---- Resolution hot-swap (paired with {"cmd":"CAM_RES","res":"QVGA"}, PROTOCOL section 2) ---- */
+
+/** @brief  Create the camera queues. Call before camera_task is created.
+ *  @retval false if the resolution queue could not be created (camera then stays disabled). */
+bool camera_queues_init(void);
+
+/** @brief  Map a name to a framesize_t.
+ *  @param name  "QQVGA" / "QVGA" / "VGA" / "SVGA".
+ *  @param out   Receives the matching framesize_t.
+ *  @retval true  if the name is valid and out was written;
+ *  @retval false otherwise. */
+bool camera_resolution_from_name(const char *name, uint8_t *out);
+
+/** @brief  Request a new resolution (1-deep overwrite queue keeps only the latest).
+ *  @retval false if the queue does not exist; the request is accepted in both the
+ *          active and standby states. */
+bool camera_request_resolution(uint8_t framesize);
 
 #endif /* __CAMERA_SERVICE_H__ */

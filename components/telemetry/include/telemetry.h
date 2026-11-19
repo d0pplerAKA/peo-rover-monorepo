@@ -2,15 +2,25 @@
 #define __TELEMETRY_H__
 
 /**
- * @file    telemetry.h
- * @brief   PEO Rover - 遥测合并：传感器帧 -> 20Hz JSON 广播
+ * @file  telemetry.h
+ * @brief Telemetry merge: sensor frames -> 20 Hz JSON broadcast to the upper computer.
  *
- * telemetry_task（优先级 4）：每 50ms 固定节拍 peek esp_link_sensor_queue
- * （不移除队列元素，不由 UART 帧到达驱动），合并成 JSON（PROTOCOL.md §2.1 格式）
- * 经 esp_net_publish_telemetry 转交最新值邮箱，由网络任务广播给上位机。
- * 无传感器快照或接收过期时标记 link_stale；
- * JSON 构建期间 generation 变化则丢弃本帧，ACK 由独立队列优先发送。
- * （gamepad / macro 字段已于 2026-11-15 随组件废弃删除。）
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * telemetry_task (priority 4) wakes every 50 ms (fixed cadence, 20 Hz) and
+ * peeks the latest esp_link sensor snapshot (peek does NOT remove the element
+ * and is not driven by UART frame arrival). It merges the snapshot into one
+ * JSON object (PROTOCOL.md section 2.1 format) and hands it to the network
+ * task via esp_net_publish_telemetry, which broadcasts it to the client.
+ *
+ * - No snapshot, or a snapshot that is too old, is flagged with "link_stale".
+ * - If the safety generation changes while the JSON is being built, this frame
+ *   is dropped (it would mix two safety epochs); ACKs travel on their own queue.
+ * - The old gamepad / macro fields were removed together with those components
+ *   on 2026-11-15.
  */
 
 void telemetry_task(void *arg);

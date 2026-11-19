@@ -1,7 +1,12 @@
-"""Exercise production command parsing, LED setup and frame handoff on the host.
+"""review_regressions_host - Exercise production command parsing, LED setup and frame handoff on the host.
 
-Hardware/RTOS adapters do not simulate camera DMA or actual RMT waveforms.
-Requires GCC C++17 or MSVC C++20 (CXX), and the project's managed cJSON source.
+Compiles the real cmd_parser / ws2812_led / camera_service sources against
+host stubs and checks their behaviour. Hardware/RTOS adapters do not simulate
+camera DMA or actual RMT waveforms. Requires GCC C++17 or MSVC C++20 (CXX)
+and the project's managed cJSON source.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import os
 from pathlib import Path

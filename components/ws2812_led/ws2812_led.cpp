@@ -1,3 +1,11 @@
+/**
+ * @file  ws2812_led.cpp
+ * @brief Single WS2812 status LED task: RMT TX direct drive + manual color control.
+ *
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
 #include "ws2812_led.h"
 #include "PEO_PINMAP.h"
 #include "esp_net.h"
@@ -13,22 +21,26 @@
 
 static const char *TAG = "ws2812";
 
-/* 状态灯配色（可按喜好改）：
-   呼吸 = 蓝色（未连上热点），常亮 = 绿色（已连上），闪光 = 绿色快闪 3 次 */
+/* Status LED colors (change these to taste):
+ *   breathing = blue  (not connected to the hotspot),
+ *   steady    = green (connected),
+ *   flash     = green, flashed 3 times on the connect edge. */
 #define WS2812_BREATH_R   0
 #define WS2812_BREATH_G   100
 #define WS2812_BREATH_B   255
 #define WS2812_STEADY_R   0
 #define WS2812_STEADY_G   255
 #define WS2812_STEADY_B   0
-#define WS2812_TICK_MS    50      /* 状态机节拍：50ms */
-#define WS2812_FLASH_MS   150     /* 连接闪光亮/灭各 150ms */
+#define WS2812_TICK_MS    50      /* State-machine tick: 50 ms between LED updates. */
+#define WS2812_FLASH_MS   150     /* Connect flash: 150 ms on, 150 ms off, per blink. */
 
-/* 1 深 latest-wins：灯只关心最终颜色，旧命令被最新命令覆盖 */
+/* 1-deep latest-wins queue: the LED only cares about the final color, so a new
+ * command overwrites an older one that has not been consumed yet. */
 static QueueHandle_t s_cmd_queue = NULL;
 static rmt_channel_handle_t s_tx_chan = NULL;
 static rmt_encoder_handle_t s_encoder = NULL;
 
+/** @brief  Create the command queue (called once by app_main, before the task). */
 void ws2812_queues_init(void)
 {
     if (!s_cmd_queue)
@@ -37,13 +49,21 @@ void ws2812_queues_init(void)
         ESP_LOGE(TAG, "cmd queue create failed");
 }
 
-/* 亮度 0-100% → 0-255 比例缩放 */
+/** @brief  Scale a color channel by a brightness percentage (0-100 -> 0-255).
+ *  @param v          Color channel value, 0-255.
+ *  @param brightness Brightness percent, 0-100.
+ *  @retval Scaled channel value, 0-255. */
 static inline uint8_t scale(uint8_t v, uint8_t brightness)
 {
     return (uint8_t)(((uint16_t)v * (uint16_t)brightness) / 100u);
 }
 
-/* 发送一次（GRB 顺序 + 亮度缩放）。帧间低电平间隔由调用方节拍保证（>50us RESET）。 */
+/** @brief  Send one GRB frame to the LED (GRB order + brightness scaling).
+ *  @param r, g, b    Raw color channels, 0-255.
+ *  @param brightness Brightness percent, 0-100.
+ *  @retval none
+ *  The low-level gap between frames (the >50 us RESET pause) is guaranteed by the
+ *  caller's tick cadence, not by this function. */
 static void led_show(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
 {
     uint8_t grb[3] = {
@@ -51,26 +71,30 @@ static void led_show(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
         scale(r, brightness),
         scale(b, brightness),
     };
-    rmt_transmit_config_t tx = {0};   /* loop_count=0：发送一次 */
+    rmt_transmit_config_t tx = {0};   /* loop_count = 0: send exactly once. */
     if (rmt_transmit(s_tx_chan, s_encoder, grb, sizeof(grb), &tx) == ESP_OK)
         rmt_tx_wait_all_done(s_tx_chan, pdMS_TO_TICKS(10));
 }
 
-/* RMT TX：10MHz 分辨率（1 tick = 100ns）。WS2812 标准时序（GRB，800kHz）：
-   T0H 0.4us / T0L 0.9us，T1H 0.8us / T1L 0.5us，均落 ±150ns 容差内。 */
+/** @brief  Set up the RMT TX channel and byte encoder for WS2812 timing.
+ *  @retval true on success; false if any RMT resource could not be created.
+ *
+ *  RMT runs at 10 MHz resolution (1 tick = 100 ns). WS2812 standard timing
+ *  (GRB order, 800 kHz): T0H 0.4 us / T0L 0.9 us, T1H 0.8 us / T1L 0.5 us —
+ *  all inside the +-150 ns tolerance of the chip. */
 static bool rmt_init(void)
 {
     rmt_tx_channel_config_t ch = {
         .gpio_num = PEO_PM_WS2812_GPIO,
-        .clk_src = RMT_CLK_SRC_DEFAULT,      /* 80MHz APB */
+        .clk_src = RMT_CLK_SRC_DEFAULT,      /* 80 MHz APB clock. */
         .resolution_hz = 10000000,
-        .mem_block_symbols = 64,             /* 1 颗 WS2812 = 24 bit = 24 RMT symbols */
+        .mem_block_symbols = 64,             /* 1 WS2812 = 24 bits = 24 RMT symbols. */
         .trans_queue_depth = 1,
     };
     rmt_bytes_encoder_config_t enc = {
         .bit0 = { .duration0 = 4, .level0 = 1, .duration1 = 9, .level1 = 0 },
         .bit1 = { .duration0 = 8, .level0 = 1, .duration1 = 5, .level1 = 0 },
-        .flags = { .msb_first = 1 },          /* WS2812: G7..G0, R7..R0, B7..B0 */
+        .flags = { .msb_first = 1 },          /* WS2812 sends G7..G0, R7..R0, B7..B0. */
     };
     if (rmt_new_tx_channel(&ch, &s_tx_chan) != ESP_OK)
         return false;
@@ -85,6 +109,9 @@ static bool rmt_init(void)
     return true;
 }
 
+/** @brief  LED maintenance task: wait for commands, drive the breathing/steady/flash states.
+ *  @param arg  Unused.
+ *  @retval none (never returns; it deletes itself only on a fatal init failure). */
 void ws2812_task(void *arg)
 {
     (void)arg;
@@ -109,26 +136,26 @@ void ws2812_task(void *arg)
     }
     ESP_LOGI(TAG, "task up (RMT GPIO%u, status LED)", (unsigned)PEO_PM_WS2812_GPIO);
 
-    /* 呼吸正弦亮度表：32 步 × 50ms = 1.6s 一个周期 */
+    /* Breathing sine brightness table: 32 steps x 50 ms = 1.6 s per cycle. */
     static uint8_t breath_lut[32];
     for (int i = 0; i < 32; i++)
         breath_lut[i] = (uint8_t)(((sinf((float)i * 2.0f * (float)M_PI / 32.0f) + 1.0f) / 2.0f) * 100.0f);
 
-    bool sta = false;
-    uint8_t breath_i = 0;
-    ws2812_cmd_t manual = {0};
-    bool has_manual = false;
+    bool sta = false;              /* Previous STA (hotspot-connected) state. */
+    uint8_t breath_i = 0;          /* Index into the breathing table. */
+    ws2812_cmd_t manual = {0};     /* Last manual color requested. */
+    bool has_manual = false;       /* true = a manual color overrides the status color. */
 
     for (;;)
     {
-        /* 50ms 节拍：STA 位有变化立刻醒，否则到点醒 */
+        /* 50 ms tick: wake immediately if the STA bit changes, otherwise at timeout. */
         xEventGroupWaitBits(eg, PEO_NET_EVT_STA, pdFALSE, pdFALSE,
                             pdMS_TO_TICKS(WS2812_TICK_MS));
         bool sta_now = (xEventGroupGetBits(eg) & PEO_NET_EVT_STA) != 0;
 
         if (sta_now && !sta)
         {
-            /* 连接沿：绿色快闪 3 次 → 常亮 */
+            /* Connect edge: green flash 3 times, then steady green. */
             ESP_LOGI(TAG, "hotspot connected; flash then steady");
             for (int k = 0; k < 3; k++)
             {
@@ -142,11 +169,12 @@ void ws2812_task(void *arg)
         else if (!sta_now && sta)
         {
             ESP_LOGI(TAG, "hotspot lost; back to breathing");
-            has_manual = false;   /* 断连回呼吸：放弃手动颜色 */
+            has_manual = false;   /* Disconnect -> breathing: give up the manual color. */
         }
         sta = sta_now;
 
-        /* 手动命令（仅连接后由上位机发）：latest-wins 覆盖，直到连接状态变化 */
+        /* Manual command (sent by the upper computer once connected): latest-wins
+         * override, kept until the connection state changes. */
         ws2812_cmd_t cmd;
         if (xQueueReceive(s_cmd_queue, &cmd, 0) == pdTRUE)
         {
@@ -169,6 +197,12 @@ void ws2812_task(void *arg)
     }
 }
 
+/** @brief  The only entry point other components may use.
+ *  @param r, g, b    Color channels, 0-255.
+ *  @param brightness Brightness percent, 0-100 (clamped to 100).
+ *  @retval false if the component is not initialized; true means the command was queued.
+ *  Uses a 1-deep queue + overwrite: when full, the newest value replaces the
+ *  pending one, so the caller never blocks. */
 bool ws2812_set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
 {
     if (!s_cmd_queue)
@@ -177,6 +211,5 @@ bool ws2812_set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness)
         .r = r, .g = g, .b = b,
         .brightness = (uint8_t)(brightness > 100 ? 100 : brightness),
     };
-    /* 1 深队列 + overwrite：满时覆盖为最新值，调用方永不阻塞 */
     return xQueueOverwrite(s_cmd_queue, &cmd) == pdTRUE;
 }

@@ -1,5 +1,11 @@
-"""Compile the actual camera allocation/cache functions with host adapters.
-This checks ownership of cache-line ranges, NOT physical ESP32 DMA operation.
+"""camera_dma_alignment_host - Compile production camera cache/DMA helpers with host stubs.
+
+Compiles the real allocation/cache functions from esp32-camera against host
+adapters and checks ownership of cache-line ranges. This verifies CACHE
+behaviour only — it does NOT exercise physical ESP32 DMA operation.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import os
 import shlex

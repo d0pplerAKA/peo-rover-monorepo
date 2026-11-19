@@ -1,5 +1,11 @@
-"""Validate the built firmware, not just a successful build command.
-Run with the ESP-IDF Python environment.
+"""verify_firmware - Validate the built firmware, not just a successful build command.
+
+Run with the ESP-IDF Python environment. Checks sdkconfig and the effective
+Kconfig output for the expected target / flash / PSRAM settings, and prints
+the ELF SHA-256.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 from pathlib import Path
 import hashlib

@@ -2,15 +2,26 @@
 #define __CMD_PARSER_H__
 
 /**
- * @file    cmd_parser.h
- * @brief   PEO Rover - 上位机命令解析（TCP JSON -> esp_link 命令帧）
+ * @file  cmd_parser.h
+ * @brief Upper-computer command parser: turns TCP JSON lines into esp_link command frames.
  *
- * cmd_parser_task（优先级 4）：阻塞等 esp_net_rx_queue 的 JSON 行，
- * 解析 {"cmd": 名字, 参数...} -> 编码 cmd_id+param -> esp_link 命令队列；
- * 成功提交后回发 ACK {"ack":名字,"status":0} 到 esp_net_ack_queue，由网络任务优先广播。
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * cmd_parser_task (priority 4) blocks waiting for JSON lines from
+ * esp_net_rx_queue. For each line it:
+ *   1. parses {"cmd": name, ...params...},
+ *   2. encodes it into a cmd_id + parameter bytes,
+ *   3. pushes that into the esp_link command queue.
+ * On success it sends back an ACK {"ack": name, "status": 0} through the
+ * esp_net ACK queue, which the network task broadcasts with priority.
  *
- * 本地命令：CAM_RES、VIDEO_ON/OFF、WS2812；无本地宏引擎。
- * STOP_ALL/单向安全心跳豁免本地陈旧代次过滤；心跳仅续期，不回包。
+ * Local commands (handled on the ESP32-S3, never forwarded to the F407):
+ * CAM_RES, VIDEO_ON/OFF, WS2812. There is no local macro engine anymore.
+ * STOP_ALL and the one-way safety heartbeat are exempt from stale-generation
+ * filtering; the heartbeat only renews the connection, it never replies.
  */
 
 void cmd_parser_task(void *arg);

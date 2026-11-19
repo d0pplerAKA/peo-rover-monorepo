@@ -1,12 +1,19 @@
 /**
- * @file    esp_net.cpp
- * @brief   PEO Rover - WiFi STA + TCP 8888 命令/遥测 + TCP 8890 视频流
+ * @file  esp_net.cpp
+ * @brief WiFi STA + TCP 8888 command/telemetry + TCP 8890 video stream implementation.
  *
- * 单任务（select 多路复用）管理：
- *   - AP 启动（esp_netif + esp_wifi）
- *   - TCP 监听 + <=4 客户端（每客户端独立行缓冲）
- *   - JSON 行 RX -> rx_queue；ACK 优先于遥测广播；断连 -> STOP_ALL
- *   - camera 任务零拷贝入队，TCP 定界（8B 头+JPEG）发送与帧归还由本任务完成
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * A single task (select() multiplexing) manages everything network-related:
+ *   - STA setup (esp_netif + esp_wifi), connecting to the laptop hotspot;
+ *   - TCP listen + one client (each client has its own line buffer);
+ *   - JSON line RX -> rx_queue; ACK broadcast with priority over telemetry;
+ *     disconnect -> STOP_ALL;
+ *   - the camera task enqueues frames zero-copy; this task does the TCP framing
+ *     (8-byte header + JPEG) send and the frame return.
  */
 
 #ifndef PEO_NET_USE_EVENTFD
@@ -79,8 +86,8 @@ static void init_net_wake(void)
         ESP_LOGE(TAG, "eventfd create failed: %d; using legacy polling", errno);
         return;
     }
-    /* VFS fd 全局唯一分配（socket 也走 VFS），不存在与 lwip socket 撞号区；
-       唯一硬约束是 select 位图上限。 */
+    /* VFS fds are globally unique (sockets also use the VFS), so there is no
+       overlap with lwip socket numbers; the only hard limit is the select bitmap. */
     if (fd >= FD_SETSIZE)
     {
         ESP_LOGE(TAG, "eventfd fd=%d exceeds FD_SETSIZE=%d; using legacy polling", fd, FD_SETSIZE);
@@ -130,7 +137,7 @@ static portMUX_TYPE s_rx_budget_lock = portMUX_INITIALIZER_UNLOCKED;
 bool esp_net_rx_reserve(uint32_t bytes)
 {
     portENTER_CRITICAL(&s_rx_budget_lock);
-    /* 用剩余额度比较，避免 bytes 很大时相加发生整数回绕。 */
+    /* Compare against remaining budget so a very large bytes cannot overflow the sum. */
     const bool allowed = bytes <= PEO_NET_RX_BUDGET_BYTES - s_rx_budget;
     if (allowed) s_rx_budget += bytes;
     portEXIT_CRITICAL(&s_rx_budget_lock);
@@ -144,12 +151,13 @@ void esp_net_rx_release(uint32_t bytes)
     portEXIT_CRITICAL(&s_rx_budget_lock);
 }
 
-/* 网络任务监督，解析器跨核续期；仅保存本地活动信息，不改变 JSON。 */
+/* Network-task supervision, renewed cross-core by the parser; stores only local
+   activity info and never alters the JSON. */
 static struct {
     uint32_t last_cmd_ms;
     bool has_commanded;
-    bool stop_latched;          /* 同一次活动超时只触发一次 STOP */
-    int fd = -1;                /* 网络任务维护连接镜像，供跨核查询；空槽必须为 -1 */
+    bool stop_latched;          /* One activity timeout latches STOP only once. */
+    int fd = -1;                /* Network task keeps a connection mirror for cross-core queries; an empty slot must be -1. */
 } s_client_activity[PEO_NET_MAX_CLIENTS];
 static portMUX_TYPE s_activity_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -173,32 +181,32 @@ bool esp_net_has_client(void)
     return have_client;
 }
 
-static EventGroupHandle_t s_conn_eg = NULL; /* CLIENT/VIDEO 事件组（camera/telemetry 门控） */
+static EventGroupHandle_t s_conn_eg = NULL; /* CLIENT/VIDEO event group (camera/telemetry gating). */
 
 EventGroupHandle_t esp_net_conn_event(void)
 {
     return s_conn_eg;
 }
 
-static int s_video_listen_fd = -1;   /* TCP 视频监听 socket（8890） */
-static int s_video_fd       = -1;    /* 已接受的视频客户端 */
+static int s_video_listen_fd = -1;   /* TCP video listen socket (8890). */
+static int s_video_fd       = -1;    /* Accepted video client. */
 static portMUX_TYPE s_video_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_video_enabled = false;
-static uint16_t s_frame_id = 0;     /* 仅 esp_net 任务发送时更新 */
+static uint16_t s_frame_id = 0;     /* Updated only when the esp_net task sends. */
 struct video_frame_t {
     const uint8_t *buf;
     size_t len;
-    camera_fb_t *owner;        /* fb_return 要求原始描述符，不能传图像数据地址 */
+    camera_fb_t *owner;        /* fb_return needs the original descriptor, never the image data address. */
 };
-static video_frame_t s_video_pending = {};   /* 1 深，覆盖时归还旧帧 */
-static camera_fb_t *s_video_producer_frame = NULL; /* 暂存登记，入队成功前仍属 camera */
+static video_frame_t s_video_pending = {};   /* 1-deep; returns the old frame when overwritten. */
+static camera_fb_t *s_video_producer_frame = NULL; /* Staged registration; still owned by camera until enqueue succeeds. */
 static SemaphoreHandle_t s_video_queue_mutex = NULL;
-static SemaphoreHandle_t s_video_send_mutex = NULL; /* flush 等待发送中帧归还后才能 deinit */
+static SemaphoreHandle_t s_video_send_mutex = NULL; /* flush waits for the in-flight frame to be returned before deinit. */
 static TaskHandle_t s_net_task = NULL;
 static const uint32_t VIDEO_NOTIFY_BIT = 1u;
 
 /* ============================================================================
-   1. WiFi STA 初始化（笔记本热点，2026-11-16 用户定案）
+   1. WiFi STA init (laptop hotspot, user decision 2026-11-16)
    ============================================================================ */
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -214,11 +222,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     }
     else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED)
     {
-        esp_link_request_stop();   /* WiFi 断开 = 失联，立即锁 STOP（用户拍板 2026-11-17） */
+        esp_link_request_stop();   /* WiFi down = link lost: latch STOP immediately (user decision 2026-11-17). */
         ESP_LOGW(TAG, "wifi sta: disconnected; reconnecting...");
         if (s_conn_eg)
             xEventGroupClearBits(s_conn_eg, PEO_NET_EVT_STA);
-        esp_wifi_connect();   /* 自动重连：每次断连事件触发一次连接尝试（失败会再次触发本事件，天然节流） */
+        esp_wifi_connect();   /* Auto-reconnect: each disconnect event triggers one connect attempt
+                                (a failure re-fires this event, naturally throttling). */
     }
     else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP)
     {
@@ -228,8 +237,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     }
 }
 
-/* STA 模式：吞吐/稳定性优于 softAP（官方实测），笔记本射频前端更强；
-   自动重连 + 省电关闭（遥控实时性优先）+ mDNS 解析（热点 DHCP 地址可变）。 */
+/* STA mode: better throughput/stability than softAP (per Espressif measurements),
+   and the laptop has a stronger RF front end; auto-reconnect + power-save off
+   (remote-control latency first) + mDNS (the hotspot DHCP address can change). */
 static void wifi_init_sta(void)
 {
     esp_netif_create_default_wifi_sta();
@@ -254,7 +264,7 @@ static void wifi_init_sta(void)
     esp_wifi_set_ps(WIFI_PS_NONE);
     ESP_ERROR_CHECK(esp_wifi_connect());
 
-    /* mDNS：上位机按 peo_rover.local 连接，不依赖 DHCP 分配的 IP */
+    /* mDNS: the upper computer connects via peo_rover.local, independent of the DHCP-assigned IP. */
     if (mdns_init() == ESP_OK)
     {
         mdns_hostname_set(PEO_NET_MDNS_HOSTNAME);
@@ -275,7 +285,7 @@ static void post_disconnect(void)
 }
 
 /* ============================================================================
-   3. TCP 视频入队与发送（camera 单生产者，esp_net 单消费者）
+   3. TCP video enqueue and send (camera single producer, esp_net single consumer)
    ============================================================================ */
 void esp_net_video_set_enabled(bool enabled)
 {
@@ -320,56 +330,63 @@ bool esp_net_send_video(const uint8_t *jpeg, uint32_t len)
     if (!available || !s_net_task || !owner || owner->buf != jpeg ||
         !jpeg || len == 0 || len > owner->len || len > 256U * 1024U) {
         xSemaphoreGive(s_video_queue_mutex);
-        return false;  /* 未接管当前帧，由调用方归还 */
+        return false;  /* Did not take over this frame; the caller returns it. */
     }
     if (s_video_pending.owner) esp_camera_fb_return(s_video_pending.owner);
     s_video_pending = {jpeg, len, owner};
-    /* 入队与通知在同一互斥区内完成；消费者始终以队列内容为准。 */
+    /* Enqueue and notify happen in the same critical section; the consumer always trusts the queue contents. */
     xTaskNotify(s_net_task, VIDEO_NOTIFY_BIT, eSetBits);
     xSemaphoreGive(s_video_queue_mutex);
     esp_net_wake();
     return true;
 }
 
-/* 视频拥塞冷却：send 返回 EAGAIN 说明发送缓冲满（空口/对端消化不过来），
-   在飞帧必须发完（TCP 定界不可中断），但冷却期内不启新帧——1 深队列
-   本就只发最新帧，让链路排水；冷却结束再启新帧，成功即恢复流。
-   15fps 下 50ms 冷却约影响 1 帧（取决于入队相位）；只挡新帧，在飞帧继续按预算推进。 */
+/* Video congestion cooldown: EAGAIN from send means the send buffer is full
+   (air interface / peer cannot keep up). An in-flight frame must still be fully
+   sent (TCP framing cannot be interrupted), but no NEW frame starts during the
+   cooldown — the 1-deep queue only sends the latest frame anyway, so the link
+   drains; once cooldown ends a new frame starts and a success resumes the stream.
+   At 15 fps a 50 ms cooldown costs about 1 frame (depending on enqueue phase);
+   it only blocks new frames, the in-flight frame keeps advancing within budget. */
 #define VIDEO_COOLDOWN_US 50000
-#define VIDEO_PUMP_MAX_SENDS 3   /* 每轮 pump 的 send 调用预算，头部和 JPEG 体共用 */
+#define VIDEO_PUMP_MAX_SENDS 3   /* Per-round send-call budget for pump; the header and JPEG body share it. */
 #ifndef VIDEO_PUMP_MAX_BYTES
 #define VIDEO_PUMP_MAX_BYTES 8192
 #endif
 static_assert(VIDEO_PUMP_MAX_BYTES > 0, "video byte budget must be positive");
 
-static int64_t s_video_cool_until_us = 0;   /* 冷却截止时刻（见 VIDEO_COOLDOWN_US） */
-static uint32_t s_tx_fail_cnt = 0;          /* 视频 send 失败累计（诊断；断连全量复位） */
+static int64_t s_video_cool_until_us = 0;   /* Cooldown deadline (see VIDEO_COOLDOWN_US). */
+static uint32_t s_tx_fail_cnt = 0;          /* Cumulative video send failures (diagnostic; reset on disconnect). */
 static int s_last_errno = 0;
 
-/* TCP 视频在飞帧：TCP 字节流一旦开始发就必须发完（否则对端定界错乱）。
-   分帧 = 8B 头（magic+fid+len 大端）+ JPEG 体；每轮 select 循环按预算推进，
-   非阻塞 send，绝不阻塞主任务（命令/遥测通道保持响应）。 */
+/* TCP video in-flight frame: once a TCP byte stream starts it must be fully
+   sent (otherwise the peer's framing desynchronizes). Framing = 8-byte header
+   (magic+fid+len, big-endian) + JPEG body; each select round advances within
+   budget using non-blocking send, never blocking the main task (the command /
+   telemetry channels stay responsive). */
 struct video_inflight_t {
     camera_fb_t *owner;
     const uint8_t *buf;
     size_t len, off;
-    uint8_t hdr[8];            /* magic(2)+fid(2)+len(4) 大端 */
+    uint8_t hdr[8];            /* magic(2)+fid(2)+len(4), big-endian. */
     size_t hdr_off;
     bool hdr_done;
 };
-/* 发送诊断（Codex 审查 R-1：先让断连根因可区分）——
-   视频/遥测各自的 EAGAIN 次数、观察到的最大积压；drop_client 时打印现场。
-   ⚠️ 必须在 pump_video/flush_tx 使用之前定义（pump_video 位于本文件前段）。 */
+/* Send diagnostics (Codex review R-1: make disconnect root causes distinguishable) —
+   per-channel (video/telemetry) EAGAIN counts and the largest observed backlog;
+   drop_client prints the scene. Defined before pump_video/flush_tx use them
+   (pump_video appears earlier in this file). */
 static uint32_t s_video_eagain_cnt = 0;
 static uint32_t s_telemetry_eagain_cnt = 0;
 static size_t   s_max_tx_pending = 0;
 
-/* 周期统计窗口（1s 打印后清零；EAGAIN 计数保持累计供 diag 用）——
-   camera 侧统计已整体移除，视频/遥测的发送信息统一在此（网络应用层）统计。 */
-static uint32_t s_stat_v_frames = 0;   /* 本窗口发送完成帧数 */
-static uint64_t s_stat_v_bytes  = 0;   /* 本窗口视频字节 */
-static uint64_t s_stat_t_bytes  = 0;   /* 本窗口命令/遥测字节 */
-static uint32_t s_stat_eagain_v_snap = 0;  /* EAGAIN 累计快照：窗口做差 = 本窗口新增 */
+/* Periodic stats window (1 s, printed then zeroed; the EAGAIN counters stay
+   cumulative for diagnostics) — camera-side stats were removed entirely, so the
+   video/telemetry send info is now collected here (network application layer). */
+static uint32_t s_stat_v_frames = 0;   /* Frames fully sent in this window. */
+static uint64_t s_stat_v_bytes  = 0;   /* Video bytes in this window. */
+static uint64_t s_stat_t_bytes  = 0;   /* Command/telemetry bytes in this window. */
+static uint32_t s_stat_eagain_v_snap = 0;  /* EAGAIN cumulative snapshot: window delta = new this window. */
 static uint32_t s_stat_eagain_t_snap = 0;
 static int64_t  s_stat_last_us  = 0;
 static uint32_t s_stat_tel_overwrite_snap = 0;
@@ -383,8 +400,9 @@ static select_stats_t s_stat_select = {};
 
 static video_inflight_t s_video_inflight = {};
 
-/* 每轮同时限制 send 次数和成功发送字节（含头部）；预算用尽留待下一轮 select。
-   返回 false = 连接错误（对端关闭），true = 未完或完成。 */
+/* Each round limits both the send-call count and the bytes successfully sent
+   (header included); when the budget is spent, the rest waits for the next select.
+   Returns false = connection error (peer closed); true = not done or done. */
 static bool pump_video(size_t &bytes_sent)
 {
     bytes_sent = 0;
@@ -405,7 +423,7 @@ static bool pump_video(size_t &bytes_sent)
             {
                 s_video_eagain_cnt++;
                 s_video_cool_until_us = esp_timer_get_time() + VIDEO_COOLDOWN_US;
-                return true;   /* 缓冲满：下一轮继续（在飞帧必须发完） */
+                return true;   /* Buffer full: continue next round (the in-flight frame must finish). */
             }
             return false;
         }
@@ -431,7 +449,7 @@ static bool pump_video(size_t &bytes_sent)
                 s_video_cool_until_us = esp_timer_get_time() + VIDEO_COOLDOWN_US;
                 return true;
             }
-            /* 诊断：1s 节流 */
+            /* Diagnostic: throttled to once per second. */
             static int64_t s_last_tx_fail_log_us = 0;
             s_tx_fail_cnt++;
             s_last_errno = errno;
@@ -456,7 +474,7 @@ static bool pump_video(size_t &bytes_sent)
     return true;
 }
 
-/* 起新帧：填 8B 头（magic+fid+len），交由 pump_video 逐轮按预算发送 */
+/* Start a new frame: fill the 8-byte header (magic+fid+len), then pump_video sends it round by round within budget. */
 static void start_video_frame(const video_frame_t &frame)
 {
     const uint32_t len = (uint32_t)frame.len;
@@ -480,12 +498,13 @@ static void start_video_frame(const video_frame_t &frame)
 void esp_net_video_flush(void)
 {
     if (!s_video_send_mutex || !s_video_queue_mutex) return;
-    /* 不在自旋锁内等待网络发送；统一先 send_mutex 再 queue_mutex，避免锁序反转。 */
+    /* Never wait on network sends inside a spinlock; always take send_mutex before queue_mutex to avoid lock-order inversion. */
     xSemaphoreTake(s_video_send_mutex, portMAX_DELAY);
     xSemaphoreTake(s_video_queue_mutex, portMAX_DELAY);
     if (s_video_pending.owner) esp_camera_fb_return(s_video_pending.owner);
     s_video_pending = {};
-    if (s_video_inflight.owner)     /* 作废在飞帧时重置连接，不能复用可能残留半帧的字节流 */
+    if (s_video_inflight.owner)     /* When invalidating an in-flight frame, reset the connection;
+                                       a possibly half-frame byte stream cannot be reused. */
     {
         if (s_video_fd >= 0) close(s_video_fd);
         s_video_fd = -1;
@@ -513,11 +532,12 @@ static bool send_pending_video(void)
     xSemaphoreTake(s_video_send_mutex, portMAX_DELAY);
     size_t bytes_sent = 0;
     bool state_changed = false;
-    /* 1) 按每轮双预算接续在飞帧；冷却不会阻止在飞帧推进。 */
+    /* 1) Continue the in-flight frame within the per-round dual budget;
+          cooldown does not stop an in-flight frame from advancing. */
     if (!pump_video(bytes_sent))
     {
         state_changed = true;
-        esp_link_request_stop();   /* 视频发送硬错误 = 图传失联，立即锁 STOP（用户拍板 2026-11-17） */
+        esp_link_request_stop();   /* Video send hard error = video link lost: latch STOP immediately (user decision 2026-11-17). */
         ESP_LOGW(TAG, "video socket error; closing video client");
         esp_camera_fb_return(s_video_inflight.owner);
         s_video_inflight = {};
@@ -527,9 +547,10 @@ static bool send_pending_video(void)
     if (s_video_inflight.owner)
     {
         xSemaphoreGive(s_video_send_mutex);
-        return bytes_sent != 0 || state_changed;   /* 在飞帧未发完：不启新帧 */
+        return bytes_sent != 0 || state_changed;   /* In-flight frame not finished: do not start a new one. */
     }
-    /* 2) 取 pending 起新帧（无客户端/冷却期内丢弃，1 深队列只发最新帧） */
+    /* 2) Take the pending frame to start a new one (no client / in cooldown ->
+          dropped; the 1-deep queue only sends the latest frame). */
     xSemaphoreTake(s_video_queue_mutex, portMAX_DELAY);
     video_frame_t frame = s_video_pending;
     s_video_pending = {};
@@ -547,7 +568,7 @@ static bool send_pending_video(void)
 }
 
 /* ============================================================================
-   4. 主任务
+   4. Main task
    ============================================================================ */
 void esp_net_queues_init(void)
 {
@@ -562,16 +583,18 @@ void esp_net_queues_init(void)
 }
 
 /* One bounded pending byte stream per client; never discard a partial JSON line. */
-#define NET_TX_LIMIT 32768        /* 每客户端待发积压上限：给 20Hz 遥测的突发空口中断留排水窗口。 */
-#define NET_TX_TIMEOUT_MS 5000   /* 1000 太激进：WiFi 抖动/Windows 扫网 100-300ms 停顿即触发断联 */
-#define NET_TX_DRAIN_BATCH_MAX 8 /* ACK 队列单轮最多取出的行数，避免饿死 RX/STOP。 */
+#define NET_TX_LIMIT 32768        /* Per-client pending-send backlog cap: leaves a drain window for
+                                       burst air-interface stalls of the 20 Hz telemetry. */
+#define NET_TX_TIMEOUT_MS 5000   /* 1000 was too aggressive: a 100-300 ms WiFi jitter / Windows
+                                       background scan pause would already disconnect. */
+#define NET_TX_DRAIN_BATCH_MAX 8 /* Max ACK lines dequeued per round, so RX/STOP never starve. */
 
-/* append_tx 失败原因：区分「积压超限」与「realloc OOM」——
-   二者此前共用一条 "tx backlog limit" 日志，无法定位根因。 */
+/* append_tx failure reason: distinguishes "backlog over limit" from "realloc
+   OOM" — both used to share one "tx backlog limit" log, hiding the root cause. */
 typedef enum {
     TX_APPEND_OK = 0,
-    TX_APPEND_BACKLOG,   /* 积压超过 NET_TX_LIMIT */
-    TX_APPEND_ALLOC      /* realloc 失败（内存不足） */
+    TX_APPEND_BACKLOG,   /* Backlog exceeds NET_TX_LIMIT. */
+    TX_APPEND_ALLOC      /* realloc failed (out of memory). */
 } tx_append_result_t;
 struct net_client_t {
     int fd;
@@ -602,10 +625,11 @@ static bool selectable_socket(int fd, const char *role)
     return true;
 }
 
-/* 断连后网络全量复位（用户要求：归还全部内存，回到「无客户端」初始状态）：
-   清空遥测邮箱/ACK 广播队列、释放残留在 RX 队列中的客户端行（cmd_parser 仍在消费的
-   不受影响——queue 操作原子，此处只收走剩余项）、归还未发送视频帧、
-   复位发送冷却/帧号/失败计数。 */
+/* Full network reset after disconnect (user request: return all memory, back to
+   the "no client" initial state): clear the telemetry mailbox / ACK broadcast
+   queue, free the client lines still left in the RX queue (lines cmd_parser is
+   still consuming are unaffected — queue ops are atomic, this only drains what
+   remains), return unsent video frames, reset cooldown/frame-id/fail counters. */
 static void esp_net_cleanup_all(void)
 {
     char *out;
@@ -634,11 +658,14 @@ static void drop_client(net_client_t *clients, net_client_t &c, int slot, const 
 {
     if (c.fd < 0) return;
     ESP_LOGW(TAG, "drop client %d: %s", slot, why ? why : "?");
-    /* 先锁 STOP（安全停车）再回收资源：失联第一时间失效旧命令代次，
-       避免被 close/free/cleanup/video_flush 等资源回收拖延（Codex 审查 R-1 严重项）。
-       心跳分支已先请求 STOP，此处凭 stop_already_requested 免重复递增代次。 */
+    /* Latch STOP (safe stop) BEFORE reclaiming resources: invalidate the old
+       command generation the moment the link is lost, instead of being delayed
+       by close/free/cleanup/video_flush (Codex review R-1, severe). The heartbeat
+       branch already requested STOP, so stop_already_requested avoids a duplicate
+       generation bump here. */
     if (!stop_already_requested) post_disconnect();
-    /* 现场诊断：pending / EAGAIN 计数 / 最大积压 / 堆余量，用于区分「积压超限 vs OOM」。 */
+    /* Scene diagnostics: pending / EAGAIN counts / max backlog / heap headroom,
+       to tell "backlog over limit" from "OOM". */
     ESP_LOGW(TAG, "  diag: pending=%u limit=%u video_eagain=%lu tx_eagain=%lu "
                   "max_pending=%u free_heap=%u largest=%u",
              (unsigned)(c.tx_len - c.tx_off), (unsigned)NET_TX_LIMIT,
@@ -659,10 +686,10 @@ static void drop_client(net_client_t *clients, net_client_t &c, int slot, const 
         have_client |= clients[i].fd >= 0;
     if (!have_client)
     {
-        esp_net_video_set_enabled(false);   /* 同时清 VIDEO 事件位 */
+        esp_net_video_set_enabled(false);   /* Also clears the VIDEO event bit. */
         if (s_conn_eg)
             xEventGroupClearBits(s_conn_eg, PEO_NET_EVT_CLIENT);
-        esp_net_cleanup_all();              /* 网络部分全量复位到初始状态 */
+        esp_net_cleanup_all();              /* Full network reset to the initial state. */
     }
     esp_net_video_flush();
 }
@@ -699,8 +726,9 @@ static bool flush_tx(net_client_t &c)
     }
     if (!n) return false;
     c.tx_off += (size_t)n;
-    s_stat_t_bytes += (size_t)n;        /* 命令/遥测发送字节（网络层统计） */
-    c.tx_since = xTaskGetTickCount();   /* 有进展即续期：超时只针对“停滞”，不是“积压年龄” */
+    s_stat_t_bytes += (size_t)n;        /* Command/telemetry bytes sent (network-layer stats). */
+    c.tx_since = xTaskGetTickCount();   /* Any progress renews the deadline: the timeout
+                                            targets "stalled", not "backlog age". */
     if (c.tx_off == c.tx_len) {
         free(c.tx);
         c.tx = NULL;
@@ -714,11 +742,12 @@ void esp_net_task(void *arg)
     xSemaphoreTake(s_video_queue_mutex, portMAX_DELAY);
     s_net_task = xTaskGetCurrentTaskHandle();
     xSemaphoreGive(s_video_queue_mutex);
-    /* app_main 已在任务创建前统一建队；本任务以 STA 模式连接热点并运行 select。 */
+    /* app_main already created the queues before task creation; this task connects
+       to the hotspot in STA mode and runs select(). */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_sta();
-    s_stat_last_us = esp_timer_get_time();   /* 统计基线：首窗口从任务启动起算 */
+    s_stat_last_us = esp_timer_get_time();   /* Stats baseline: the first window starts at task boot. */
 
     int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     int one = 1;
@@ -806,7 +835,7 @@ void esp_net_task(void *arg)
             if (event_driven && inflight) FD_SET(selected_video_fd, &wfds);  /* Even during cooldown. */
             if (selected_video_fd > maxfd) maxfd = selected_video_fd;
         }
-        xSemaphoreGive(s_video_send_mutex);  /* select 期间允许 camera flush 关闭连接 */
+        xSemaphoreGive(s_video_send_mutex);  /* During select, camera flush may close the connection. */
         /* Preserve the complete 0/5/20ms, read-only select fallback.
            Notifications still get consumed, but only eventfd can interrupt select. */
         xTaskNotifyWait(0, UINT32_MAX, NULL, 0);
@@ -851,12 +880,14 @@ void esp_net_task(void *arg)
         }
         const bool video_writable = n > 0 && event_driven && selected_video_fd >= 0 &&
                                     FD_ISSET(selected_video_fd, &wfds);
-        /* 心跳独立于 socket 读写进展；仅监督已提交控制命令/宏的客户端。
-           在锁内取 now，避免跨核续期时间晚于先前采样而导致年龄下溢。
-           日志与 STOP 均在锁外，避免阻塞或嵌套安全锁。 */
+        /* Heartbeat supervision is independent of socket I/O progress; only
+           clients that have submitted control commands are supervised.
+           Read now inside the lock so a cross-core renewal later than a previous
+           sample cannot underflow the age. Logging and STOP stay outside the
+           lock to avoid blocking or nesting the safety lock. */
         for (int i = 0; i < PEO_NET_MAX_CLIENTS; ++i)
         {
-            if (clients[i].fd < 0) continue;  /* 已断开的槽位不再监督陈旧活动 */
+            if (clients[i].fd < 0) continue;  /* A disconnected slot no longer supervises stale activity. */
             portENTER_CRITICAL(&s_activity_lock);
             const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
             const uint32_t age_ms = (uint32_t)(now_ms - s_client_activity[i].last_cmd_ms);
@@ -904,14 +935,14 @@ void esp_net_task(void *arg)
                     if (setsockopt(cfd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) != 0)
                         ESP_LOGW(TAG, "command IP_TOS failed: %d", errno);
                     FD_CLR(cfd, &rfds);
-                    FD_CLR(cfd, &wfds);  /* A recycled fd cannot inherit old select results. */
+                    FD_CLR(cfd, &wfds);  /* A recycled fd must not inherit old select results. */
                     clients[slot].fd = cfd;
                     portENTER_CRITICAL(&s_activity_lock);
-                    s_client_activity[slot] = {};  /* 新连接不继承旧会话活动/超时锁存 */
+                    s_client_activity[slot] = {};  /* A new connection must not inherit the old session's activity/timeout latch. */
                     s_client_activity[slot].fd = cfd;
                     portEXIT_CRITICAL(&s_activity_lock);
                     ESP_LOGI(TAG, "client %d connected: fd=%d wake=%d", slot, cfd, s_wake_fd);
-                    /* 8888 命令连接建立：以车上 NVS PID 为准，TX 异步恢复。 */
+                    /* 8888 command connection established: the on-car NVS PID is authoritative; TX restores it asynchronously. */
                     esp_link_request_pid_push();
                     if (s_conn_eg)
                         xEventGroupSetBits(s_conn_eg, PEO_NET_EVT_CLIENT);
@@ -931,10 +962,11 @@ void esp_net_task(void *arg)
                 {
                     if (setsockopt(vfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) != 0)
                         ESP_LOGW(TAG, "video TCP_NODELAY failed: %d", errno);
-                    /* ESP-IDF/lwIP 不支持 SOL_SOCKET/SO_SNDBUF：
-                       errno 109 = ENOPROTOOPT，并非对端关闭竞态。
-                       发送缓冲由 CONFIG_LWIP_TCP_SND_BUF_DEFAULT 配置；
-                       沿用现有值，部分写入由在飞帧偏移与 EAGAIN 重试处理。 */
+                    /* ESP-IDF/lwIP does not support SOL_SOCKET/SO_SNDBUF:
+                       errno 109 = ENOPROTOOPT, not a peer-close race.
+                       The send buffer is set by CONFIG_LWIP_TCP_SND_BUF_DEFAULT;
+                       we keep the current value, and partial writes are handled by
+                       the in-flight offset plus EAGAIN retries. */
                     xSemaphoreTake(s_video_send_mutex, portMAX_DELAY);
                     if (s_video_fd >= 0)
                     {
@@ -942,20 +974,20 @@ void esp_net_task(void *arg)
                         FD_CLR(s_video_fd, &wfds);
                         close(s_video_fd);
                     }
-                    if (s_video_inflight.owner)   /* 新连接接管：旧在飞帧作废 */
+                    if (s_video_inflight.owner)   /* New connection takes over: the old in-flight frame is voided. */
                     {
                         esp_camera_fb_return(s_video_inflight.owner);
                         s_video_inflight = {};
                     }
                     s_video_fd = vfd;
-                    FD_CLR(vfd, &rfds);  /* fd 可能复用；旧 select 结果不代表新连接就绪 */
+                    FD_CLR(vfd, &rfds);  /* The fd may be reused; old select results do not mean the new connection is ready. */
                     FD_CLR(vfd, &wfds);
                     xSemaphoreGive(s_video_send_mutex);
                     ESP_LOGI(TAG, "video client connected: fd=%d wake=%d", vfd, s_wake_fd);
                 }
             }
         }
-        /* 与 camera flush 互斥：检查、非阻塞 recv、关闭必须使用同一连接。 */
+        /* Mutually exclusive with camera flush: check, non-blocking recv, and close must all use the same connection. */
         xSemaphoreTake(s_video_send_mutex, portMAX_DELAY);
         if (selected_video_fd >= 0 && s_video_fd != selected_video_fd)
         {
@@ -964,13 +996,13 @@ void esp_net_task(void *arg)
         }
         if (s_video_fd >= 0 && s_video_fd == selected_video_fd && FD_ISSET(s_video_fd, &rfds))
         {
-            /* 视频通道单向（S3→上位机）：可读 = 对端关闭/出错 */
+            /* Video channel is one-way (S3 -> upper computer): readable = peer closed/error. */
             char tmp[16];
             int r = recv(s_video_fd, tmp, sizeof(tmp), 0);
-            /* EBADF 幂等跳过，不重复关闭 fd 或清理在飞帧。 */
+            /* EBADF is skipped idempotently: never double-close the fd or double-clear the in-flight frame. */
             if (r <= 0 && !(r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == EBADF)))
             {
-                esp_link_request_stop();   /* 视频对端关闭 = 图传失联，立即锁 STOP（用户拍板 2026-11-17） */
+                esp_link_request_stop();   /* Video peer closed = video link lost: latch STOP immediately (user decision 2026-11-17). */
                 ESP_LOGW(TAG, "video client closed");
                 close(s_video_fd);
                 s_video_fd = -1;
@@ -1013,7 +1045,8 @@ void esp_net_task(void *arg)
                     c.len = 0;
                     if (len)
                     {
-                        /* 完整行保留原代次入队；STOP/单向心跳 豁免由解析器统一判定。 */
+                        /* The complete line is enqueued with its original generation;
+                           the parser decides the STOP/one-way-heartbeat exemptions. */
                         esp_net_rx_message_t msg = {strdup(c.buf), c.generation, (uint8_t)i,
                                                     received_ms, (uint32_t)len};
                         if (!msg.line)
@@ -1027,9 +1060,11 @@ void esp_net_task(void *arg)
                             drop_client(clients, c, i, "rx byte budget exceeded");
                             break;
                         }
-                        /* 入队带 50ms 等待：esp_net(prio5) 批量灌行时给 cmd_parser(prio4)
-                           消化时间（批量命令/快速点击/算法命令流均会突发多行）。
-                           只有消费者真卡死 50ms 才视为满 → 断开。 */
+                        /* Enqueue with a 50 ms wait: when esp_net (prio 5) floods lines
+                           in a batch, give cmd_parser (prio 4) time to consume them
+                           (batch commands / fast clicks / algorithm command streams all
+                           burst multiple lines). Only a consumer truly stuck for 50 ms
+                           counts as full -> disconnect. */
                         if (xQueueSend(esp_net_rx_queue, &msg, pdMS_TO_TICKS(50)) != pdTRUE)
                         {
                             esp_net_rx_release(msg.line_bytes);
@@ -1043,7 +1078,7 @@ void esp_net_task(void *arg)
             }
         }
         char *out;
-        /* ACK 优先且有批次上限；随后最多消费一条最新遥测。 */
+        /* ACKs have priority with a batch cap; then at most one latest telemetry line is consumed. */
         for (int batch = 0; batch < NET_TX_DRAIN_BATCH_MAX &&
              xQueueReceive(esp_net_ack_queue, &out, 0) == pdTRUE; ++batch)
         {
@@ -1085,14 +1120,16 @@ void esp_net_task(void *arg)
         /* A single eventfd read may cover more than one ACK drain batch. */
         if (event_driven && uxQueueMessagesWaiting(esp_net_ack_queue) != 0) esp_net_wake();
 
-        /* 周期统计（1s 窗口，单行原地刷新）：EAGAIN/tel_drop 用累计快照做差，
-           select 次数按窗口清零；就绪原因可重叠，readable 不含 eventfd。
-           其他组件日志会打断本行，属预期。 */
+        /* Periodic stats (1 s window, single-line in-place refresh): EAGAIN/tel_drop
+           use cumulative-snapshot deltas, select counts zero per window; ready
+           reasons can overlap and readable excludes eventfd. Other components'
+           logs interrupting this line is expected. */
         const int64_t stat_now = esp_timer_get_time();
         if (stat_now - s_stat_last_us >= 1000000LL)
         {
-            /* WiFi 未连接时不打印仪表盘（数据全 0 无意义，且不干扰重连日志观察）；
-               窗口/快照照常推进，连上后从下一窗口恢复正常打印。 */
+            /* Do not print the dashboard while WiFi is down (all-zero data is
+               meaningless and would disturb reconnect-log observation); the window /
+               snapshots still advance, and printing resumes next window once connected. */
             const bool sta_up = s_conn_eg &&
                 (xEventGroupGetBits(s_conn_eg) & PEO_NET_EVT_STA) != 0;
             const float secs = (float)(stat_now - s_stat_last_us) / 1000000.0f;
@@ -1101,10 +1138,11 @@ void esp_net_task(void *arg)
             const uint32_t tel_overwrite = s_tel_drop_overwrite.load();
             const uint32_t tel_busy = s_tel_drop_busy.load();
             const uint32_t tel_alloc = s_tel_drop_append_fail.load();
-            /* 全字段固定宽度占位：数字变长/变短时列位置不动，短值由空格自然覆盖，
-               行宽恒定；尾部留 2 空格兜底。
-               teldrop 顺序固定 = 覆盖/忙/alloc；select = 本窗口 select 调用次数/秒
-               （空闲 ~10/s；若达数百/s 说明忙等，细分类在异常日志中另打）。 */
+            /* All fields use fixed-width placeholders: columns stay put when numbers
+               grow/shrink (shorter values are covered by trailing spaces), so the line
+               width is constant; two trailing spaces are the fallback. teldrop order is
+               fixed = overwrite/busy/alloc; select = select calls per second in this
+               window (idle ~10/s; hundreds/s means busy-wait, detailed in the error log). */
             const char *last_cmd = esp_link_last_command_name();
             if (sta_up)
             {
@@ -1120,7 +1158,8 @@ void esp_net_task(void *arg)
                    (unsigned long)s_stat_select.calls,
                    last_cmd ? last_cmd : "-");
             fflush(stdout);
-            /* 忙等/异常细分类不进常驻行：出现时打一行诊断（1s 节流已由窗口天然保证） */
+            /* Busy-wait/error breakdown does not go into the resident line: print one
+               diagnostic line when it happens (1 s throttling comes free from the window). */
             if (s_stat_select.backoff != 0 || s_stat_select.error != 0)
             {
                 ESP_LOGW(TAG, "select diag: timeout=%lu eventfd=%lu readable=%lu writable=%lu"

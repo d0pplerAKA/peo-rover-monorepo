@@ -1,4 +1,56 @@
-# PEO Rover — ESP32-S3 N8R8 桥接固件
+# PEO Rover — ESP32-S3 WiFi 桥 / WiFi Bridge
+
+> **一句话定位 / One-line role**：S3 是上位机和主控之间的「路由器」——把上位机的 JSON 命令翻译成主控能懂的帧、把主控的传感器数据翻译成 JSON，同时转发相机视频。它不处理业务逻辑，只做透传和安全兜底。
+>
+> The S3 is the "router" between the upper computer and the main controller — it translates upper-computer JSON commands into frames the main controller understands, translates the main controller's sensor data into JSON, and relays camera video. It runs no business logic, only pass-through plus safety guardrails.
+
+---
+
+## 工程意义 / Why This Project Exists
+
+**中文**：上位机（PC）和主控（F407）之间需要一条无线链路，但 F407 没有 WiFi 能力。S3 就是这条无线链路的「中间人」：连上位机热点（WiFi STA），把上位机发的 JSON 命令（TCP 8888）翻译成 esp_link 帧透传给 F407（USART2），再把 F407 的传感器数据翻译成 JSON 上报，同时把 OV2640 相机视频转发给上位机（TCP 8890）。它刻意「不聪明」——不处理任何业务逻辑，只做透传和几个安全兜底（STOP 锁、generation 代次、心跳停车、PID 存 NVS）。
+
+**English**: The upper computer (PC) and the main controller (F407) need a wireless link, but the F407 has no WiFi. The S3 is that link's "middleman": it joins the upper computer's hotspot (WiFi STA), translates the upper computer's JSON commands (TCP 8888) into esp_link frames forwarded to the F407 (USART2), translates the F407's sensor data back into JSON, and relays the OV2640 camera video to the upper computer (TCP 8890). It is deliberately "dumb" — it runs no business logic, only pass-through plus a few safety guardrails (STOP lock, generation counter, heartbeat stop, PID stored in NVS).
+
+## 功能与作用 / What It Does
+
+| 功能 Function | 说明 Description |
+|---|---|
+| 命令透传 | JSON（TCP 8888）→ esp_link 帧 → F407 |
+| 遥测上报 | F407 sensor 帧 → JSON（50 Hz）→ 上位机 |
+| 视频转发 | OV2640 JPEG（TCP 8890）→ 上位机 |
+| 安全兜底 | STOP 锁 + generation 代次 + 心跳停车 |
+| PID 持久化 | PID 存 NVS，上电/连上位机后自动下发 F407 |
+| 状态灯 | WS2812 蓝/绿指示连接状态 |
+
+## 与其它三端的联系 / Connections to the Other Three Nodes
+
+```
+        ┌──────────────────────────────────────┐
+        │      上位机 Upper Computer (PC)       │
+        └──────────────────┬───────────────────┘
+                WiFi STA   │ TCP 8888 命令/遥测
+                            │ TCP 8890 视频
+        ┌──────────────────▼───────────────────┐
+        │     ESP32-S3（WiFi 桥 Bridge）     ★  │
+        └──────────────────┬───────────────────┘
+                            │ USART2 (921600)
+        ┌──────────────────▼───────────────────┐
+        │  STM32F407（主控 Main Controller）    │
+        └──────────────────┬───────────────────┘
+                            │ USART3
+        ┌──────────────────▼───────────────────┐
+        │   ESP32-C3（手柄 BLE 桥 Gamepad）     │
+        └──────────────────────────────────────┘
+```
+
+- **↔ 上位机**：WiFi STA 连上位机热点；TCP 8888 收命令/发遥测，TCP 8890 发视频。
+- **↔ STM32F407**：USART2 是唯一通道，S3 透传命令帧、接收 sensor 帧。
+- **↔ ESP32-C3**：无直接电气连接（S3 管 WiFi，C3 管 BLE，物理隔离）。
+
+---
+
+## 技术细节 / Technical Details
 
 本文对应 2026-11-16 的当前源码。项目使用 ESP-IDF v6.1、Arduino-ESP32 4.0.0-rc1 组件和本地修改的 `components/esp32-camera`。保留 `dependencies.lock`，避免依赖版本漂移。
 

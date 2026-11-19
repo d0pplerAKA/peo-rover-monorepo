@@ -1,13 +1,19 @@
 /**
- * @file    esp_link.cpp
- * @brief   PEO Rover - esp_link 实现：CRC16 + UART 帧收发（FreeRTOS 任务）
+ * @file  esp_link.cpp
+ * @brief esp_link implementation: CRC16 + UART frame receive/send (FreeRTOS tasks).
  *
- * 任务分工（main 里 xTaskCreate 创建）：
- *   esp_link_rx_task（优先级 6）：初始化 UART（队列已由 app_main 创建）；
- *                                阻塞读字节流 -> 帧状态机 -> CRC 校验
- *                                -> SensorData 快照入 sensor_queue。
- *   esp_link_tx_task（优先级 5）：通知唤醒 + 命令队列消费 -> 打包命令帧 -> 发送
- *                                -> 停顿 >= 1 字节时间（触发 F407 IDLE 组帧）。
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * Task split (created by xTaskCreate in main):
+ *   esp_link_rx_task (priority 6): initializes the UART (queues are already
+ *       created by app_main); blocks reading the byte stream -> frame state
+ *       machine -> CRC check -> pushes the SensorData snapshot into sensor_queue.
+ *   esp_link_tx_task (priority 5): woken by notification; consumes the command
+ *       queue -> packs a command frame -> sends -> pauses >= 1 byte time
+ *       (this triggers the F407 IDLE framing).
  */
 
 #include "esp_link.h"
@@ -34,19 +40,25 @@ static constexpr EventBits_t UART_READY = 1U;
 static portMUX_TYPE s_safety_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_generation = 0;
 static bool s_inhibited = false;
-static bool s_fatal = false;          /* 启动健康故障永久锁存，由 s_safety_lock 保护。 */
+static bool s_fatal = false;          /* Startup health fault, latched forever; guarded by s_safety_lock. */
 static bool s_stop_pending = false;
-static TaskHandle_t s_tx_task = NULL;   /* 注册/读取均由 s_safety_lock 保护；TX 常驻 */
-static constexpr uint32_t TX_WAKE = 1U; /* 通知只唤醒；STOP 状态与命令队列才是数据源 */
+static TaskHandle_t s_tx_task = NULL;   /* Registered/read under s_safety_lock; TX is resident. */
+static constexpr uint32_t TX_WAKE = 1U; /* Notification only wakes; STOP state and the command queue are the data source. */
 
-/* PID blob 直接保存线协议的 8 字节：kp(float LE) + ki(float LE)。
-   此互斥锁串行化「手动 PID 入队 + 保存」和「恢复读取 + 入队」，避免旧值后发。
-   NVS 操作不持有 s_safety_lock；RX/net 只发布请求，不访问 flash。 */
+/* The PID blob stores the wire protocol's 8 bytes directly: kp (float LE) +
+ * ki (float LE). This mutex serializes "manual PID enqueue + save" against
+ * "restore read + enqueue" so an older value cannot win the race.
+ * NVS operations do not hold s_safety_lock; RX/net only publish the request and
+ * never touch flash. */
 static constexpr size_t PID_BLOB_SIZE = 8;
 static constexpr uint32_t PID_RETRY_MS = 50;
 static SemaphoreHandle_t s_pid_mutex = NULL;
 static std::atomic<bool> s_pid_push_pending{false};
 
+/** @brief  Read the stored PID blob from NVS into param.
+ *  @param param  Output buffer of at least PID_BLOB_SIZE bytes.
+ *  @retval true if a valid PID blob was read; false if missing/invalid.
+ *  A missing or invalid blob is NOT sent, so the F407 keeps its defaults. */
 static bool load_pid(uint8_t *param)
 {
     nvs_handle_t handle;
@@ -63,11 +75,14 @@ static bool load_pid(uint8_t *param)
         if (err != ESP_ERR_NVS_NOT_FOUND)
             ESP_LOGW(TAG, "PID NVS read failed: %s (size=%u)",
                      esp_err_to_name(err), (unsigned)size);
-        return false;  /* 缺失/无效 blob 不下发，保留 F407 默认值。 */
+        return false;  /* Missing/invalid blob is not sent; F407 defaults stay. */
     }
     return true;
 }
 
+/** @brief  Persist a PID blob into NVS.
+ *  @param param  8-byte kp/ki blob.
+ *  @retval true on a committed write; false otherwise. */
 static bool save_pid(const uint8_t *param)
 {
     nvs_handle_t handle;
@@ -86,6 +101,10 @@ static bool save_pid(const uint8_t *param)
     return true;
 }
 
+/** @brief  Forward a PID to the F407 and save it to NVS (see the header).
+ *  @param param      8-byte kp/ki little-endian blob.
+ *  @param generation Generation the producer captured.
+ *  @retval true if the PID was forwarded/queued (NOT an F407 execution confirmation). */
 bool esp_link_send_pid_and_save(const uint8_t *param, uint32_t generation)
 {
     if (param == NULL || s_pid_mutex == NULL) return false;
@@ -95,9 +114,11 @@ bool esp_link_send_pid_and_save(const uint8_t *param, uint32_t generation)
     if (sent && !save_pid(param))
         ESP_LOGW(TAG, "PID forwarded but not persisted; reboot will use previous PID");
     xSemaphoreGive(s_pid_mutex);
-    return sent;  /* 保留 ACK 的原语义：成功转发入队，不是 F407 执行确认。 */
+    return sent;  /* Preserves the ACK's original meaning: queued for forward, not F407 confirmation. */
 }
 
+/** @brief  Request an asynchronous NVS PID restore (see the header).
+ *  @retval none */
 void esp_link_request_pid_push(void)
 {
     s_pid_push_pending.store(true);
@@ -107,14 +128,16 @@ void esp_link_request_pid_push(void)
     if (tx_task != NULL) xTaskNotify(tx_task, TX_WAKE, eSetBits);
 }
 
-/* 仅 TX 调用；失败保留请求，空闲时每 50ms 重试，队列有工作时随消费重试。
-   TX 不等待 PID 互斥锁，确保另一核写 flash 时仍能处理 STOP。 */
+/* TX-only; on failure the request is kept and retried every 50 ms while idle,
+ * or together with normal queue consumption when there is work.
+ * TX does NOT wait on the PID mutex, so STOP can still be handled while the
+ * other core is writing flash. */
 static void try_push_pid(void)
 {
     static bool retry_logged = false;
     if (!s_pid_push_pending.load() || xSemaphoreTake(s_pid_mutex, 0) != pdTRUE)
         return;
-    s_pid_push_pending.exchange(false);  /* 此后新到的触发不会被本次完成清掉。 */
+    s_pid_push_pending.exchange(false);  /* A new trigger arriving after this is not cleared by this completion. */
     uint8_t param[PID_BLOB_SIZE];
     bool queued = false;
     if (load_pid(param)) {
@@ -137,6 +160,7 @@ static void try_push_pid(void)
     xSemaphoreGive(s_pid_mutex);
 }
 
+/** @brief  Latch STOP: bump the generation and set the pending STOP flag (see header). */
 void esp_link_request_stop(void)
 {
     portENTER_CRITICAL(&s_safety_lock);
@@ -148,6 +172,7 @@ void esp_link_request_stop(void)
     if (tx_task != NULL) xTaskNotify(tx_task, TX_WAKE, eSetBits);
 }
 
+/** @brief  Fatal startup fault: latch STOP and permanently disable resume. */
 void esp_link_fatal_fault(void)
 {
     portENTER_CRITICAL(&s_safety_lock);
@@ -160,6 +185,7 @@ void esp_link_fatal_fault(void)
     if (tx_task != NULL) xTaskNotify(tx_task, TX_WAKE, eSetBits);
 }
 
+/** @brief  Return the current safety generation. */
 uint32_t esp_link_command_generation(void)
 {
     portENTER_CRITICAL(&s_safety_lock);
@@ -168,6 +194,8 @@ uint32_t esp_link_command_generation(void)
     return value;
 }
 
+/** @brief  Resume commands if the observed generation is still current.
+ *  @retval true if resume was allowed. */
 bool esp_link_resume_commands(uint32_t observed_generation)
 {
     portENTER_CRITICAL(&s_safety_lock);
@@ -178,12 +206,13 @@ bool esp_link_resume_commands(uint32_t observed_generation)
 }
 
 /* ============================================================================
-   1. CRC16-CCITT（多项式 0x1021，初始 0xFFFF，查表法）
-      与 F407 ESP_LINK_CRC16 完全一致，标准测试向量 crc("123456789") == 0x29B1
+   1. CRC16-CCITT (polynomial 0x1021, init 0xFFFF, table driven)
+      Identical to the F407 ESP_LINK_CRC16; standard vector crc("123456789") == 0x29B1
    ============================================================================ */
 static uint16_t s_crc_table[256];
 static bool     s_crc_ready = false;
 
+/** @brief  Build the 256-entry CRC lookup table once. */
 static void crc_build_table(void)
 {
     for (uint16_t i = 0; i < 256; i++)
@@ -197,6 +226,10 @@ static void crc_build_table(void)
     s_crc_ready = true;
 }
 
+/** @brief  Compute the CRC16-CCITT over a byte range.
+ *  @param data  Bytes to hash.
+ *  @param len   Number of bytes.
+ *  @retval the 16-bit CRC. */
 static uint16_t esp_link_crc16(const uint8_t *data, uint16_t len)
 {
     uint16_t crc = 0xFFFFU;
@@ -210,13 +243,15 @@ static uint16_t esp_link_crc16(const uint8_t *data, uint16_t len)
 }
 
 /* ============================================================================
-   2. RX：有界滑动候选帧；CRC 失败保留后缀，允许连续流重同步
+   2. RX: bounded sliding candidate frame; a CRC failure keeps the suffix so a
+      continuous stream can resynchronize
    ============================================================================ */
 static uint8_t s_rx_buf[ESP_LINK_FRAME_OVH + ESP_LINK_RX_PAYLOAD_SIZE];
 static size_t s_rx_count = 0;
-static uint32_t s_snapshot_seq = 0;    /* 仅 RX 任务更新，不改变 F407 线协议 */
+static uint32_t s_snapshot_seq = 0;    /* Updated only by the RX task; does not change the F407 wire protocol. */
 
-/** 一帧完整（CRC 已过）：解析 SensorData 入快照队列 */
+/** @brief  One complete, CRC-valid frame arrived: parse the SensorData into the snapshot queue.
+ *  @param payload_len  Payload length (must equal sizeof(esp_link_sensor_t)). */
 static void handle_frame(uint16_t payload_len)
 {
     if (payload_len != sizeof(esp_link_sensor_t))
@@ -228,11 +263,13 @@ static void handle_frame(uint16_t payload_len)
 
     esp_link_snapshot_t snapshot;
     memcpy(&snapshot.sensor, &s_rx_buf[3], sizeof(snapshot.sensor));
-    /* 与宏/遥测统一使用 FreeRTOS 单调毫秒时间；只记录完整有效帧。 */
+    /* Use the same FreeRTOS monotonic ms time base as macro/telemetry; only a
+     * complete, valid frame is recorded. */
     snapshot.received_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     snapshot.seq = ++s_snapshot_seq;
     xQueueOverwrite(esp_link_sensor_queue, &snapshot);
-    /* 只认第一帧 CRC/长度均有效的 sensor；独立标记避免 seq 回绕再触发。 */
+    /* Only the first CRC+length-valid sensor frame triggers this; a separate
+     * flag avoids re-triggering when seq wraps. */
     static bool first_sensor_received = false;
     if (!first_sensor_received) {
         first_sensor_received = true;
@@ -240,6 +277,7 @@ static void handle_frame(uint16_t payload_len)
     }
 }
 
+/** @brief  Create the esp_link queues/mutex/event group (idempotent). */
 void esp_link_queues_init(void)
 {
     if (esp_link_sensor_queue == NULL)
@@ -252,6 +290,7 @@ void esp_link_queues_init(void)
     crc_build_table();
 }
 
+/** @brief  RX task: initialize UART, then parse the incoming sensor frame stream. */
 void esp_link_rx_task(void *arg)
 {
     static_assert(sizeof(esp_link_sensor_t) == 116,
@@ -259,7 +298,7 @@ void esp_link_rx_task(void *arg)
 
     ESP_LOGI(TAG, "rx task starting");
 
-    /* UART 初始化（8-N-1，无流控，与 F407 USART2 一致） */
+    /* UART init (8-N-1, no flow control, matches F407 USART2). */
     uart_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.baud_rate  = PEO_PM_ESP_BAUDRATE;
@@ -284,7 +323,7 @@ void esp_link_rx_task(void *arg)
     ESP_LOGI(TAG, "rx task up (UART%d, %u baud)", PEO_PM_ESP_UART,
              (unsigned)PEO_PM_ESP_BAUDRATE);
 
-    /* 3. 逐字节解析主循环 */
+    /* 3. Byte-by-byte parse main loop. */
     while (1)
     {
         uint8_t b;
@@ -320,11 +359,16 @@ void esp_link_rx_task(void *arg)
     }
 }
 
-/* 最近成功发送的命令名（net stats 仪表盘显示用）：
-   atomic<const char*> 跨核安全；指针指向静态字符串字面量，生命周期=程序。
-   ID->名字表须与 cmd_parser.cpp 的 k_cmd_table（名字->ID 方向）保持同步。 */
+/* Name of the most recently sent command (drives the net stats dashboard):
+   atomic<const char*> is cross-core safe; the pointer points at static string
+   literals whose lifetime is the program.
+   The ID -> name table must stay in sync with cmd_parser.cpp's k_cmd_table
+   (the name -> ID direction). */
 static std::atomic<const char *> s_last_cmd_name{nullptr};
 
+/** @brief  Map a command ID to its name.
+ *  @param id  Command ID (ESP_CMD_*).
+ *  @retval static string name, or NULL for an unknown ID. */
 static const char *cmd_name_for(uint8_t id)
 {
     switch (id)
@@ -342,14 +386,19 @@ static const char *cmd_name_for(uint8_t id)
     }
 }
 
+/** @brief  Return the name of the last command successfully sent to the F407. */
 const char *esp_link_last_command_name(void)
 {
     return s_last_cmd_name.load();
 }
 
 /* ============================================================================
-   3. TX：命令队列 -> 命令帧（每帧一条，帧后停顿触发 F407 IDLE 组帧）
+   3. TX: command queue -> command frame (one command per frame, then a pause
+      to trigger the F407 IDLE framing)
    ============================================================================ */
+/** @brief  Pack and send one command frame over the UART.
+ *  @param cmd  Command frame to send.
+ *  @retval true if the frame was fully written and the UART drained. */
 static bool transmit_command(const esp_link_cmd_t &cmd)
 {
     if (cmd.param_len > ESP_CMD_PARAM_MAX) return false;
@@ -369,33 +418,36 @@ static bool transmit_command(const esp_link_cmd_t &cmd)
     // FIFO acceptance is NOT wire completion. Two ticks guarantee one full idle tick.
     vTaskDelay(pdMS_TO_TICKS(2));
     const bool ok = sent == (int)size && drained == ESP_OK;
-    if (ok) s_last_cmd_name.store(cmd_name_for(cmd.cmd_id));   /* 仪表盘显示到下一命令更新 */
+    if (ok) s_last_cmd_name.store(cmd_name_for(cmd.cmd_id));   /* Dashboard shows it until the next command updates. */
     return ok;
 }
 
-/* 失联自停心跳：发一个 LEN=0 空帧（SOF+LEN(0)+CRC）。F407 端 CRC 通过即刷新
-   deadman 看门狗（空帧不触发任何命令）；S3 每 200ms 发一次。 */
+/* Link-loss deadman heartbeat: send one LEN=0 empty frame (SOF + LEN(0) + CRC).
+   On the F407, a passing CRC refreshes its deadman watchdog (an empty frame
+   triggers no command); the S3 sends one every 200 ms. */
 static bool transmit_heartbeat(void)
 {
     uint8_t frame[ESP_LINK_FRAME_OVH];
     frame[0] = ESP_LINK_SOF0;
     frame[1] = ESP_LINK_SOF1;
-    frame[2] = 0;                          /* LEN = 0：空帧心跳 */
+    frame[2] = 0;                          /* LEN = 0: empty heartbeat frame. */
     const uint16_t crc = esp_link_crc16(frame, 3);
     frame[3] = (uint8_t)crc;
     frame[4] = (uint8_t)(crc >> 8);
     const int sent = uart_write_bytes(PEO_PM_ESP_UART, frame, sizeof(frame));
     const esp_err_t drained = uart_wait_tx_done(PEO_PM_ESP_UART, pdMS_TO_TICKS(100));
-    vTaskDelay(pdMS_TO_TICKS(2));          /* 触发 F407 USART2 IDLE 组帧 */
+    vTaskDelay(pdMS_TO_TICKS(2));          /* Triggers the F407 USART2 IDLE framing. */
     return sent == (int)sizeof(frame) && drained == ESP_OK;
 }
 
+/** @brief  TX task: consume the command queue and pace frame transmission. */
 void esp_link_tx_task(void *arg)
 {
     portENTER_CRITICAL(&s_safety_lock);
     s_tx_task = xTaskGetCurrentTaskHandle();
     portEXIT_CRITICAL(&s_safety_lock);
-    /* 注册前到达的 STOP/命令也不会丢失：就绪后先检查锁存状态和队列。 */
+    /* STOP/commands arriving before registration are not lost: right after
+     * becoming ready we check the latch state and the queue. */
     xEventGroupWaitBits(s_uart_event, UART_READY, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "tx task up");
     while (1)
@@ -417,25 +469,32 @@ void esp_link_tx_task(void *arg)
             }
             continue;
         }
-        /* STOP 优先；每轮都检查恢复请求，避免持续命令流令 PID 恢复饥饿。
-           恢复仍经普通队列发送，与手动 PID 的顺序由 s_pid_mutex 保证。 */
+        /* STOP has priority; every round also checks the restore request, so a
+         * continuous command stream cannot starve the PID restore.
+         * The restore still travels through the normal queue; ordering with a
+         * manual PID is guaranteed by s_pid_mutex. */
         try_push_pid();
         esp_link_cmd_t cmd;
         if (xQueueReceive(esp_link_cmd_queue, &cmd, 0) != pdTRUE) {
-            /* 队列优先，通知只作唤醒信号。成功入队与 STOP 都发送通知，
-               因而“查空队列到进入等待”之间到达的工作也能唤醒本任务。
-               清除通知后回到循环，重新检查 STOP，再非阻塞查队列；
-               即使通知已合并/过时，也不会跳过队列或丢失唤醒。
-               失联自停：200ms 无命令/通知则发空帧心跳给 F407（deadman 喂狗）；
-               PID 待恢复时缩短为 50ms，确保暂时禁止 resume/队列忙后能重试。 */
+            /* Queue first, notification is only a wake signal. A successful
+             * enqueue and STOP both send a notification, so work arriving between
+             * "saw empty queue" and "entered wait" can still wake this task.
+             * After clearing the notification we loop back, re-check STOP, then
+             * poll the queue non-blocking; even if notifications were merged or
+             * stale, we neither skip the queue nor miss a wake-up.
+             * Link-loss deadman: 200 ms without command/notification sends an
+             * empty heartbeat frame to the F407 (feeding the deadman); with a
+             * PID restore pending this shrinks to 50 ms so a temporarily
+             * inhibited resume / busy queue can retry soon. */
             const uint32_t wait_ms = s_pid_push_pending.load() ? PID_RETRY_MS : 200;
             if (xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(wait_ms)) == pdFALSE)
                 transmit_heartbeat();
             continue;
         }
         portENTER_CRITICAL(&s_safety_lock);
-        /* 唯一发送提交点：通过即已提交，随后 STOP 最多跟在这一帧后面。
-           UART 写入/等待始终在锁外，避免跨核自旋期间阻塞。 */
+        /* The single send commit point: passing it means committed, so a later
+         * STOP can at most follow this frame. UART write/wait are always outside
+         * the lock, avoiding blocking during cross-core spin. */
         const bool allowed = !s_inhibited && cmd.generation == s_generation;
         portEXIT_CRITICAL(&s_safety_lock);
         if (allowed) {
@@ -445,13 +504,15 @@ void esp_link_tx_task(void *arg)
                 if (cmd.cmd_id == ESP_CMD_PID) esp_link_request_pid_push();
             }
         } else if (cmd.cmd_id == ESP_CMD_PID) {
-            /* 入队后若被新 STOP 作废，重新读取最新 NVS，不能丢失恢复请求。 */
+            /* If a queued PID is invalidated by a newer STOP, re-read the latest
+             * NVS value; the restore request must not be lost. */
             ESP_LOGW(TAG, "queued PID invalidated by STOP; scheduling restore");
             esp_link_request_pid_push();
         }
     }
 }
 
+/** @brief  Enqueue a command only if the producer's captured epoch is still current (see header). */
 bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
                                           uint8_t param_len, uint32_t generation)
 {
@@ -472,9 +533,11 @@ bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
     cmd.param_len = param_len;
     if (param_len != 0) memcpy(cmd.param, param, param_len);
     if (xQueueSend(esp_link_cmd_queue, &cmd, 0) == pdTRUE) {
-        /* 发布后再读取句柄：若 TX 在入队期间才注册，仍须通知它。
-           若此时尚未注册，TX 入口会检查已发布的队列，因而也不会漏工作。
-           TX 始终读取真实队列，通知次数不代表命令数。 */
+        /* Read the handle after publishing: if TX only registers during the
+         * enqueue, we must still notify it. If it has not registered yet, the TX
+         * entry checks the published queue, so work is never lost either way.
+         * TX always reads the real queue; the number of notifications is not the
+         * number of commands. */
         portENTER_CRITICAL(&s_safety_lock);
         const TaskHandle_t tx_task = s_tx_task;
         portEXIT_CRITICAL(&s_safety_lock);

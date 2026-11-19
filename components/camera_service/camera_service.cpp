@@ -1,9 +1,15 @@
 /**
- * @file    camera_service.cpp
- * @brief   PEO Rover - OV2640 抓帧任务（JPEG -> TCP 8890，应用层 15fps 节拍）
+ * @file  camera_service.cpp
+ * @brief OV2640 capture task (JPEG -> TCP 8890, 24 fps application pacing).
  *
- * 引脚来自 PEO_PINMAP.h（PEO_PM_CAM_*，用户定义）。
- * 帧率/分辨率：QVGA(320x240) 起步（PROTOCOL.md §5），稳定后可提 VGA。
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * Camera pins come from PEO_PINMAP.h (PEO_PM_CAM_*, user-defined).
+ * Resolution: starts at QVGA (320x240) and supports hot-swapping to
+ * QQVGA/QVGA/VGA/SVGA via the CAM_RES command (PROTOCOL section 2).
  */
 
 #include "camera_service.h"
@@ -23,7 +29,7 @@
 
 static const char *TAG = "camera";
 
-static QueueHandle_t s_cam_cmd_queue = NULL;   /* 分辨率请求队列（1 深覆盖，只保留最新） */
+static QueueHandle_t s_cam_cmd_queue = NULL;   /* Resolution request queue (1-deep overwrite, keeps only the latest). */
 
 bool camera_queues_init(void)
 {
@@ -44,48 +50,67 @@ bool camera_resolution_from_name(const char *name, uint8_t *out)
 
 bool camera_request_resolution(uint8_t framesize)
 {
-    if (!s_cam_cmd_queue) return false;  /* 待命时也接收请求，供下一轮重新初始化 */
+    if (!s_cam_cmd_queue) return false;  /* Requests are also accepted while on standby, for the next re-init. */
     return xQueueOverwrite(s_cam_cmd_queue, &framesize) == pdTRUE;
 }
 
-/* 模组自带 XCLK：pin_xclk=GPIO_NUM_NC 时 ESP32 不输出时钟（esp32-camera 约定）；
-   xclk_freq_hz 仍须等于模组晶振实际频率（OV2640 PLL 计算用，标准 20MHz）。 */
+/* The module has its own XCLK: pin_xclk=GPIO_NUM_NC means the ESP32 drives no
+   clock (esp32-camera convention); xclk_freq_hz must still equal the module
+   crystal frequency (used by the OV2640 PLL; standard 20 MHz). */
 #define CAM_XCLK_HZ         20000000
 
-/* 只限制应用层取帧；传感器仍自由运行，多余帧由 GRAB_LATEST 弹旧回收。
-   全局统一 24fps（2026-11-18 用户拍板锁 24，弃分级 30/30/24）：
-   - QVGA 24fps ~0.96Mbps、SVGA 24fps ~2.7Mbps（贴墙档，EAGAIN 判据）；
-   - 15fps 时代实测多窗口稳定，24fps 为画质/帧率/带宽平衡点。
-   周期向上取整，避免整数截断使目标帧率偏高。 */
+/** @brief  Target capture rate for a resolution (frames per second).
+ *  @param fs  framesize (unused: all resolutions share one locked rate).
+ *  @retval the target fps.
+ *  This only limits the application-side capture; the sensor still free-runs and
+ *  GRAB_LATEST evicts the surplus frames. The global rate is locked at 24 fps
+ *  (user decision 2026-11-18, replacing the old per-size 30/30/24 grading):
+ *  - QVGA 24 fps ~0.96 Mbps, SVGA 24 fps ~2.7 Mbps (near the ceiling, judged by EAGAIN);
+ *  - multi-window testing was stable in the 15 fps era; 24 fps is the chosen
+ *    balance of quality / frame rate / bandwidth.
+ *  The period rounds up so integer truncation cannot push the rate higher than intended. */
 static int cam_fps_for(framesize_t fs)
 {
     (void)fs;
-    return 24;   /* 全档统一：锁 24fps */
+    return 24;   /* All resolutions use the same value: locked at 24 fps. */
 }
 static int64_t period_us_for_fps(int fps)
 {
     return (1000000LL + fps - 1) / fps;
 }
-/* 运行时周期：cfg.frame_size 每次更新后调用（含启动默认档、切换、重试、回退），
-   无条件同步，杜绝「未切换不更新」漏洞。初始默认 15fps 周期。 */
+/* Runtime frame period. Recalculated after every cfg.frame_size update (boot
+   default, switch, retry, rollback) — unconditionally, so the "no switch -> no
+   update" gap cannot happen. The initial value is the 15 fps period, replaced on
+   the first apply. */
 static int64_t s_frame_period_us = period_us_for_fps(15);
 static void apply_frame_period(framesize_t fs)
 {
     s_frame_period_us = period_us_for_fps(cam_fps_for(fs));
 }
 
-/* 回调运行于 ESP_TIMER_TASK，只唤醒相机任务，不在定时器任务中取帧或发送。
-   使用专用二值信号量，避免与驱动或其他调用链使用的任务通知相互干扰。 */
+/** @brief  Frame-pacing timer callback: only wakes the camera task.
+ *  @param arg  The binary semaphore to give.
+ *  @retval none
+ *  Runs on ESP_TIMER_TASK; it must not capture or send here. A dedicated binary
+ *  semaphore avoids clashing with task notifications used by the driver or other
+ *  call chains. */
 static void cam_frame_timer_cb(void *arg)
 {
     xSemaphoreGive((SemaphoreHandle_t)arg);
 }
 
-/* 本帧已入队或归还后，等待下一次取帧的绝对期限；调用者在首帧取出后建立期限。
-   esp_timer_get_time() 为单调微秒时钟，单次定时器通过信号量直接唤醒任务，
-   不把剩余时间截断为 FreeRTOS tick，也不忙等占用 CPU/影响网络任务。
-   正常情况下按固定期限递增，避免将处理耗时、唤醒延迟逐帧累加；
-   若取帧/处理已超时，或唤醒跨过下一周期，则从当前时刻重建节拍，不追赶欠帧。 */
+/** @brief  Wait until the absolute deadline of the next frame.
+ *  @param timer          One-shot timer used to wake this task.
+ *  @param ready          Binary semaphore given by the timer callback.
+ *  @param next_frame_us  (in/out) Absolute monotonic deadline; advanced on return.
+ *  @retval ESP_OK, or the timer error (never silently degrades to uncapped capture).
+ *  esp_timer_get_time() is the monotonic microsecond clock; the one-shot timer
+ *  wakes the task through the semaphore without truncating the remaining time to
+ *  a FreeRTOS tick and without busy-waiting (which would starve the network task).
+ *  Normally the deadline advances by a fixed period so processing/wake latency
+ *  never accumulates per frame; if a capture/processing already ran past the
+ *  deadline, or a wake crossed into the next period, the cadence is rebuilt from
+ *  now instead of chasing missed frames. */
 static esp_err_t cam_wait_next_frame(esp_timer_handle_t timer, SemaphoreHandle_t ready,
                                      int64_t *next_frame_us)
 {
@@ -100,9 +125,9 @@ static esp_err_t cam_wait_next_frame(esp_timer_handle_t timer, SemaphoreHandle_t
     {
         esp_err_t err = esp_timer_start_once(timer, (uint64_t)(*next_frame_us - now_us));
         if (err != ESP_OK)
-            return err;   /* 不允许定时器故障后静默退化为不限速取帧 */
+            return err;   /* A timer failure must not silently degrade into uncapped capture. */
         xSemaphoreTake(ready, portMAX_DELAY);
-        now_us = esp_timer_get_time();   /* 唤醒后复核期限，不因提前唤醒突破节拍 */
+        now_us = esp_timer_get_time();   /* Re-check the deadline after waking so a spurious wakeup cannot break the cadence. */
     } while (now_us < *next_frame_us);
 
     *next_frame_us += s_frame_period_us;
@@ -111,39 +136,49 @@ static esp_err_t cam_wait_next_frame(esp_timer_handle_t timer, SemaphoreHandle_t
     return ESP_OK;
 }
 
-/* 15fps 带宽预算：QQVGA/QVGA 使用 q40，配合降帧率减少 JPEG 流量，
-   为命令/遥测留出空口余量；实际带宽随场景变化，VGA/SVGA 保持现有质量参数。 */
+/** @brief  JPEG quality graded by resolution.
+ *  @param fs  framesize.
+ *  @retval the esp32-camera quality value (0-63; lower = higher quality).
+ *  Quality is graded by resolution to control frame size/bandwidth while keeping
+ *  airtime headroom for commands and telemetry; real bandwidth varies with scene
+ *  content, so the VGA/SVGA values keep their current (measured) parameters. */
 static uint8_t cam_quality_for(framesize_t fs)
 {
     switch (fs)
     {
     case FRAMESIZE_QQVGA:
-    case FRAMESIZE_QVGA:  return 25;   /* 15fps + q25：画质优先；q35 实测仅 0.47Mbps，余量充裕 */
-    case FRAMESIZE_VGA:   return 30;   /* 按 SVGA 实测比例下修预估 ~1.1Mbps */
-    case FRAMESIZE_SVGA:  return 35;   /* q40 实测 1.55Mbps +0；q35 预估 ~1.9Mbps，切档后看 EAGAIN */
+    case FRAMESIZE_QVGA:  return 25;   /* q25: quality first; q35 measured only 0.47 Mbps, ample headroom. */
+    case FRAMESIZE_VGA:   return 30;   /* Estimated ~1.1 Mbps, scaled down from the SVGA measurement. */
+    case FRAMESIZE_SVGA:  return 35;   /* q40 measured 1.55 Mbps, +0 EAGAIN; q35 estimated ~1.9 Mbps — watch EAGAIN after switching. */
     default:              return 30;
     }
 }
 
-/* JPEG 帧缓冲按分辨率适配（2026-11-17 用户定案）：每档 = 实测帧上限 + 富余。
-   不可留空（留空=w*h/5 低估：QQVGA 3.8KB 实测 DMA overflow）。
-   热切换先改 cfg.frame_size 再 init，天然配套。未实测档（SVGA）取保守值。 */
+/** @brief  JPEG frame buffer size adapted to the resolution (user decision 2026-11-17).
+ *  @param fs  framesize.
+ *  @retval buffer size in bytes.
+ *  Each tier = the measured maximum frame size plus headroom. Never leave it to
+ *  the driver default (w*h/5 underestimates: QQVGA at 3.8 KB measured a DMA
+ *  overflow). A hot-swap sets cfg.frame_size before init, so the buffer tracks it
+ *  naturally. The unmeasured tier (SVGA) takes a conservative value. */
 static size_t cam_buffer_for(framesize_t fs)
 {
     switch (fs)
     {
-    case FRAMESIZE_QQVGA: return 16 * 1024;   /* 实测 2-5KB */
-    case FRAMESIZE_QVGA:  return 32 * 1024;   /* 实测 10-20KB */
-    case FRAMESIZE_VGA:   return 64 * 1024;   /* 实测 9-60KB（复杂场景擦边） */
-    case FRAMESIZE_SVGA:  return 96 * 1024;   /* 未实测，保守；首跑高纹理需校准 */
+    case FRAMESIZE_QQVGA: return 16 * 1024;   /* Measured 2-5 KB. */
+    case FRAMESIZE_QVGA:  return 32 * 1024;   /* Measured 10-20 KB. */
+    case FRAMESIZE_VGA:   return 64 * 1024;   /* Measured 9-60 KB (complex scenes graze the edge). */
+    case FRAMESIZE_SVGA:  return 96 * 1024;   /* Not measured yet, conservative; calibrate on first high-texture run. */
     default:              return 64 * 1024;
     }
 }
 
-/* esp_camera_deinit() 不会撤销 gpio_config 对输出引脚的保留——IDF v6.1 的
-   gpio_config 对输出脚自动 esp_gpio_reserve，热切换再 init 会报
-   "gpio: conflict found for GPIO[PWDN/RST]"。deinit 后主动 revoke 相机控制脚
-   （PWDN/RST；数据线/同步线是输入配置，不会被保留）。 */
+/** @brief  Release the camera control GPIOs after deinit.
+ *  @retval none
+ *  esp_camera_deinit() does not undo gpio_config's output-pin reservation — IDF
+ *  v6.1's gpio_config auto-reserves output pins, so a hot-swap re-init reports
+ *  "gpio: conflict found for GPIO[PWDN/RST]". After deinit we actively revoke the
+ *  control pins (PWDN/RST; the data/sync lines are inputs and never reserved). */
 static void cam_release_control_gpios(void)
 {
     uint64_t mask = 0;
@@ -152,34 +187,37 @@ static void cam_release_control_gpios(void)
     if (mask) esp_gpio_revoke(mask);
 }
 
-/* 传感器硬复位：esp_camera_deinit 只停 DMA，不会让 OV2640 停流（XCLK 模组自带，
-   传感器持续出流）。流模式下 OV2640 对时序寄存器写操作 NAK，
-   重新 init 时 set_framesize 必然失败——日志铁证：probe 读 PID 正常但
-   "W [3804]=0a fail"。复位 RST+PWDN 强制传感器回默认态，保证下次 init 干净。 */
+/** @brief  Hard-reset the camera sensor.
+ *  @retval none
+ *  esp_camera_deinit only stops DMA; it does NOT stop the OV2640 from streaming
+ *  (the module's own XCLK keeps it outputting). In streaming mode the OV2640
+ *  NAKs writes to its timing registers, so set_framesize on re-init fails — the
+ *  log signature is: probe reads the PID fine, but "W [3804]=0a fail". Toggling
+ *  RST+PWDN forces the sensor back to its default state so the next init is clean. */
 static void cam_sensor_hard_reset(void)
 {
     if (PEO_PM_CAM_RST >= 0 && PEO_PM_CAM_RST < 64)
     {
         gpio_set_direction((gpio_num_t)PEO_PM_CAM_RST, GPIO_MODE_OUTPUT);
-        gpio_set_level((gpio_num_t)PEO_PM_CAM_RST, 0);    /* RESETB 低有效：复位 */
+        gpio_set_level((gpio_num_t)PEO_PM_CAM_RST, 0);    /* RESETB active low: assert reset. */
     }
     if (PEO_PM_CAM_PWDN >= 0 && PEO_PM_CAM_PWDN < 64)
     {
         gpio_set_direction((gpio_num_t)PEO_PM_CAM_PWDN, GPIO_MODE_OUTPUT);
-        gpio_set_level((gpio_num_t)PEO_PM_CAM_PWDN, 1);   /* PWDN 高有效：掉电 */
+        gpio_set_level((gpio_num_t)PEO_PM_CAM_PWDN, 1);   /* PWDN active high: power down. */
     }
     vTaskDelay(pdMS_TO_TICKS(20));
     if (PEO_PM_CAM_PWDN >= 0 && PEO_PM_CAM_PWDN < 64)
-        gpio_set_level((gpio_num_t)PEO_PM_CAM_PWDN, 0);   /* 上电 */
+        gpio_set_level((gpio_num_t)PEO_PM_CAM_PWDN, 0);   /* Power up. */
     if (PEO_PM_CAM_RST >= 0 && PEO_PM_CAM_RST < 64)
-        gpio_set_level((gpio_num_t)PEO_PM_CAM_RST, 1);    /* 释放复位 */
-    vTaskDelay(pdMS_TO_TICKS(20));   /* OV2640 复位后需数 ms 才能应答 SCCB */
-    cam_release_control_gpios();     /* 清除此前 gpio_config 可能留下的输出保留；gpio_set_direction 不产生保留 */
+        gpio_set_level((gpio_num_t)PEO_PM_CAM_RST, 1);    /* Release reset. */
+    vTaskDelay(pdMS_TO_TICKS(20));   /* The OV2640 needs several ms after reset before it answers SCCB. */
+    cam_release_control_gpios();     /* Clear any output reserve a previous gpio_config left; gpio_set_direction does not reserve. */
 }
 
 void camera_task(void *arg)
 {
-    bool active = false;  /* 仅本任务使用：false 表示驱动已 deinit，等待新请求自愈 */
+    bool active = false;  /* Task-local: false = driver deinitialized, waiting for a new request to self-heal. */
     camera_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     cfg.pin_pwdn       = PEO_PM_CAM_PWDN;
@@ -203,14 +241,15 @@ void camera_task(void *arg)
     cfg.ledc_channel   = LEDC_CHANNEL_0;
     cfg.pixel_format   = PIXFORMAT_JPEG;
     cfg.frame_size     = FRAMESIZE_QVGA;
-    cfg.jpeg_buffer_size = cam_buffer_for(FRAMESIZE_QVGA);   /* 按分辨率适配（见 cam_buffer_for） */
-    cfg.jpeg_quality   = cam_quality_for(FRAMESIZE_QVGA);   /* 按分辨率分级（见 cam_quality_for） */
-    cfg.fb_count       = 3;    /* 3 块 + GRAB_LATEST（2026-11-17 用户拍板）：
-                                 队列 2 槽 + 1 块 driver 专用 DMA/编码；
-                                 队列满弹旧入新——应用永远拿到最新帧（低延迟），
-                                 代价 = driver 恒满速抓帧、旧帧在队列弹旧中丢弃。 */
+    cfg.jpeg_buffer_size = cam_buffer_for(FRAMESIZE_QVGA);   /* Sized per resolution (see cam_buffer_for). */
+    cfg.jpeg_quality   = cam_quality_for(FRAMESIZE_QVGA);   /* Graded per resolution (see cam_quality_for). */
+    cfg.fb_count       = 3;    /* 3 buffers + GRAB_LATEST (user decision 2026-11-17):
+                                 2 queue slots + 1 driver-dedicated DMA/encode buffer;
+                                 when the queue is full the oldest is evicted for the newest —
+                                 the app always gets the latest frame (low latency) at the cost
+                                 of the driver capturing at full rate and old frames being dropped. */
     cfg.fb_location    = CAMERA_FB_IN_PSRAM;
-    cfg.grab_mode      = CAMERA_GRAB_LATEST;   /* 永远最新：弹旧回收 fb，不停抓 */
+    cfg.grab_mode      = CAMERA_GRAB_LATEST;   /* Always latest: evict-and-return fb, never stop capturing. */
 
     esp_err_t err = ESP_ERR_INVALID_STATE;
     if (!s_cam_cmd_queue)
@@ -233,7 +272,7 @@ void camera_task(void *arg)
     else
     {
         ESP_LOGI(TAG, "camera up: OV2640 QVGA JPEG");
-        /* 启动诊断完成后立即归还：空闲态（无客户端/视频关）相机恒为 deinit */
+        /* Return immediately after the boot diagnostic: in the idle state (no client / video off) the camera is always deinitialized. */
         esp_net_video_flush();
         esp_camera_deinit();
         cam_release_control_gpios();
@@ -249,8 +288,9 @@ void camera_task(void *arg)
         return;
     }
 
-    /* 任务生命周期内只创建一次；待命期间单次定时器已到期，无周期回调空转。
-       此处相机已 deinit，资源申请失败可以直接清理并退出。 */
+    /* Created once per task lifetime; while on standby the one-shot timer has
+       expired, so no periodic callback idles. The camera is already deinitialized
+       here, so a resource-allocation failure can clean up and exit directly. */
     SemaphoreHandle_t frame_ready = xSemaphoreCreateBinary();
     esp_timer_handle_t frame_timer = NULL;
     esp_timer_create_args_t timer_args = {};
@@ -266,12 +306,13 @@ void camera_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    int64_t next_frame_us = 0;   /* 0 表示新一轮抓帧，首帧直接取出并发送 */
+    int64_t next_frame_us = 0;   /* 0 = start a fresh capture round: the first frame is taken and sent immediately. */
 
     for (;;)
     {
-        /* 门控：无客户端或视频未启用 → 阻塞等待（camera 空闲态恒为 deinit）。
-           CAM_RES 留在覆盖队列中，恢复初始化前先应用最新请求。 */
+        /* Gate: no client or video disabled -> block waiting (the idle camera is
+           always deinitialized). CAM_RES stays in the overwrite queue, and the
+           latest request is applied before restoring init. */
         xEventGroupWaitBits(eg, PEO_NET_EVT_CLIENT | PEO_NET_EVT_VIDEO,
                             pdFALSE, pdTRUE, portMAX_DELAY);
         if (!active)
@@ -279,15 +320,15 @@ void camera_task(void *arg)
             uint8_t req = (uint8_t)cfg.frame_size;
             uint8_t newer;
             while (s_cam_cmd_queue && xQueueReceive(s_cam_cmd_queue, &newer, 0) == pdTRUE)
-                req = newer;   /* 初始化失败重试时也先应用最新请求 */
+                req = newer;   /* Apply the latest request even before retrying a failed init. */
             if (req != cfg.frame_size)
             {
                 cfg.frame_size = (framesize_t)req;
                 cfg.jpeg_quality = cam_quality_for(cfg.frame_size);
-                cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* 适配新分辨率 */
+                cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* Re-size for the new resolution. */
             }
-            apply_frame_period(cfg.frame_size);   /* 无条件同步：启动默认档无切换也必须应用分级帧率 */
-            /* 从空闲恢复：硬复位（deinit 后传感器仍处流模式）后重新 init */
+            apply_frame_period(cfg.frame_size);   /* Unconditional sync: the boot default must apply its graded frame rate even without a switch. */
+            /* Recover from idle: hard reset (the sensor is still streaming after deinit), then re-init. */
             cam_sensor_hard_reset();
             esp_err_t e = esp_psram_is_initialized()
                         ? esp_camera_init(&cfg) : ESP_ERR_INVALID_STATE;
@@ -298,28 +339,29 @@ void camera_task(void *arg)
                 continue;
             }
             active = true;
-            next_frame_us = 0;   /* 重新开视频后首帧不继承上轮期限 */
+            next_frame_us = 0;   /* After video restarts, the first frame must not inherit the previous deadline. */
             ESP_LOGI(TAG, "camera resumed: framesize=%u", (unsigned)cfg.frame_size);
         }
 
         while ((xEventGroupGetBits(eg) & (PEO_NET_EVT_CLIENT | PEO_NET_EVT_VIDEO)) ==
                (PEO_NET_EVT_CLIENT | PEO_NET_EVT_VIDEO))
         {
-        /* 分辨率热切换：deinit 后硬复位，再 init 重新分配帧缓冲。
-           首次失败后按最新请求重试一次，再失败才回退；回退失败后 deinit 待命。 */
+        /* Resolution hot-swap: deinit, hard reset, then init reallocates the
+           frame buffers. On a first failure retry once with the latest request;
+           only then roll back; if the rollback also fails, deinit and wait. */
         uint8_t req;
         if (s_cam_cmd_queue && xQueueReceive(s_cam_cmd_queue, &req, 0) == pdTRUE)
         {
             uint8_t newer;
             while (xQueueReceive(s_cam_cmd_queue, &newer, 0) == pdTRUE)
-                req = newer;   /* 只应用最新一次请求 */
+                req = newer;   /* Apply only the latest request. */
             if (!active || req != cfg.frame_size)
             {
                 framesize_t old_size = cfg.frame_size;
                 ESP_LOGI(TAG, "cam res switch %u -> %u", (unsigned)old_size, (unsigned)req);
                 cfg.frame_size = (framesize_t)req;
-                cfg.jpeg_quality = cam_quality_for(cfg.frame_size);   /* 质量随分辨率分级，控制帧大小/带宽 */
-                cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* 缓冲随分辨率适配 */
+                cfg.jpeg_quality = cam_quality_for(cfg.frame_size);   /* Quality grades with resolution, controlling frame size/bandwidth. */
+                cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* Buffer adapts to the resolution. */
                 apply_frame_period(cfg.frame_size);
                 active = false;
                 esp_net_video_flush();
@@ -336,8 +378,10 @@ void camera_task(void *arg)
                 {
                     ESP_LOGW(TAG, "cam res %u init failed (0x%x), retry once",
                              (unsigned)req, (int)e);
-                    /* 复用 newer 记录是否合入期间的新请求；队列为空时 req 保持原目标。
-                       只重试一次，把恢复服务与应用最新请求合并，避免反复 init。 */
+                    /* Reuse newer to record whether a new request arrived meanwhile;
+                       when the queue is empty req keeps the original target. Retry only
+                       once, merging "restore service" and "apply latest request" to avoid
+                       repeated inits. */
                     newer = 0;
                     while (xQueueReceive(s_cam_cmd_queue, &req, 0) == pdTRUE)
                         newer = 1;
@@ -347,7 +391,7 @@ void camera_task(void *arg)
                     cfg.jpeg_quality = cam_quality_for(cfg.frame_size);
                     apply_frame_period(cfg.frame_size);
                     esp_net_video_flush();
-                    esp_camera_deinit();   /* 清理失败 init 的半配置态 */
+                    esp_camera_deinit();   /* Clean up the half-configured state of the failed init. */
                     cam_release_control_gpios();
                     cam_sensor_hard_reset();
                     e = esp_psram_is_initialized() ? esp_camera_init(&cfg) : ESP_ERR_INVALID_STATE;
@@ -363,10 +407,10 @@ void camera_task(void *arg)
                                  (unsigned)req, (int)e, (unsigned)old_size);
                         cfg.frame_size = old_size;
                         cfg.jpeg_quality = cam_quality_for(cfg.frame_size);
-                        cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* 回退同步缓冲 */
-                        apply_frame_period(cfg.frame_size);   /* 回退同步帧率 */
+                        cfg.jpeg_buffer_size = cam_buffer_for(cfg.frame_size);   /* Revert: sync the buffer. */
+                        apply_frame_period(cfg.frame_size);   /* Revert: sync the frame rate. */
                         esp_net_video_flush();
-                        esp_camera_deinit();   /* 清理重试失败的半配置态 */
+                        esp_camera_deinit();   /* Clean up the half-configured state of the failed retry. */
                         cam_release_control_gpios();
                         cam_sensor_hard_reset();
                         e = esp_psram_is_initialized() ? esp_camera_init(&cfg) : ESP_ERR_INVALID_STATE;
@@ -384,41 +428,43 @@ void camera_task(void *arg)
                         }
                     }
                 }
-                next_frame_us = 0;   /* 热切换/回退后也立即发送首帧，不追赶停机期间的欠帧 */
+                next_frame_us = 0;   /* After a hot-swap/rollback, send the first frame immediately; do not chase the frames missed during the stop. */
             }
         }
 
         if (!active)
-            break;   /* 分辨率切换全部失败已 deinit：退出抓帧循环，回门控等待自愈 */
+            break;   /* All resolution-switch attempts failed and we deinitialized: leave the capture loop and wait for self-heal at the gate. */
 
         camera_fb_t *fb = esp_camera_fb_get();
         if (next_frame_us == 0)
             next_frame_us = esp_timer_get_time() + s_frame_period_us;
         if (fb != NULL && !esp_net_video_enabled())
         {
-            esp_camera_fb_return(fb);   /* 视频关闭：抓帧即弃（统计已移至网络层） */
+            esp_camera_fb_return(fb);   /* Video off: capture and discard (stats moved to the network layer). */
         }
         else if (fb != NULL)
         {
-            /* 零拷贝入队：所有权转移给 esp_net，由发送任务归还。
-               TCP 自带完整性校验，无需应用层 CRC。 */
+            /* Zero-copy enqueue: ownership transfers to esp_net, which returns
+               the frame. TCP guarantees integrity, so no application-layer CRC. */
             esp_net_video_set_frame_owner(fb);
             if (!esp_net_send_video(fb->buf, fb->len))
-                esp_camera_fb_return(fb);   /* 未入队，所有权仍属 camera */
+                esp_camera_fb_return(fb);   /* Not enqueued: ownership stays with camera. */
         }
 
-        /* 所有取帧结果统一收尾：成功入队、失败归还、视频关闭 skipped、空帧。
-           等待期间本任务不持有 fb；首帧发送前不等待，下一轮再向 driver 取帧，
-           让 GRAB_LATEST 在间隔内正常弹旧。视频关闭后按原有门控退出并 deinit。 */
+        /* One common epilogue for every capture result: successful enqueue,
+           failed return, video-off skipped, empty frame. While waiting, this task
+           holds no fb; the first frame is sent without waiting, and the next round
+           takes from the driver again, letting GRAB_LATEST evict normally between
+           frames. After video turns off, the original gate exits and deinitializes. */
         pace_err = cam_wait_next_frame(frame_timer, frame_ready, &next_frame_us);
         if (pace_err != ESP_OK)
         {
             ESP_LOGE(TAG, "camera pacing wait failed (0x%x); task exits", (int)pace_err);
-            break;   /* 先走统一退场，归还 esp_net 持有的帧，再释放节拍资源 */
+            break;   /* Take the common exit path: return frames held by esp_net, then free the pacing resources. */
         }
         }
 
-        /* 退场（断连/视频关/切换全败）：完整 deinit，归还 PSRAM 帧缓冲与 GPIO 保留 */
+        /* Exit (disconnect / video off / switch all failed): full deinit, returning the PSRAM frame buffers and GPIO reserves. */
         esp_net_video_flush();
         esp_camera_deinit();
         cam_release_control_gpios();
@@ -428,7 +474,7 @@ void camera_task(void *arg)
             break;
     }
 
-    /* IDF v6.1：停止并等待可能正在另一核执行的回调，之后才能删除信号量。 */
+    /* IDF v6.1: stop and wait for a callback that may still run on the other core before deleting the semaphore. */
     esp_timer_stop_blocking(frame_timer, portMAX_DELAY);
     esp_timer_delete(frame_timer);
     vSemaphoreDelete(frame_ready);

@@ -1,14 +1,21 @@
 /**
- * @file    telemetry.cpp
- * @brief   PEO Rover - 遥测合并任务：SensorData -> JSON -> 广播
+ * @file  telemetry.cpp
+ * @brief Telemetry merge task: SensorData -> JSON -> broadcast to the upper computer.
  *
- * JSON 结构见 PROTOCOL.md §2.1（传感器流）：
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * JSON structure (PROTOCOL.md section 2.1, the sensor stream):
  *   {"type":"sensor","tick":..,"dist":{..},"imu":{..},"wheels":{..},
  *    "power":{..},"cmd_ack":{..},"sys":{..}}
  *
- * 2026-11-15：gamepad（C3 手柄桥）与 macro（宏引擎）字段已随组件废弃删除。
+ * On 2026-11-15 the gamepad (C3 controller bridge) and macro (macro engine)
+ * fields were removed together with those components.
  *
- * 每 50ms 非破坏性 peek 最新传感器快照，名义回报频率 20Hz。
+ * Every 50 ms we non-destructively peek the latest sensor snapshot, so the
+ * nominal report rate is 20 Hz.
  */
 
 #include "telemetry.h"
@@ -31,7 +38,8 @@
 
 static const char *TAG = "telemetry";
 
-/* S3 固件版本号（随遥测上报，供上位机核对三端版本匹配） */
+/* S3 firmware version (reported with telemetry so the upper computer can verify
+ * that all three ends of the system are on matching versions). */
 #define PEO_S3_FW  (28U)
 
 static constexpr size_t JSON_MAX = 1024;
@@ -46,12 +54,16 @@ static_assert(FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128,
 static_assert(sizeof(size_t) <= sizeof(uint32_t), "JSON RAM capacity assumes at most 32-bit size_t");
 static_assert(JSON_MAX >= 912, "JSON buffer must hold the worst complete sensor line");
 
+/* One sample of the system monitor (CPU load and RAM). */
 struct sys_sample_t {
-    unsigned cpu0, cpu1;
-    size_t ram_free, ram_total;
+    unsigned cpu0, cpu1;      /* Per-core busy percentage, 0-100. */
+    size_t ram_free, ram_total;   /* Internal SRAM heap, in bytes. */
 };
 
-/* 仅由 telemetry 任务采样；首轮为 0，不足 1 秒保持上轮值。 */
+/** @brief  Sample CPU load (1 Hz cache) and RAM (fresh every call).
+ *  @retval a sys_sample_t with per-core busy percent and internal heap bytes.
+ *  Only the telemetry task calls this; the first call returns 0 for CPU, and a
+ *  window shorter than 1 s keeps the previous CPU values. */
 static sys_sample_t sample_sys(void)
 {
     static bool sampled = false;
@@ -66,10 +78,12 @@ static sys_sample_t sample_sys(void)
             const configRUN_TIME_COUNTER_TYPE idle = ulTaskGetIdleRunTimeCounterForCore(core);
             if (sampled)
             {
-                /* IDF v6.1 xtensa port.c 的 xPortGetRunTimeCounterValue() 在
-                   ESP_TIMER 配置下直接返回 esp_timer_get_time()：1 tick = 1 us。
-                   按核 idle 累计值在任务切出时更新；无符号减法兼容计数回绕。
-                   每核窗口总量为 window_us，不乘核数；边界误差限制到 0~100。 */
+                /* With IDF v6.1's xtensa port.c and ESP_TIMER configuration,
+                 * xPortGetRunTimeCounterValue() returns esp_timer_get_time()
+                 * directly: 1 tick = 1 us. Per-core idle accumulators update on
+                 * task switch; the unsigned subtraction tolerates counter wrap.
+                 * Each core's window total is window_us (not multiplied by the
+                 * core count); the boundary error is bounded to 0..100. */
                 const uint64_t idle_delta = (configRUN_TIME_COUNTER_TYPE)(idle - last_idle[core]);
                 const uint64_t idle_pct = idle_delta * 100 / (uint64_t)(now_us - last_us);
                 cpu[core] = idle_pct >= 100 ? 0 : 100 - (unsigned)idle_pct;
@@ -84,7 +98,11 @@ static sys_sample_t sample_sys(void)
             heap_caps_get_total_size(MALLOC_CAP_INTERNAL)};
 }
 
-/** Return a complete owned JSON string, or NULL; never publish an OOM-truncated object. */
+/** @brief  Build one complete telemetry JSON line.
+ *  @param s           Sensor snapshot to serialize.
+ *  @param link_stale  true = the snapshot is old or missing (adds "link_stale":true).
+ *  @retval a malloc'd, NUL-terminated JSON string (caller takes ownership), or
+ *          NULL on allocation/serialization failure. Never returns a truncated object. */
 static char *build_json(const esp_link_sensor_t *s, bool link_stale)
 {
     char *out = (char *)malloc(JSON_MAX);
@@ -148,6 +166,9 @@ static char *build_json(const esp_link_sensor_t *s, bool link_stale)
     return out;
 }
 
+/** @brief  Telemetry task: peek the sensor snapshot at 20 Hz and broadcast it.
+ *  @param arg  Unused.
+ *  @retval none (runs forever). */
 void telemetry_task(void *arg)
 {
     EventGroupHandle_t eg = esp_net_conn_event();
@@ -159,42 +180,50 @@ void telemetry_task(void *arg)
     }
     ESP_LOGI(TAG, "task up");
 
-    /* 锁驱动遥测降速计数器（手操 2Hz / 自主 20Hz） */
+    /* Lock-driven telemetry throttle counter (manual 2 Hz / autonomous 20 Hz). */
     unsigned tick = 0;
 
     while (1)
     {
-        /* 无客户端 → 阻塞静止、零广播（esp_net accept 时置位唤醒） */
+        /* No client -> block silently and broadcast nothing (woken when the
+         * network task accepts a client). */
         xEventGroupWaitBits(eg, PEO_NET_EVT_CLIENT, pdFALSE, pdTRUE, portMAX_DELAY);
         TickType_t last_wake = xTaskGetTickCount();
         while (xEventGroupGetBits(eg) & PEO_NET_EVT_CLIENT)
         {
-        /* Latest-value mailbox（单读者：telemetry）。 */
-        /* 20Hz 遥测：固定 50ms 节拍，避免 JSON 处理时间累积到周期中。
-           重新连接时重置节拍基准；sys 对象及传感器数据格式保持不变。 */
+        /* Latest-value mailbox (single reader: telemetry). */
+        /* 20 Hz telemetry: fixed 50 ms cadence so JSON build time never creeps
+         * into the period. The cadence baseline resets on reconnect; the sys
+         * object and the sensor data format stay the same. */
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
         esp_link_snapshot_t sn;
         const bool have_sensor = xQueuePeek(esp_link_sensor_queue, &sn, 0) == pdTRUE;
         if (!have_sensor)
         {
-            /* 无传感器快照（F407 未接/链路断）：仍广播 sys（CPU/RAM 监控
-               独立于传感器流）。status 置 1=无效，避免零值被解读为有效测距；
-               无快照直接标记 link_stale，不依赖启动时间是否已超过阈值。 */
+            /* No sensor snapshot (F407 unplugged / link down): still broadcast sys
+             * (CPU/RAM monitoring is independent of the sensor stream). Distance
+             * status is set to 1 = invalid so a zero is not read as a real reading;
+             * with no snapshot we flag link_stale directly, without depending on
+             * whether the uptime already exceeds the threshold. */
             memset(&sn, 0, sizeof(sn));
             sn.sensor.dist_front_status = 1;
             sn.sensor.dist_left_status  = 1;
             sn.sensor.dist_right_status = 1;
         }
-        /* 所有 peek 后再取 now，避免跨核刚发布的快照时间晚于先前采样而导致年龄下溢。 */
+        /* Take now AFTER all peeks, so a snapshot published from the other core
+         * with a later timestamp than our earlier sample cannot underflow the age. */
         const uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         const bool link_stale = !have_sensor ||
             (uint32_t)(now - sn.received_ms) > ESP_LINK_STALE_MS;
 
-        /* 保留快照 peek；无客户端时跳过 JSON 分配/序列化及入队，下一轮仍按原节拍延时。 */
+        /* Keep the snapshot as a peek; with no client, skip JSON alloc/serialize
+         * and enqueue, and the next round still delays on the normal cadence. */
         if (!esp_net_has_client()) continue;
 
-        /* 锁驱动遥测降速：锁关闭（手操 lock=0）→ 2Hz；锁开启（自主 lock=1）→ 20Hz。
-           固定 50ms 节拍 peek（保持快照新鲜），手操时每 10 拍（500ms）发布一次。 */
+        /* Lock-driven telemetry throttle: lock closed (manual, lock=0) -> 2 Hz;
+         * lock open (autonomous, lock=1) -> 20 Hz. We still peek on a fixed 50 ms
+         * cadence (keeps the snapshot fresh); in manual mode we publish once every
+         * 10 ticks (500 ms). */
         if (sn.sensor.lock == 0 && (tick % 10) != 0)
         {
             ++tick;
@@ -206,7 +235,7 @@ void telemetry_task(void *arg)
         char *json = build_json(&sn.sensor, link_stale);
         if (gen_before != esp_link_command_generation())
         {
-            free(json);  /* 拼接期间发生 STOP/代次变化，丢弃混合代次帧。 */
+            free(json);  /* STOP/generation changed during the build: drop the mixed-epoch frame. */
             continue;
         }
         if (json == NULL)
