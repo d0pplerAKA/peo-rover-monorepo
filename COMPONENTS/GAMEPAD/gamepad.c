@@ -11,6 +11,7 @@
 #include "include/gamepad.h"
 
 #include "COMPONENTS/CONTROL/include/control.h"
+#include "COMPONENTS/MOTOR/include/motor.h"
 #include "COMPONENTS/TIMER/include/timer.h"
 #include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
 #include "COMPONENTS/TOF400C/include/tof400c.h"
@@ -342,8 +343,17 @@ void GAMEPAD_Process(void)
     if (m4 < -GAMEPAD_SPEED_MAX) m4 = -GAMEPAD_SPEED_MAX;
 
     {
+#if PEO_ENABLE_CONTROL
         const int32_t targets[4] = { m1, m2, m3, m4 };
         CONTROL_SetTargetSpeedAll(targets);
+#elif PEO_ENABLE_MOTOR
+        /* 开环保底：无闭环 TIM6 循环，换算成 PWM 千分比直接直驱。
+           GAMEPAD_SPEED_MAX(4424, 0.01cm/s) -> MOTOR_SPEED_MAX(1000, per-mille)。 */
+        MOTOR_SetSpeed(MOTOR_M1, (int16_t)(m1 * MOTOR_SPEED_MAX / GAMEPAD_SPEED_MAX));
+        MOTOR_SetSpeed(MOTOR_M2, (int16_t)(m2 * MOTOR_SPEED_MAX / GAMEPAD_SPEED_MAX));
+        MOTOR_SetSpeed(MOTOR_M3, (int16_t)(m3 * MOTOR_SPEED_MAX / GAMEPAD_SPEED_MAX));
+        MOTOR_SetSpeed(MOTOR_M4, (int16_t)(m4 * MOTOR_SPEED_MAX / GAMEPAD_SPEED_MAX));
+#endif
     }
 
     /* 按键上升沿：Y/X/A 分别 toggle 测距/电流/姿态。 */

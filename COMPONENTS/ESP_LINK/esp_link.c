@@ -260,17 +260,19 @@ void ESP_LINK_ExecCommand(const ESP_Cmd_t *cmd)
 
         case ESP_CMD_MOTOR:
         {
-#if PEO_ENABLE_MOTOR && PEO_ENABLE_CONTROL
+#if PEO_ENABLE_MOTOR
             uint8_t motor;
             int16_t speed;
             if (cmd->param_len < 3) { status = ESP_CMD_ERR_BADLEN; break; }
             motor = cmd->param[0];
             speed = (int16_t)(cmd->param[1] | ((uint16_t)cmd->param[2] << 8));
             if (motor >= SENSOR_WHEEL_COUNT) { status = ESP_CMD_ERR_BADMOTOR; break; }
-            CONTROL_SetMode(CONTROL_MODE_OPEN);   /* 开环直驱，绕过 PI */
+#if PEO_ENABLE_CONTROL
+            CONTROL_SetMode(CONTROL_MODE_OPEN);   /* 有闭环 TIM6 循环时才需切模式防覆盖 */
+#endif
             MOTOR_SetSpeed(motor, speed);
 #else
-            status = ESP_CMD_ERR_INVALID;   /* 电机/CONTROL 未启用，运动命令拒绝 */
+            status = ESP_CMD_ERR_INVALID;   /* 电机未启用，运动命令拒绝 */
 #endif
             break;
         }
