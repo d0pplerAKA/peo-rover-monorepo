@@ -1,19 +1,27 @@
 /**
- ******************************************************************************
- * @file    nvic.c
- * @brief   PEO Rover - NVIC component: one-shot total interrupt initialization
+ * @file  nvic.c
+ * @brief Configure all application interrupt channels and their priorities centrally.
  *
- * The ONLY place in the whole firmware that touches NVIC registers.
- * Modules never call NVIC_* functions - they rely on this function.
- ******************************************************************************
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * Central owner of application IRQ-channel enables and priority grouping.
+ * Modules rely on this setup; TIMER separately configures the core SysTick
+ * priority through SysTick_Config(), and host reset may use NVIC_SystemReset().
  */
 #include "include/nvic.h"
 
 /**
- * @brief  Set the priority group (Group 2) and enable every interrupt
- *         channel in the design map with its assigned priority.
- * @note   Must run AFTER RCC_Clock_Init() (clocks first) and BEFORE any
- *         module init that arms peripheral interrupt bits.
+ * @brief Set interrupt priorities and enable all application interrupt channels.
+ *
+ * Called second in main, after RCC and before peripheral setup. Smaller preemption
+ * numbers have higher priority; each component separately enables its own peripheral
+ * interrupt source.
+ * @note No arguments are required.
+ * @retval None This function does not return a value.
+ * @note Must run AFTER RCC_Clock_Init() (clocks first) and BEFORE any module init that
+ *       arms peripheral interrupt bits.
  */
 void NVIC_InitAll(void)
 {

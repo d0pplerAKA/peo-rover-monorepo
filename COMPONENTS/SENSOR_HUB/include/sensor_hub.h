@@ -1,156 +1,213 @@
 /**
- ******************************************************************************
- * @file    sensor_hub.h
- * @brief   PEO Rover - SENSOR HUB: 传感器数据汇聚（推送式 + 一致快照）
+ * @file  sensor_hub.h
+ * @brief Define telemetry fields, sample rates, and module enable switches.
  *
- * 各传感器在自己的中断里（按各自 sample rate）把最新数据【推送】到 hub，
- * 上层通过 SENSOR_GetHub() 一次性获取带时间戳的一致快照。
- *
- * 推送式（push）数据流：
- *   MPU6050  EXTI3 ISR（100 Hz）     -> SENSOR_PushMpu(...)
- *   VL53L1X  EXTI0/1/2 ISR（~13 Hz） -> SENSOR_PushDist(...)
- *   CONTROL  TIM6 ISR（1 kHz）       -> SENSOR_PushWheel(...)
- *
- * 每个字段组带一个「最后更新时间戳」（TIMER_GetTick() 的 SysTick ms 计数），
- * 快照里能看出每份数据是多久前刷新的。
- *
- * 一致性：SENSOR_GetHub() 关中断拷贝整个结构体，保证字段间一致（同一时刻 T）。
- *
- * 数据访问（唯一入口）：所有传感器数据统一经 SENSOR_GetHub() 读取——读整个
- * SensorData_t 快照后按字段访问（如 s.current_mA[0]、s.dist_front_mm、s.quat_w）。
- * 各传感器组件（MPU6050/VL53/INA3221）不提供单独 getter。
- ******************************************************************************
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * Each sensor pushes its latest readings from its own interrupt at its own
+ * rate. Call SENSOR_GetHub() to copy a consistent view of the current state.
+ * Typical push paths: MPU6050 EXTI3 at 100 Hz -> SENSOR_PushMpu();
+ * VL53L1X EXTI0/1/2 (profile dependent, historically about 13 Hz) ->
+ * SENSOR_PushDist(); CONTROL TIM6 at 1 kHz -> SENSOR_PushWheel().
+ * INA3221 TIM7 also pushes current/voltage readings at its configured rate.
+ * Each group includes its last update time, measured by TIMER_GetTick() in
+ * SysTick milliseconds, so consumers can judge how old each reading is.
+ * SENSOR_GetHub() briefly masks interrupts while copying the structure.
+ * This prevents a writer from changing fields during the copy; it does not
+ * make sensors with different update rates sample at the same instant.
+ * Read sensor measurements through this single entry point, then use fields
+ * such as current_mA[0], dist_front_mm, and quat_w. MPU6050, VL53, and INA3221
+ * do not provide separate measurement getters.
  */
 #ifndef __SENSOR_HUB_H__
 #define __SENSOR_HUB_H__
 
 #include "stm32f4xx.h"
 
-/* 测距索引（与 TOF400C_FRONT/LEFT/RIGHT 的 0/1/2 一致） */
-#define SENSOR_DIST_FRONT   (0U)
-#define SENSOR_DIST_LEFT    (1U)
-#define SENSOR_DIST_RIGHT   (2U)
+/* Distance-sensor indices: same 0/1/2 order as TOF400C_FRONT/LEFT/RIGHT. */
+#define SENSOR_DIST_FRONT   (0U)  /* Index of the forward-facing distance sensor. */
+#define SENSOR_DIST_LEFT    (1U)  /* Index of the left-facing distance sensor. */
+#define SENSOR_DIST_RIGHT   (2U)  /* Index of the right-facing distance sensor. */
 
-/* 电机数量 */
-#define SENSOR_WHEEL_COUNT  (4U)
+/* Number of driven wheels. */
+#define SENSOR_WHEEL_COUNT  (4U)  /* Number of entries in each per-wheel telemetry array. */
 
-/* ============================================================================
-   传感器采样速率汇总（集中预定义）
-   ----------------------------------------------------------------------------
-   | 数据源            | 触发方式        | 速率宏 / 档位                | 值      |
-   |-------------------|-----------------|------------------------------|---------|
-   | 编码器/控制循环   | TIM6 中断        | PEO_CTRL_LOOP_HZ (control.h) | 1000 Hz |
-   | MPU6050           | EXTI3 中断       | MPU6050_SAMPLE_HZ (mpu6050.h)| 100 Hz  |
-   | VL53L1X 测距      | EXTI0/1/2 中断   | PEO_PM_VL53_PROFILE (tof400c)| 档位    |
-   | INA3221 电流电压  | TIM7 轮询        | SENSOR_RATE_INA_HZ (本文件)  | 10 Hz   |
-   ============================================================================ */
-#define SENSOR_RATE_INA_HZ     (10U)   /* INA3221 电流/电压轮询速率（TIM7） */
-#define SENSOR_RATE_REPORT_HZ  (50U)   /* sensorhub 上报周期 */
+/* Central sensor-rate overview (rates in Hz):
+   Encoder/control: TIM6 interrupt, PEO_CTRL_LOOP_HZ in control.h, 1000 Hz.
+   MPU6050: EXTI3 interrupt, MPU6050_SAMPLE_HZ in mpu6050.h, 100 Hz.
+   VL53L1X range: EXTI0/1/2, PEO_PM_VL53_PROFILE in tof400c.h, profile dependent.
+   INA3221 current/voltage: TIM7 polling, SENSOR_RATE_INA_HZ here, 10 Hz. */
+#define SENSOR_RATE_INA_HZ     (10U)   /* INA3221 current/voltage polling frequency on TIM7, in Hz. */
+#define SENSOR_RATE_REPORT_HZ  (50U)   /* Sensor-hub reporting frequency in Hz (50 Hz means one report every 20 ms). */
 
-/* ============================================================================
-   模块启用开关（0 = 禁用，1 = 启用）
-   ----------------------------------------------------------------------------
-   控制 main 里各模块 Init 的编译/调用；boot banner 的 MODULES 节自动同步。
-   集中在此（而非 main.c），因为 print_boot_banner() 也需要读这些开关。
+/* Module build switches: 0=disabled, 1=enabled.
+   These select the initialization calls compiled into main and the MODULES
+   section of the boot banner. They live here because print_boot_banner()
+   also needs them.
+   Drive-system dependencies:
+   MOTOR supplies PWM outputs; both open-loop and closed-loop driving need it.
+   CONTROL supplies the TIM6 1 kHz loop: read encoders -> speed PI -> PWM.
+   ENCODER supplies speed feedback, consumed by CONTROL.
+   Open-loop driving needs MOTOR alone; closed-loop driving needs MOTOR plus
+   CONTROL and ENCODER. PEO_ENABLE_ENCODER automatically follows
+   PEO_ENABLE_CONTROL: setting CONTROL=1 enables encoders; CONTROL=0 disables
+   them. MOTOR remains an independent switch. */
+#define PEO_ENABLE_MOTOR      1    /* Enable motor PWM, needed for either open-loop or closed-loop driving. */
+#define PEO_ENABLE_CONTROL    0    /* Enable the 1 kHz PI speed controller and encoder speed measurements. */
+#define PEO_ENABLE_ENCODER    PEO_ENABLE_CONTROL  /* Enable encoders automatically whenever CONTROL is enabled. */
+#define PEO_ENABLE_TOF400C    1  /* Build switch: initialize ranging hardware and allow the Y-button sampling toggle. */
+#define PEO_ENABLE_INA3221    1  /* Build switch: initialize current monitors and allow the X-button polling toggle. */
+#define PEO_ENABLE_MPU6050    1  /* Build switch: initialize attitude hardware and allow the A-button DMP toggle. */
 
-   动力控制三件套依赖关系（重要）：
-     MOTOR   = 电机 PWM 输出 —— 开环/闭环的基础，两者都需要，独立开关。
-     CONTROL = 1kHz 闭环控制循环（TIM6 中断：读编码器 → 速度 PI → PWM）。
-     ENCODER = 编码器测速 —— 闭环速度反馈输入，数据只在 CONTROL 循环里消费。
-   - 开环 = MOTOR 单独（直接 PWM，无需 CONTROL/ENCODER）。
-   - 闭环 = MOTOR + CONTROL（ENCODER 自动跟随，见下）。
-   - ENCODER 只在闭环时需要 → 令 PEO_ENABLE_ENCODER = PEO_ENABLE_CONTROL 自动跟随，
-     无需单独配置：CONTROL=1 即闭环（ENCODER 自动开）、CONTROL=0 即开环（ENCODER 自动关）。
-   ============================================================================ */
-#define PEO_ENABLE_MOTOR      1    /* 电机 PWM：开环/闭环都需 */
-#define PEO_ENABLE_CONTROL    0    /* 闭环控制：置 1 跑 1kHz PI + 编码器测速 */
-#define PEO_ENABLE_ENCODER    PEO_ENABLE_CONTROL  /* 编码器：跟随闭环，自动 = CONTROL */
-#define PEO_ENABLE_TOF400C    1
-#define PEO_ENABLE_INA3221    1
-#define PEO_ENABLE_MPU6050    1
+/* F407 firmware version sent in SensorData so the host can check peer
+   compatibility (earlier notes called this a three-endpoint version check). */
+#define PEO_FW_VERSION  (28U)  /* Firmware protocol/version identifier sent to the host; 28 denotes v2.28. */
 
-/* F407 固件版本号（随 SensorData 上报，供上位机核对三端版本匹配） */
-#define PEO_FW_VERSION  (28U)
-
-/* ============================================================================
-   传感器数据包（当前状态快照）
-   ============================================================================ */
+/* Sensor packet: a snapshot of the latest known state.
+ * Arrays use M1/M2/M3/M4 order (front left/front right/rear left/rear right).
+ * Zero-initialized fields do not prove that a sensor has already sampled; use
+ * its timestamp, status, and module configuration when interpreting a reading.
+ * This C structure is copied directly into the serial payload, including its
+ * compiler layout/padding. Peer firmware must agree on field sizes and offsets.
+ * Current target layout is 112 bytes; do not reorder fields as a cosmetic edit.
+ */
 typedef struct
 {
-    /* ---- 3 路 VL53L1X 测距 ---- */
-    uint16_t dist_front_mm;        /* 前（mm）           */
-    uint16_t dist_left_mm;         /* 左（mm）           */
-    uint16_t dist_right_mm;        /* 右（mm）           */
-    uint8_t  dist_front_status;    /* 前状态（0 = 有效） */
-    uint8_t  dist_left_status;     /* 左状态（0 = 有效） */
-    uint8_t  dist_right_status;    /* 右状态（0 = 有效） */
-    uint32_t dist_timestamp_ms;    /* 最近一次测距更新（SysTick ms） */
+    /* Three VL53L1X distance measurements. */
+    uint16_t dist_front_mm;        /* Front distance in millimeters. */
+    uint16_t dist_left_mm;         /* Left distance in millimeters. */
+    uint16_t dist_right_mm;        /* Right distance in millimeters. */
+    uint8_t  dist_front_status;    /* Front ranging status; zero means a valid measurement. */
+    uint8_t  dist_left_status;     /* Left ranging status; zero means a valid measurement. */
+    uint8_t  dist_right_status;    /* Right ranging status; zero means a valid measurement. */
+    uint32_t dist_timestamp_ms;    /* Time of the most recent distance update, in SysTick milliseconds. */
 
     /* ---- MPU6050 ---- */
-    float quat_w;                  /* 四元数 (w,x,y,z)   */
-    float quat_x;
-    float quat_y;
-    float quat_z;
-    float accel_x;                 /* 三轴加速度（g）    */
-    float accel_y;
-    float accel_z;
-    uint32_t mpu_timestamp_ms;     /* 最近一次 MPU 更新  */
+    float quat_w;                  /* Orientation quaternion (w,x,y,z), dimensionless. */
+    float quat_x; /* Quaternion x component, dimensionless. */
+    float quat_y; /* Quaternion y component, dimensionless. */
+    float quat_z; /* Quaternion z component, dimensionless. */
+    float accel_x;                 /* Acceleration along three axes, in g (multiples of gravity). */
+    float accel_y; /* Y-axis acceleration in g. */
+    float accel_z; /* Z-axis acceleration in g. */
+    uint32_t mpu_timestamp_ms;     /* Time of the most recent MPU update, in SysTick milliseconds. */
 
-    /* ---- 编码器 / 控制循环 ---- */
-    int32_t  speed_d100[4];        /* 四轮速度（0.01 cm/s，正 = 前进） */
-    int32_t  odometer[4];          /* 四轮里程计数值                    */
-    uint32_t ctrl_timestamp_ms;    /* 最近一次控制更新                  */
+    /* Encoder measurements and control-loop state. */
+    int32_t  speed_d100[4];        /* Four measured wheel speeds in 0.01 cm/s; positive means forward. */
+    int32_t  odometer[4];          /* Four accumulated signed encoder counts; 1980 counts per wheel revolution. */
+    uint32_t ctrl_timestamp_ms;    /* Time of the most recent control update, in SysTick milliseconds. */
 
-    /* ---- INA3221 电流 / 电压（4 路电机） ---- */
-    int16_t  current_mA[4];        /* 四路电机电流（mA，有符号）        */
-    uint16_t bus_voltage_mV[4];    /* 四路总线电压（mV）                */
-    uint32_t ina_timestamp_ms;     /* 最近一次 INA 更新                 */
+    /* INA3221 motor currents and bus voltages, four channels. */
+    int16_t  current_mA[4];        /* Four signed motor currents in milliamps. */
+    uint16_t bus_voltage_mV[4];    /* Four bus voltages in millivolts. */
+    uint32_t ina_timestamp_ms;     /* Time of the most recent successful INA update, in SysTick milliseconds. */
 
-    /* ---- 整帧总时间戳 + 命令应答（ACK） ---- */
-    uint32_t sys_tick_ms;          /* 整帧快照总时间戳（SysTick，快照时更新） */
-    uint8_t  last_cmd_id;          /* 最近处理的命令 ID（回显）          */
-    uint8_t  last_cmd_status;      /* 执行结果：0=OK，非0=错误码          */
-    uint8_t  control_mode;         /* 控制模式：0=闭环，1=开环            */
-    uint8_t  fw_version;           /* F407 固件版本号（递增整数，28=v2.28） */
-    uint8_t  lock;                 /* 控制权锁：0=手操（手柄），1=自主（上位机） */
+    /* Whole-snapshot timestamp and command acknowledgement (ACK). */
+    uint32_t sys_tick_ms;          /* SysTick milliseconds when this complete snapshot was copied. */
+    uint8_t  last_cmd_id;          /* Identifier of the most recently acknowledged command, echoed to the host. */
+    uint8_t  last_cmd_status;      /* Command result: zero=OK; nonzero=ESP_CMD_ERR_* code. */
+    uint8_t  control_mode;         /* Drive mode: 0=closed-loop speed control; 1=open-loop PWM. */
+    uint8_t  fw_version;           /* F407 firmware version as an increasing integer; for example, 28 denotes v2.28. */
+    uint8_t  lock;                 /* Driving ownership: 0=manual/controller; 1=autonomous/host. */
 } SensorData_t;
 
-/* ============================================================================
-   推送接口（各传感器 ISR 调用，内部自动打时间戳）
-   ============================================================================ */
+/* Push interfaces: sensor interrupt handlers call these to publish readings;
+   each update receives a timestamp automatically. */
 
-/** @brief MPU6050 推送四元数 + 加速度（EXTI3 中断里调）。 */
+/**
+ * @brief Store the latest attitude and acceleration as one sensor group.
+ *
+ * Called by the MPU FIFO callback in EXTI3; adds the current millisecond timestamp.
+ * @param qw Quaternion scalar component w, dimensionless.
+ * @param qx Quaternion x component, dimensionless.
+ * @param qy Quaternion y component, dimensionless.
+ * @param qz Quaternion z component, dimensionless.
+ * @param ax X-axis acceleration in g (1 g is standard gravity).
+ * @param ay Y-axis acceleration in g.
+ * @param az Z-axis acceleration in g.
+ * @retval None This function does not return a value.
+ */
 void SENSOR_PushMpu(float qw, float qx, float qy, float qz,
                     float ax, float ay, float az);
 
-/** @brief VL53L1X 推送一路测距（which = SENSOR_DIST_FRONT/LEFT/RIGHT）。 */
+/**
+ * @brief Store one range sensor result and refresh the distance-group timestamp.
+ *
+ * Called by EXTI0/1/2 after a successful sensor read. The three distances share a
+ * timestamp recording the most recent update to any one of them.
+ * @param which SENSOR_DIST_FRONT, SENSOR_DIST_LEFT, or SENSOR_DIST_RIGHT.
+ * @param mm Measured distance in millimeters; interpret it together with status.
+ * @param status VL53L1X range-status code; zero means a valid measurement.
+ * @retval None This function does not return a value.
+ */
 void SENSOR_PushDist(uint8_t which, uint16_t mm, uint8_t status);
 
-/** @brief CONTROL 推送一个电机的速度 + 里程（TIM6 中断里调）。 */
+/**
+ * @brief Store one measured wheel speed and signed accumulated count.
+ *
+ * Called for each wheel by the TIM6 control interrupt; updates the control-group
+ * timestamp.
+ * @param motor Wheel index 0..3: M1 front left, M2 front right, M3 rear left, M4 rear
+ *              right.
+ * @param speed_d100 Measured signed speed in 0.01 cm/s, positive for forward.
+ * @param odometer Accumulated signed encoder counts; 1980 counts per wheel revolution.
+ * @retval None This function does not return a value.
+ */
 void SENSOR_PushWheel(uint8_t motor, int32_t speed_d100, int32_t odometer);
 
-/** @brief INA3221 推送四路电机电流 + 电压（TIM7 轮询里调）。 */
+/**
+ * @brief Copy all four motor-current and bus-voltage readings into telemetry.
+ *
+ * Called by TIM7 only after both INA3221 reads succeed; records the update time
+ * automatically.
+ * @param current_mA Readable array of four signed currents in milliamps, in M1..M4
+ *                   order.
+ * @param bus_voltage_mV Readable array of four unsigned bus voltages in millivolts, in
+ *                       M1..M4 order.
+ * @retval None This function does not return a value.
+ */
 void SENSOR_PushIna(int16_t *current_mA, uint16_t *bus_voltage_mV);
 
-/** @brief 设置命令应答（F407 执行命令后调，随 sensorhub 上报回显）。 */
+/**
+ * @brief Record which command was handled and its result for the host.
+ *
+ * Called by command handling and queue-error paths. A critical section keeps the command
+ * ID and result together; only the latest acknowledgement is retained.
+ * @param cmd_id Command identifier to echo, from ESP_CMD_*.
+ * @param status ESP_CMD_OK or an ESP_CMD_ERR_* result code.
+ * @retval None This function does not return a value.
+ */
 void SENSOR_SetCmdAck(uint8_t cmd_id, uint8_t status);
 
-/* ============================================================================
-   获取一致快照
-   ============================================================================ */
+/* Copy a consistent snapshot. */
 
 /**
- * @brief  获取当前所有传感器数据的一致快照（关中断拷贝）。
- * @param  out  输出缓冲区，函数把整个 SensorData_t 拷到这里。
- * @note   关中断保证字段间一致；拷贝很快（微秒级），可安全在主循环调用。
+ * @brief Copy the complete current telemetry state into a caller-owned object.
+ *
+ * Called by ESP_LINK reporting and available to main. Briefly masks interrupts, adds
+ * snapshot time/mode/version/ownership, copies the packet, and restores the prior
+ * interrupt mask.
+ * @param out Writable SensorData_t destination; NULL is accepted and performs no copy.
+ * @retval None This function does not return a value.
+ * @note Masking prevents writes during the short copy (intended to take only
+ *       microseconds); this may be called from the main loop. Sensor timestamps still
+ *       describe different acquisition times.
  */
 void SENSOR_GetHub(SensorData_t *out);
 
-/* ============================================================================
-   启动诊断（boot banner）—— 原在 main.c，迁入此处以保持 main 整洁
-   ============================================================================ */
+/* Startup diagnostics (boot banner), moved here from main.c to keep main focused on startup and scheduling. */
 
-/** @brief 打印全面启动诊断：实际时钟/构建/驱动参数/传感器配置/模块状态。 */
+/**
+ * @brief Print a startup summary so teammates can inspect the rover configuration.
+ *
+ * Called once by main after component setup. Shows actual clocks, chip/build identity,
+ * drivetrain scaling, PI defaults, sensor setup/test results, and enabled modules on
+ * USART1.
+ * @note No arguments are required.
+ * @retval None This function does not return a value.
+ */
 void print_boot_banner(void);
 
 #endif /* __SENSOR_HUB_H__ */

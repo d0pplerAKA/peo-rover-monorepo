@@ -1,14 +1,17 @@
 /**
- ******************************************************************************
- * @file    main.c
- * @brief   PEO Rover - STM32F407VGT6 firmware entry
+ * @file  main.c
+ * @brief Start the F407 rover firmware and coordinate host commands and manual driving.
  *
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+/*
  * Init order (architecture rule, see PEO_PINMAP.H):
  *   1. SystemInit()  - called by startup_stm32f40xx.s BEFORE main():
  *                      HSE 8 MHz -> PLL -> SYSCLK 168 MHz (HSE_VALUE must
  *                      be 8000000 in stm32f4xx_conf.h).
  *   2. RCC_Clock_Init()  - ALL peripheral clocks in one shot
- *                          (COMPONENTS/RCC, includes ADC prescaler).
+ *                          (COMPONENTS/RCC; peripheral bus clock-enable masks).
  *   3. NVIC_InitAll()    - priority group + ALL IRQ channels in one shot
  *                          (COMPONENTS/NVIC).
  *   4. Component inits   - each module only configures its own peripheral
@@ -16,9 +19,8 @@
  *   5. Sensors (VL53L1X/INA3221/MPU6050) are Init-ONLY here: start/stop is
  *      owned by the gamepad (Y/X/A toggle), NOT main. They configure EXTI
  *      channels, so they must not fire into later init code.
- *   6. CONTROL_Init() comes AFTER sensors: the 1 kHz control loop is the
- *      only always-on loop besides sensors, so it starts last.
- ******************************************************************************
+ *   6. If enabled, CONTROL_Init() comes AFTER sensor setup. Its 1 kHz
+ *      interrupt immediately starts reading encoders and writing motor PWM.
  */
 #include "stm32f4xx.h"
 #include "COMPONENTS/PEO_PINMAP.H"
@@ -40,13 +42,31 @@
 #include "COMPONENTS/ESP_LINK/include/esp_link.h"
 #include "COMPONENTS/GAMEPAD/include/gamepad.h"
 
+/* How this firmware shares work:
+ * main() performs startup and repeatedly handles commands. An interrupt handler
+ * is a function the processor runs when hardware needs attention, temporarily
+ * pausing less urgent code. TIM6 handles wheel feedback when CONTROL is enabled;
+ * TIM14 reports telemetry at 50 Hz. Sensor sampling starts through gamepad toggles.
+ * #if PEO_ENABLE_* selects code at build time; it is not a runtime on/off command.
+ * The USART2 S3 link carries host commands/telemetry, USART3 C3 carries gamepad
+ * snapshots, and USART1 is a separate human-readable debug console.
+ */
+/**
+ * @brief Initialize the rover and repeatedly handle host commands and manual driving.
+ *
+ * Entered once by startup code after SystemInit(). Sensors are configured first; gamepad
+ * buttons start sampling later. Hardware interrupts run the fast control and reporting
+ * tasks while this loop handles commands.
+ * @note No arguments are required.
+ * @retval Never This function stays in its main loop and does not normally return.
+ */
 int main(void)
 {
     /* 1-2. Total clock and interrupt initialization (components) */
     RCC_Clock_Init();
     NVIC_InitAll();
 
-    /* 3. SysTick 1 ms timebase (get_tick / mdelay for the motion driver) */
+    /* 3. SysTick timestamps plus DWT delays (get_tick / mdelay for the motion driver). */
     TIMER_Init();
 
     /* 4. Debug console */
@@ -65,7 +85,7 @@ int main(void)
     MOTOR_Init();
 #endif
 
-    /* 7. Sensors: Init ONLY — start/stop is owned by the gamepad toggle
+    /* 7. Sensors: Init ONLY - start/stop is owned by the gamepad toggle
           (Y = VL53 range, X = INA3221 current, A = MPU6050 DMP), not here. */
 #if PEO_ENABLE_TOF400C
     TOF400C_Init();          /* 3x VL53L1X (EXTI0/1/2, I2C3 init implicit) */
@@ -79,27 +99,27 @@ int main(void)
     MPU6050_Init();
 #endif
 
-    /* 8. 1 kHz control loop (TIM6) — LAST: the only always-on loop besides
-          sensors; its ISR reads encoders + writes PWM, so it starts after them. */
+    /* 8. Start the optional 1 kHz TIM6 controller after the hardware it uses.
+          Its interrupt reads encoders and writes PWM immediately once enabled. */
 #if PEO_ENABLE_CONTROL
     CONTROL_Init();
 #endif
 
-    /* 8b. ESP32 link (USART2) - 帧收发：sensorhub 上报 + 命令接收 */
+    /* 8b. ESP32-S3 link (USART2): send sensor-hub reports and receive host commands. */
     ESP_LINK_Init();
-    ESP_LINK_StartReport();  /* TIM14 定时器触发 sensorhub 上报（DMA 发送） */
+    ESP_LINK_StartReport();  /* TIM14 triggers sensor-hub reports; DMA moves the bytes to USART2. */
 
-    /* 8c. 手柄手操链路 (USART3) - Xbox 手柄经 C3 有线接入，F407 端解析 + 锁仲裁 */
+    /* 8c. Manual-control link (USART3): the Xbox controller reaches the F407 through the C3 serial bridge; the F407 parses input and arbitrates ownership. */
     GAMEPAD_Init();
 
-    /* 9. Boot banner：全面的诊断信息（时钟/构建/参数/传感器/模块状态） */
+    /* 9. Boot banner: diagnostics for clocks, build, settings, sensors, and enabled modules. */
     print_boot_banner();
 
-    BUILTIN_LED_On();        /* 运行指示：系统启动完成，点亮 LED */
+    BUILTIN_LED_On();        /* Running indicator: turn on the LED after system startup completes. */
 
     while (1)
     {
-        /* 独立 STOP 请求优先处理，不受普通命令队列满影响。 */
+        /* Handle the separate STOP request first, even when the ordinary command queue is full. */
         if (ESP_LINK_StopPending())
         {
             ESP_LINK_ClearStop();
@@ -107,17 +127,17 @@ int main(void)
             SENSOR_SetCmdAck(ESP_CMD_STOP_ALL, ESP_CMD_OK);
         }
 
-        /* ── 命令消费：中断只入队，这里出队执行（自主链路）──
-           命令来源：上位机（WiFi -> ESP32 -> USART2）。 */
-        ESP_Cmd_t cmd;
+        /* Consume autonomous commands: the interrupt only queues them; the main loop executes them.
+           Source: host computer -> WiFi -> ESP32-S3 -> USART2. */
+        ESP_Cmd_t cmd;  /* Local copy of one queued host command, consumed by the main loop. */
         if (ESP_LINK_PopCommand(&cmd))
         {
             ESP_LINK_ExecCommand(&cmd);
         }
 
-        /* ── 手柄手操链路：锁仲裁 + 摇杆映射（C3 -> USART3，方案 A）── */
+        /* Manual-control link: ownership arbitration and joystick mapping (C3 -> USART3, design A). */
         GAMEPAD_Process();
 
-        mdelay(5);   /* 10 ms 调度节拍 */
+        mdelay(5);   /* Pause for 5 ms before the next main-loop pass; interrupt-driven tasks continue. */
     }
 }

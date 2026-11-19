@@ -1,57 +1,64 @@
 /**
- ******************************************************************************
- * @file    mpu6050.c
- * @brief   PEO Rover - MPU6050 DMP driver (eMPL Motion Driver glue)
+ * @file  mpu6050.c
+ * @brief Connect the MPU6050 DMP library to rover interrupts and attitude telemetry.
  *
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+/*
  * Layers:
  *   - eMPL platform functions (reg_int_cb, _MLPrintLog): required by the
  *     InvenSense Motion Driver.
  *   - MPU6050_Init / MPU6050_DMP_Init: bring up the MPU and the on-chip DMP.
  *   - Interrupt-driven FIFO read: the DMP asserts INT (PE3/EXTI3) whenever a
  *     quaternion packet is ready; the EXTI3 handler calls the FIFO-read
- *     callback, which stores the latest quaternion + accel and raises
- *     g_data_ready. The app reads them via MPU6050_GetQuaternion/GetAccel.
+ *     callback, which converts the latest quaternion and acceleration
+ *     and publishes them to SENSOR_HUB. Read them via SENSOR_GetHub().
  *
  * MPU6050 INT = PE3 (EXTI3), active-HIGH (default polarity, push-pull).
  * NVIC enables EXTI3 in NVIC_InitAll() (nvic.c).
- ******************************************************************************
  */
 #include "include/mpu6050.h"
 #include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
 
-/* ---- DMP 输出（EXTI3 中断上下文写入，推送进 sensor_hub） ---- */
-static volatile float   g_qw, g_qx, g_qy, g_qz;   /* 姿态四元数 (w,x,y,z) */
-static volatile float   g_ax, g_ay, g_az;         /* 原始加速度（单位 g）*/
+/* DMP results: updated in the EXTI3 interrupt and then published to sensor_hub. */
+static volatile float   g_qw, g_qx, g_qy, g_qz;   /* Orientation quaternion (w,x,y,z), dimensionless. */
+static volatile float   g_ax, g_ay, g_az;         /* Acceleration converted from raw samples to g (multiples of gravity). */
 
-/* 自检结果缓存：0=通过(gyro+accel)，1=未通过(数据可能仍有效但可信度降低)，2=未运行。 */
-static volatile uint8_t g_self_test_result = 2;
-/* 初始化状态：0=成功，1=WHO_AM_I 失败，2=DMP 失败，3=未运行。 */
-static volatile uint8_t g_init_status = 3;
+/* Cached self-test result: 0=gyro and accelerometer passed; 1=failed
+   (measurements may still exist but confidence is reduced); 2=not attempted. */
+static volatile uint8_t g_self_test_result = 2;  /* Cached calibration result: 0=passed, 1=failed, 2=not attempted. */
+/* Initialization result: 0=success; 1=WHO_AM_I failed; 2=DMP failed; 3=not attempted. */
+static volatile uint8_t g_init_status = 3;  /* Cached startup result: 0=ready, 1=identity error, 2=DMP error, 3=not attempted. */
 
-/* MPU 安装矩阵：单位阵 = 芯片轴与车体轴对齐；若斜装需改成旋转矩阵。 */
+/* Mounting orientation: identity means sensor axes match vehicle axes.
+   Change the orientation matrix when the board uses a different mounting direction. */
 static const signed char gyro_orientation[9] = { 1, 0, 0,
                                                  0, 1, 0,
                                                  0, 0, 1 };
 
-/* ---- eMPL 平台函数：INT 回调注册 ---- */
-static void (*g_mpu_int_cb)(void) = 0;
+/* eMPL platform adapter: register the sensor interrupt callback. */
+static void (*g_mpu_int_cb)(void) = 0; /* Saved data-ready callback invoked by EXTI3; NULL until registered. */
 
 /**
- * @brief  eMPL platform function: register the MPU6050 INT callback and
- *         configure PE3 as an EXTI3 input (rising edge, active-high default).
- * @param  int_param  Callback descriptor (only ->cb is used).
- * @return 0 on success, -1 if int_param is NULL.
+ * @brief Register the motion-driver callback and connect the MPU data-ready interrupt.
+ *
+ * Called by the eMPL mpu_init routine. Saves the callback, configures PE3 as an input,
+ * and enables rising-edge EXTI3 detection; NVIC setup has already run.
+ * @param int_param Callback descriptor; only its cb member is used.
+ * @retval 0 Callback descriptor accepted and GPIO/EXTI configured.
+ * @retval -1 int_param was NULL.
  */
 int reg_int_cb(struct int_param_s *int_param)
 {
-    GPIO_InitTypeDef gpio;
-    EXTI_InitTypeDef exti;
+    GPIO_InitTypeDef gpio;  /* GPIO setup record: selects pin routing, electrical drive, pulls, and switching speed. */
+    EXTI_InitTypeDef exti;  /* External-interrupt setup: selected input line and triggering signal edge. */
 
     if (int_param == 0)
         return -1;
     g_mpu_int_cb = int_param->cb;
 
-    /* PE3 = 输入 + 下拉：INT 空闲为低，数据就绪时拉高。 */
+    /* PE3 input with pull-down: INT is idle low and rises when data is ready. */
     gpio.GPIO_Mode  = GPIO_Mode_IN;
     gpio.GPIO_OType = GPIO_OType_PP;
     gpio.GPIO_PuPd  = GPIO_PuPd_DOWN;
@@ -59,7 +66,7 @@ int reg_int_cb(struct int_param_s *int_param)
     gpio.GPIO_Pin   = PEO_PM_MPU_INT_PIN;
     GPIO_Init(PEO_PM_MPU_INT_PORT, &gpio);
 
-    /* EXTI3 -> PE3，上升沿中断。 */
+    /* Route PE3 to EXTI3 and trigger on rising edges. */
     SYSCFG_EXTILineConfig(EXTI_PortSourceGPIOE, PEO_PM_MPU_INT_EXTI_SRC);
 
     exti.EXTI_Line    = PEO_PM_MPU_INT_EXTI_LINE;
@@ -74,8 +81,12 @@ int reg_int_cb(struct int_param_s *int_param)
 }
 
 /**
- * @brief  EXTI3 handler: MPU6050 data-ready. Clears the pending bit and
- *         invokes the callback registered by reg_int_cb().
+ * @brief Acknowledge MPU data-ready and invoke its registered FIFO-reading callback.
+ *
+ * The processor enters this handler when the MPU INT signal rises on PE3. If no callback
+ * is registered, it only clears the pending interrupt.
+ * @note No arguments are required.
+ * @retval None This function does not return a value.
  */
 void EXTI3_IRQHandler(void)
 {
@@ -89,14 +100,21 @@ void EXTI3_IRQHandler(void)
 }
 
 /**
- * @brief  eMPL Motion Driver logging backend (declared in log.h).
- *         Formats the message and prints it to the debug console (USART1).
- *         Only linked when REMOVE_LOGGING is OFF.
+ * @brief Send a formatted motion-driver diagnostic message to the USART1 console.
+ *
+ * Backend called by eMPL logging when logging is enabled. Formats into a bounded
+ * 128-byte buffer and optionally prefixes a tag.
+ * @param priority Logging priority supplied by eMPL; ignored by this backend.
+ * @param tag Optional text label; NULL or empty means no prefix.
+ * @param fmt Non-NULL printf-style format string.
+ * @param ... Values corresponding to the format placeholders.
+ * @retval 0 Logging call completed; this implementation does not report
+ *           formatting/transmit errors.
  */
 int _MLPrintLog(int priority, const char *tag, const char *fmt, ...)
 {
-    char buf[128];
-    va_list args;
+    char buf[128];  /* Bounded text buffer for a formatted log message, including its terminating zero. */
+    va_list args;  /* Variable-argument cursor used to format an eMPL log message. */
 
     (void)priority;
 
@@ -111,43 +129,58 @@ int _MLPrintLog(int priority, const char *tag, const char *fmt, ...)
     return 0;
 }
 
-/* ---- DMP FIFO 就绪回调（在 EXTI3 中断上下文运行） ---- */
+/* DMP FIFO-ready callback, executed inside the EXTI3 interrupt. */
+/**
+ * @brief Read one DMP packet and publish orientation and acceleration.
+ *
+ * Registered during MPU6050_DMP_Init and invoked by EXTI3. Converts Q30 quaternion
+ * counts to floats and accelerometer counts to g. A FIFO-read error leaves the previous
+ * hub measurement unchanged.
+ * @note No arguments are required.
+ * @retval None This function does not return a value.
+ */
 static void MPU6050_FIFO_Ready_Cb(void)
 {
-    short gyro[3], accel[3], sensors;
-    long quat[4];
-    unsigned long timestamp;
-    unsigned char more;
+    short gyro[3], accel[3], sensors; /* Raw FIFO gyro/accelerometer vectors and the returned sensor-presence mask. */
+    long quat[4];  /* DMP quaternion components w/x/y/z in Q30 fixed point. */
+    unsigned long timestamp;  /* Sample timestamp returned by the motion driver, in milliseconds. */
+    unsigned char more;  /* Motion-driver indicator/count of FIFO packets remaining; this callback reads one packet. */
 
     if (dmp_read_fifo(gyro, accel, quat, &timestamp, &sensors, &more) == 0)
     {
-        /* quat[4] 顺序 = (w, x, y, z)，q30 定点。 */
+        /* Quaternion order is (w,x,y,z), encoded in Q30 fixed point (divide by 2^30). */
         g_qw = (float)quat[0] / MPU6050_Q30;
         g_qx = (float)quat[1] / MPU6050_Q30;
         g_qy = (float)quat[2] / MPU6050_Q30;
         g_qz = (float)quat[3] / MPU6050_Q30;
 
-        /* 原始加速度（±2g，16384 LSB/g）。 */
+        /* Raw acceleration: +/-2 g range, 16384 counts per g. */
         g_ax = (float)accel[0] / MPU6050_ACCEL_SENS;
         g_ay = (float)accel[1] / MPU6050_ACCEL_SENS;
         g_az = (float)accel[2] / MPU6050_ACCEL_SENS;
 
-        /* 推送到 sensor hub（按 MPU6050_SAMPLE_HZ 频率自动更新） */
+        /* Publish to the sensor hub at MPU6050_SAMPLE_HZ when sampling is running. */
         SENSOR_PushMpu(g_qw, g_qx, g_qy, g_qz, g_ax, g_ay, g_az);
     }
 }
 
-/* ---- 公开 API ---- */
+/* Public application API. */
 
 /**
- * @brief  MPU6050 上电：初始化 I2C1，校验 WHO_AM_I，再初始化 DMP。
- * @return 0 = 成功；1 = WHO_AM_I 读取失败或不匹配；2 = DMP 配置失败。
+ * @brief Initialize the attitude sensor and cache its startup result.
+ *
+ * Called by main. Prepares I2C1, verifies WHO_AM_I, and configures DMP; GAMEPAD starts
+ * actual DMP output later.
+ * @note No arguments are required.
+ * @retval 0 Sensor initialization succeeded.
+ * @retval 1 WHO_AM_I read or identity check failed.
+ * @retval 2 DMP setup failed.
  */
 uint8_t MPU6050_Init(void)
 {
-    uint8_t who = 0;
-    uint8_t dmp_status;
-    uint32_t ret;
+    uint8_t who = 0;  /* WHO_AM_I register value used to verify the connected sensor identity. */
+    uint8_t dmp_status;  /* Numbered DMP initialization result; zero indicates setup success. */
+    uint32_t ret;  /* I2C transaction result; zero is NO_ERROR. */
 
     I2C_MPU_Init();   /* I2C1 @ 400 kHz */
     ret = I2C_MPU_ReadBytes(PEO_PM_MPU6050_ADDR, MPU6050_WHO_AM_I_REG, 1, &who);
@@ -173,20 +206,33 @@ uint8_t MPU6050_Init(void)
         return 2;
     }
 
-    g_init_status = 0;   /* 成功：不打印（boot banner 统一显示） */
+    g_init_status = 0;   /* Success stays silent; the boot banner reports the result centrally. */
     return 0;
 }
 
 /**
- * @brief  初始化 MPU + 加载并启用 DMP。
- * @return 0 = 成功；非 0 = 对应步骤失败（返回值即失败步骤序号）。
+ * @brief Load and configure the sensor processing engine without starting its output.
+ *
+ * Called by MPU6050_Init. Sets sensor/FIFO rates, mounting orientation, and
+ * quaternion/acceleration features; self-test outcome is cached separately and does not
+ * change this setup return code.
+ * @note No arguments are required.
+ * @retval 0 Setup succeeded; self-test result must be queried separately.
+ * @retval 1 mpu_init failed.
+ * @retval 2 Enabling gyro/accelerometer failed.
+ * @retval 3 FIFO configuration failed.
+ * @retval 4 Setting the sample rate failed.
+ * @retval 5 Loading DMP firmware failed.
+ * @retval 6 Applying mounting orientation failed.
+ * @retval 7 Enabling DMP features failed.
+ * @retval 8 Setting DMP FIFO rate failed.
  */
 uint8_t MPU6050_DMP_Init(void)
 {
     struct int_param_s int_param;
 
-    /* 必须在 mpu_init() 之前设置：mpu_init() -> reg_int_cb() 会把它存下来，
-       EXTI3 中断触发时由 g_mpu_int_cb 调用它读取 FIFO。 */
+    /* Set the callback before mpu_init(): it calls reg_int_cb() to save it.
+       EXTI3 later invokes g_mpu_int_cb to read the FIFO. */
     int_param.cb = MPU6050_FIFO_Ready_Cb;
 
     if (mpu_init(&int_param))                              return 1;
@@ -200,18 +246,23 @@ uint8_t MPU6050_DMP_Init(void)
                                                            return 7;
     if (dmp_set_fifo_rate(MPU6050_SAMPLE_HZ))              return 8;
 
-    g_self_test_result = run_self_test();   /* 存自检结果，boot banner 显示 */
+    g_self_test_result = run_self_test();   /* Save the self-test result for the boot banner. */
 
-    /* 注意：DMP 引擎不在这里启动——调用 MPU6050_Start() 才会开始产出数据、
-       触发 EXTI3 中断，这样上电配置阶段不会被中断打扰。 */
+    /* Do not start the DMP engine here. MPU6050_Start() enables data output
+       and EXTI3 interrupts later, keeping sensor interrupts out of startup setup. */
     return 0;
 }
 
 /**
- * @brief  启动 DMP 引擎：开始产出数据并触发 EXTI3 中断。
- * @return 0 = 成功；1 = mpu_set_dmp_state(1) 失败。
- * @note   必须在 MPU6050_DMP_Init() 成功后再调用。调用后 INT 脚按
- *         MPU6050_SAMPLE_HZ 频率周期性拉高，EXTI3 中断开始触发。
+ * @brief Enable DMP output so attitude samples can arrive by interrupt.
+ *
+ * Called by the gamepad A toggle after successful setup; data-ready pulses then occur at
+ * MPU6050_SAMPLE_HZ.
+ * @note No arguments are required.
+ * @retval 0 DMP start request succeeded.
+ * @retval 1 mpu_set_dmp_state(1) failed.
+ * @note Call only after MPU6050_DMP_Init() succeeds. INT then rises at
+ *       MPU6050_SAMPLE_HZ, triggering the data-ready interrupt.
  */
 uint8_t MPU6050_Start(void)
 {
@@ -221,8 +272,13 @@ uint8_t MPU6050_Start(void)
 }
 
 /**
- * @brief  停止 DMP 引擎（toggle 关闭用）。
- * @return 0 = 成功；1 = mpu_set_dmp_state(0) 失败。
+ * @brief Disable DMP output when attitude sampling is no longer requested.
+ *
+ * Called by the gamepad A toggle. Previously published hub data remains available with
+ * its old timestamp.
+ * @note No arguments are required.
+ * @retval 0 DMP stop request succeeded.
+ * @retval 1 mpu_set_dmp_state(0) failed.
  */
 uint8_t MPU6050_Stop(void)
 {
@@ -232,44 +288,55 @@ uint8_t MPU6050_Stop(void)
 }
 
 /**
- * @brief  MPU6050 自检：跑 gyro + accel 自检，通过后把测得的偏置写入 DMP。
- * @return 0 = 通过并写入偏置；1 = 自检未通过。
+ * @brief Check gyro/accelerometer operation and apply measured biases to DMP.
+ *
+ * Called during DMP initialization. Only the gyro and accelerometer pass bits matter
+ * because this board has no compass.
+ * @note No arguments are required.
+ * @retval 0 Tests passed and both bias writes succeeded.
+ * @retval 1 A self-test or bias-write step failed.
  */
 uint8_t run_self_test(void)
 {
-    int res;
-    long gyro[3], accel[3];
-    float gyro_sens;
-    unsigned short accel_sens;
+    int res;  /* Self-test pass-bit mask: gyro bit 0 and accelerometer bit 1 are checked. */
+    long gyro[3], accel[3]; /* Three-axis self-test bias estimates, then rescaled for DMP calibration. */
+    float gyro_sens;  /* Gyroscope raw counts per degree/second, used to scale calibration bias. */
+    unsigned short accel_sens;  /* Accelerometer raw counts per g, used to scale calibration bias. */
 
     res = mpu_run_self_test(gyro, accel);
-    /* bit0=gyro, bit1=accel, bit2=compass。MPU6050 无磁力计（AK89xx_SECONDARY 未定义），
-       库对 bit2 无条件置位，故「都通过」的正确返回值是 0x07 而非 0x03。
-       用位掩码只判 bit0+bit1，忽略 bit2。 */
+    /* Self-test bits: bit0=gyro, bit1=accelerometer, bit2=compass. MPU6050
+       has no magnetometer (AK89xx_SECONDARY is undefined), so the library sets
+       bit2 unconditionally. The complete result is therefore 0x07, not 0x03.
+       Mask only bits 0 and 1; ignore the compass bit. */
     if ((res & 0x03) != 0x03)
         return 1;
 
-    /* 把自检得到的偏置按灵敏度换算成 DMP 需要的格式，再写入 DMP。 */
+    /* Convert self-test biases using sensor sensitivity into the format DMP expects, then write them. */
     mpu_get_gyro_sens(&gyro_sens);
     gyro[0] = (long)(gyro[0] * gyro_sens);
     gyro[1] = (long)(gyro[1] * gyro_sens);
     gyro[2] = (long)(gyro[2] * gyro_sens);
     if (dmp_set_gyro_bias(gyro))
-        return 1;   /* 偏置写入 DMP 失败 */
+        return 1;   /* Failed to write a bias into DMP. */
 
     mpu_get_accel_sens(&accel_sens);
     accel[0] *= accel_sens;
     accel[1] *= accel_sens;
     accel[2] *= accel_sens;
     if (dmp_set_accel_bias(accel))
-        return 1;   /* 偏置写入 DMP 失败 */
+        return 1;   /* Failed to write a bias into DMP. */
 
     return 0;
 }
 
 /**
- * @brief  读取最近一次自检结果。
- * @return 0 = 通过（gyro+accel 均通过）；1 = 未通过（数据可能仍有效但可信度降低）；2 = 未运行。
+ * @brief Read the stored test/calibration result for startup diagnostics.
+ *
+ * Called by print_boot_banner; no new test is performed.
+ * @note No arguments are required.
+ * @retval 0 Gyro and accelerometer passed and biases were written.
+ * @retval 1 Test or bias write failed.
+ * @retval 2 Test has not run.
  */
 uint8_t MPU6050_GetSelfTest(void)
 {
@@ -277,8 +344,14 @@ uint8_t MPU6050_GetSelfTest(void)
 }
 
 /**
- * @brief  读取初始化状态。
- * @return 0=成功；1=WHO_AM_I 失败；2=DMP 失败；3=未运行。
+ * @brief Read the stored attitude-sensor startup result.
+ *
+ * Called by print_boot_banner; no I2C transaction is performed.
+ * @note No arguments are required.
+ * @retval 0 Initialization succeeded.
+ * @retval 1 Identity check failed.
+ * @retval 2 DMP setup failed.
+ * @retval 3 Initialization has not run.
  */
 uint8_t MPU6050_GetInitStatus(void)
 {

@@ -1,6 +1,11 @@
 /**
- * @file PEO_PINMAP.H
- * @brief STM32F407VGT6 / LQFP100 pinmap, revised 2026-11-16.
+ * @file  PEO_PINMAP.H
+ * @brief Define board wiring, peripheral routes, and drivetrain conversion constants.
+ *
+ * Copyright (c) 2026 Danny
+ * SPDX-License-Identifier: MIT
+ */
+/*
  * 3 hardware I2C buses, 3 UARTs, 4 quadrature encoders, 8 motor PWMs.
  * User assignment: LED PA1, button PA0; W25Q16BV on PA15/PB3/PB4/PB5 (SPI1).
  * Encoder numbering: 1=TIM1, 2=TIM3, 3=TIM4, 4=TIM8.
@@ -16,6 +21,15 @@
 #define __PEO_PINMAP_H__
 
 #include "stm32f4xx.h"
+
+/* Reading this map: a macro is a named constant substituted before compilation.
+ * PORT selects a GPIO bank; PIN is a bit mask, while SRC is the pin number used
+ * to route an alternate function (AF). AF connects the pin to a timer/UART/I2C
+ * peripheral. PHYS_PIN is the package lead number for wiring, not a GPIO mask.
+ * A pin assignment alone does not enable a clock or configure hardware.
+ * TIM/CH select the timer and its output/input channel. Rates ending in _HZ
+ * are cycles per second; baud rates are serial bits per second.
+ */
 
 /* ============================================================================
    1. CLOCK TREE AND GLOBAL TIMING
@@ -34,7 +48,7 @@
 #define PEO_PM_ARR_APB2         (PEO_PM_TIM_APB2_HZ / PEO_PM_PWM_FREQ_HZ)   /* period counts = 8400; hardware ARR = 8399 */
 #define PEO_PM_ARR_APB1         (PEO_PM_TIM_APB1_HZ / PEO_PM_PWM_FREQ_HZ)   /* period counts = 4200; hardware ARR = 4199 */
 #define PEO_PM_DUTY_MAX_APB2    (PEO_PM_ARR_APB2)   /* CCR value for 100% duty */
-#define PEO_PM_DUTY_MAX_APB1    (PEO_PM_ARR_APB1)
+#define PEO_PM_DUTY_MAX_APB1    (PEO_PM_ARR_APB1)  /* CCR timer-count value that holds an APB1 PWM output high for the whole period. */
 
 /* ============================================================================
    2. ENCODER AND ODOMETRY CONSTANTS
@@ -62,50 +76,51 @@
    Connected to an EXTERNAL USB-TTL adapter (3V3 logic).
    ============================================================================ */
 /** DEBUG USART **/
-#define PEO_PM_DBG_USART        USART1
-#define PEO_PM_DBG_BAUDRATE     (115200U)
+#define PEO_PM_DBG_USART        USART1  /* Hardware serial peripheral assigned to USB-to-TTL debug console. */
+#define PEO_PM_DBG_BAUDRATE     (115200U)  /* Serial bit rate in bits/s for USB-to-TTL debug console. */
 
-#define PEO_PM_DBG_AF           GPIO_AF_USART1
-#define PEO_PM_DBG_TX_PORT      GPIOA
-#define PEO_PM_DBG_TX_PIN       GPIO_Pin_9
-#define PEO_PM_DBG_TX_SRC       GPIO_PinSource9
-#define PEO_PM_DBG_RX_PORT      GPIOA
-#define PEO_PM_DBG_RX_PIN       GPIO_Pin_10
-#define PEO_PM_DBG_RX_SRC       GPIO_PinSource10
+#define PEO_PM_DBG_AF           GPIO_AF_USART1  /* Alternate-function selector connecting USB-to-TTL debug console to its peripheral. */
+#define PEO_PM_DBG_TX_PORT      GPIOA  /* GPIO peripheral containing the USB-to-TTL debug console transmit signal pin. */
+#define PEO_PM_DBG_TX_PIN       GPIO_Pin_9  /* GPIO bit mask selecting the USB-to-TTL debug console transmit signal pin. */
+#define PEO_PM_DBG_TX_SRC       GPIO_PinSource9  /* Pin index for alternate-function routing of USB-to-TTL debug console transmit signal. */
+#define PEO_PM_DBG_RX_PORT      GPIOA  /* GPIO peripheral containing the USB-to-TTL debug console receive signal pin. */
+#define PEO_PM_DBG_RX_PIN       GPIO_Pin_10  /* GPIO bit mask selecting the USB-to-TTL debug console receive signal pin. */
+#define PEO_PM_DBG_RX_SRC       GPIO_PinSource10  /* Pin index for alternate-function routing of USB-to-TTL debug console receive signal. */
 
-/* ============================================================================
-   3b. ESP32 LINK USART (USART2, PD5/PD6, AF7)  [v1.4 定案 / v2.7 移除 / 重新接入]
-   ----------------------------------------------------------------------------
-   F407 <-> ESP32-S3 全双工通信链路（一套 RX/TX）。
-     PD5 = USART2_TX -> ESP32 RX   （方向1：sensorhub 上报）
-     PD6 = USART2_RX <- ESP32 TX   （方向2：命令帧）
-   波特率见 PEO_PM_ESP_BAUDRATE。收发均走 DMA：方向1 上报 DMA 发送，方向2 接收 DMA 循环缓冲 + USART IDLE 中断组帧。
-   ============================================================================ */
+/* 3b. ESP32 LINK USART: USART2, PD5/PD6, AF7.
+   History: selected in v1.4, removed in v2.7, then reconnected.
+   Full-duplex F407 <-> ESP32-S3 link using one TX/RX pair.
+   PD5=USART2_TX -> ESP32 RX: sensor-hub telemetry.
+   PD6=USART2_RX <- ESP32 TX: command frames.
+   PEO_PM_ESP_BAUDRATE sets the serial rate. Both directions use DMA:
+   normal-mode transmission and circular reception with USART IDLE framing. */
 /** ESP32 LINK USART **/
-#define PEO_PM_ESP_USART        USART2
-#define PEO_PM_ESP_BAUDRATE     (921600U)
+#define PEO_PM_ESP_USART        USART2  /* Hardware serial peripheral assigned to ESP32-S3 host/telemetry link. */
+#define PEO_PM_ESP_BAUDRATE     (921600U)  /* Serial bit rate in bits/s for ESP32-S3 host/telemetry link. */
 
-#define PEO_PM_ESP_AF           GPIO_AF_USART2
-#define PEO_PM_ESP_TX_PORT      GPIOD
-#define PEO_PM_ESP_TX_PIN       GPIO_Pin_5
+#define PEO_PM_ESP_AF           GPIO_AF_USART2  /* Alternate-function selector connecting ESP32-S3 host/telemetry link to its peripheral. */
+#define PEO_PM_ESP_TX_PORT      GPIOD  /* GPIO peripheral containing the ESP32-S3 host/telemetry link transmit signal pin. */
+#define PEO_PM_ESP_TX_PIN       GPIO_Pin_5  /* GPIO bit mask selecting the ESP32-S3 host/telemetry link transmit signal pin. */
+/* Pin index for alternate-function routing of ESP32-S3 host/telemetry link transmit signal. */
 #define PEO_PM_ESP_TX_SRC       GPIO_PinSource5
-#define PEO_PM_ESP_RX_PORT      GPIOD
-#define PEO_PM_ESP_RX_PIN       GPIO_Pin_6
+#define PEO_PM_ESP_RX_PORT      GPIOD  /* GPIO peripheral containing the ESP32-S3 host/telemetry link receive signal pin. */
+#define PEO_PM_ESP_RX_PIN       GPIO_Pin_6  /* GPIO bit mask selecting the ESP32-S3 host/telemetry link receive signal pin. */
+/* Pin index for alternate-function routing of ESP32-S3 host/telemetry link receive signal. */
 #define PEO_PM_ESP_RX_SRC       GPIO_PinSource6
 
-/** ESP32 link sensorhub 上报定时器（TIM14 Update 中断，频率 = SENSOR_RATE_REPORT_HZ） **/
-#define PEO_PM_ESP_REPORT_TIM   TIM14
+/* ESP32 sensor-report timer: TIM14 update interrupts at SENSOR_RATE_REPORT_HZ. */
+#define PEO_PM_ESP_REPORT_TIM   TIM14  /* Timer generating the periodic ESP32-S3 telemetry interrupt. */
 
 /* Third asynchronous UART: USART3 TX=PD8(55), RX=PD9(56), AF7.
  * Baud rate is an application setting; no device-specific rate imposed here. */
-#define PEO_PM_UART3_USART USART3
-#define PEO_PM_UART3_AF GPIO_AF_USART3
-#define PEO_PM_UART3_TX_PORT GPIOD
-#define PEO_PM_UART3_TX_PIN GPIO_Pin_8
-#define PEO_PM_UART3_TX_SRC GPIO_PinSource8
-#define PEO_PM_UART3_RX_PORT GPIOD
-#define PEO_PM_UART3_RX_PIN GPIO_Pin_9
-#define PEO_PM_UART3_RX_SRC GPIO_PinSource9
+#define PEO_PM_UART3_USART USART3  /* Hardware serial peripheral assigned to ESP32-C3 gamepad link. */
+#define PEO_PM_UART3_AF GPIO_AF_USART3  /* Alternate-function selector connecting ESP32-C3 gamepad link to its peripheral. */
+#define PEO_PM_UART3_TX_PORT GPIOD  /* GPIO peripheral containing the ESP32-C3 gamepad link transmit signal pin. */
+#define PEO_PM_UART3_TX_PIN GPIO_Pin_8  /* GPIO bit mask selecting the ESP32-C3 gamepad link transmit signal pin. */
+#define PEO_PM_UART3_TX_SRC GPIO_PinSource8  /* Pin index for alternate-function routing of ESP32-C3 gamepad link transmit signal. */
+#define PEO_PM_UART3_RX_PORT GPIOD  /* GPIO peripheral containing the ESP32-C3 gamepad link receive signal pin. */
+#define PEO_PM_UART3_RX_PIN GPIO_Pin_9  /* GPIO bit mask selecting the ESP32-C3 gamepad link receive signal pin. */
+#define PEO_PM_UART3_RX_SRC GPIO_PinSource9  /* Pin index for alternate-function routing of ESP32-C3 gamepad link receive signal. */
 
 /* ============================================================================
    4. QUADRATURE ENCODERS x4  (TIMx CH1 = A, CH2 = B)
@@ -126,48 +141,48 @@
    ============================================================================ */
 
 /** ENCODER M1 - left front (TIM1 CH1/CH2 = PE9/PE11, AF1) **/
-#define PEO_PM_ENC1_TIM         TIM1
+#define PEO_PM_ENC1_TIM         TIM1  /* Hardware timer assigned to M1 wheel encoder. */
 #define PEO_PM_ENC1_ARR         (0xFFFFU)                  /* pure encoder, 16-bit delta */
-#define PEO_PM_ENC1_AF          GPIO_AF_TIM1
-#define PEO_PM_ENC1_CH1_PORT    GPIOE
-#define PEO_PM_ENC1_CH1_PIN     GPIO_Pin_9
-#define PEO_PM_ENC1_CH1_SRC     GPIO_PinSource9
-#define PEO_PM_ENC1_CH2_PORT    GPIOE
-#define PEO_PM_ENC1_CH2_PIN     GPIO_Pin_11
-#define PEO_PM_ENC1_CH2_SRC     GPIO_PinSource11
+#define PEO_PM_ENC1_AF          GPIO_AF_TIM1  /* Alternate-function selector connecting M1 wheel encoder to its peripheral. */
+#define PEO_PM_ENC1_CH1_PORT    GPIOE  /* GPIO peripheral containing the M1 wheel encoder A input pin. */
+#define PEO_PM_ENC1_CH1_PIN     GPIO_Pin_9  /* GPIO bit mask selecting the M1 wheel encoder A input pin. */
+#define PEO_PM_ENC1_CH1_SRC     GPIO_PinSource9  /* Pin index for alternate-function routing of M1 wheel encoder A input. */
+#define PEO_PM_ENC1_CH2_PORT    GPIOE  /* GPIO peripheral containing the M1 wheel encoder B input pin. */
+#define PEO_PM_ENC1_CH2_PIN     GPIO_Pin_11  /* GPIO bit mask selecting the M1 wheel encoder B input pin. */
+#define PEO_PM_ENC1_CH2_SRC     GPIO_PinSource11  /* Pin index for alternate-function routing of M1 wheel encoder B input. */
 
 /** ENCODER M2 - right front (TIM3 CH1/CH2 = PA6/PA7, AF2, pure encoder) **/
-#define PEO_PM_ENC2_TIM         TIM3
+#define PEO_PM_ENC2_TIM         TIM3  /* Hardware timer assigned to M2 wheel encoder. */
 #define PEO_PM_ENC2_ARR         (0xFFFFU)                  /* full 16-bit range, delta reads */
-#define PEO_PM_ENC2_AF          GPIO_AF_TIM3
-#define PEO_PM_ENC2_CH1_PORT    GPIOA
-#define PEO_PM_ENC2_CH1_PIN     GPIO_Pin_6
-#define PEO_PM_ENC2_CH1_SRC     GPIO_PinSource6
-#define PEO_PM_ENC2_CH2_PORT    GPIOA
-#define PEO_PM_ENC2_CH2_PIN     GPIO_Pin_7
-#define PEO_PM_ENC2_CH2_SRC     GPIO_PinSource7
+#define PEO_PM_ENC2_AF          GPIO_AF_TIM3  /* Alternate-function selector connecting M2 wheel encoder to its peripheral. */
+#define PEO_PM_ENC2_CH1_PORT    GPIOA  /* GPIO peripheral containing the M2 wheel encoder A input pin. */
+#define PEO_PM_ENC2_CH1_PIN     GPIO_Pin_6  /* GPIO bit mask selecting the M2 wheel encoder A input pin. */
+#define PEO_PM_ENC2_CH1_SRC     GPIO_PinSource6  /* Pin index for alternate-function routing of M2 wheel encoder A input. */
+#define PEO_PM_ENC2_CH2_PORT    GPIOA  /* GPIO peripheral containing the M2 wheel encoder B input pin. */
+#define PEO_PM_ENC2_CH2_PIN     GPIO_Pin_7  /* GPIO bit mask selecting the M2 wheel encoder B input pin. */
+#define PEO_PM_ENC2_CH2_SRC     GPIO_PinSource7  /* Pin index for alternate-function routing of M2 wheel encoder B input. */
 
 /** ENCODER M3 - left rear (TIM4 CH1/CH2 = PD12(59)/PD13(60), AF2) **/
-#define PEO_PM_ENC3_TIM                  TIM4
+#define PEO_PM_ENC3_TIM                  TIM4  /* Hardware timer assigned to M3 wheel encoder. */
 #define PEO_PM_ENC3_ARR         (0xFFFFU)                  /* pure encoder, 16-bit delta */
-#define PEO_PM_ENC3_AF                   GPIO_AF_TIM4
-#define PEO_PM_ENC3_CH1_PORT             GPIOD
-#define PEO_PM_ENC3_CH1_PIN              GPIO_Pin_12
-#define PEO_PM_ENC3_CH1_SRC              GPIO_PinSource12
-#define PEO_PM_ENC3_CH2_PORT             GPIOD
-#define PEO_PM_ENC3_CH2_PIN              GPIO_Pin_13
-#define PEO_PM_ENC3_CH2_SRC              GPIO_PinSource13
+#define PEO_PM_ENC3_AF                   GPIO_AF_TIM4  /* Alternate-function selector connecting M3 wheel encoder to its peripheral. */
+#define PEO_PM_ENC3_CH1_PORT             GPIOD  /* GPIO peripheral containing the M3 wheel encoder A input pin. */
+#define PEO_PM_ENC3_CH1_PIN              GPIO_Pin_12  /* GPIO bit mask selecting the M3 wheel encoder A input pin. */
+#define PEO_PM_ENC3_CH1_SRC              GPIO_PinSource12  /* Pin index for alternate-function routing of M3 wheel encoder A input. */
+#define PEO_PM_ENC3_CH2_PORT             GPIOD  /* GPIO peripheral containing the M3 wheel encoder B input pin. */
+#define PEO_PM_ENC3_CH2_PIN              GPIO_Pin_13  /* GPIO bit mask selecting the M3 wheel encoder B input pin. */
+#define PEO_PM_ENC3_CH2_SRC              GPIO_PinSource13  /* Pin index for alternate-function routing of M3 wheel encoder B input. */
 
 /** ENCODER M4 - right rear (TIM8 CH1/CH2 = PC6(63)/PC7(64), AF3) **/
-#define PEO_PM_ENC4_TIM                  TIM8
+#define PEO_PM_ENC4_TIM                  TIM8  /* Hardware timer assigned to M4 wheel encoder. */
 #define PEO_PM_ENC4_ARR         (0xFFFFU)                  /* pure encoder, 16-bit delta */
-#define PEO_PM_ENC4_AF                   GPIO_AF_TIM8
-#define PEO_PM_ENC4_CH1_PORT             GPIOC
-#define PEO_PM_ENC4_CH1_PIN              GPIO_Pin_6
-#define PEO_PM_ENC4_CH1_SRC              GPIO_PinSource6
-#define PEO_PM_ENC4_CH2_PORT             GPIOC
-#define PEO_PM_ENC4_CH2_PIN              GPIO_Pin_7
-#define PEO_PM_ENC4_CH2_SRC              GPIO_PinSource7
+#define PEO_PM_ENC4_AF                   GPIO_AF_TIM8  /* Alternate-function selector connecting M4 wheel encoder to its peripheral. */
+#define PEO_PM_ENC4_CH1_PORT             GPIOC  /* GPIO peripheral containing the M4 wheel encoder A input pin. */
+#define PEO_PM_ENC4_CH1_PIN              GPIO_Pin_6  /* GPIO bit mask selecting the M4 wheel encoder A input pin. */
+#define PEO_PM_ENC4_CH1_SRC              GPIO_PinSource6  /* Pin index for alternate-function routing of M4 wheel encoder A input. */
+#define PEO_PM_ENC4_CH2_PORT             GPIOC  /* GPIO peripheral containing the M4 wheel encoder B input pin. */
+#define PEO_PM_ENC4_CH2_PIN              GPIO_Pin_7  /* GPIO bit mask selecting the M4 wheel encoder B input pin. */
+#define PEO_PM_ENC4_CH2_SRC              GPIO_PinSource7  /* Pin index for alternate-function routing of M4 wheel encoder B input. */
 
 /* ============================================================================
    5. MOTOR PWM x8 (two inputs per DRV8871 motor driver)
@@ -180,88 +195,96 @@
    ============================================================================ */
 
 /* PWM1: TIM5_CH3, PA2, LQFP100 pin 25. */
-#define PEO_PM_PWM1_TIM                  TIM5
-#define PEO_PM_PWM1_CH                   TIM_Channel_3
-#define PEO_PM_PWM1_PORT                 GPIOA
-#define PEO_PM_PWM1_PIN                  GPIO_Pin_2
-#define PEO_PM_PWM1_SRC                  GPIO_PinSource2
+#define PEO_PM_PWM1_TIM                  TIM5  /* Hardware timer assigned to PWM1 motor-driver output. */
+#define PEO_PM_PWM1_CH                   TIM_Channel_3  /* Timer channel selector for PWM1 motor-driver output. */
+#define PEO_PM_PWM1_PORT                 GPIOA  /* GPIO peripheral containing the PWM1 motor-driver output pin. */
+#define PEO_PM_PWM1_PIN                  GPIO_Pin_2  /* GPIO bit mask selecting the PWM1 motor-driver output pin. */
+#define PEO_PM_PWM1_SRC                  GPIO_PinSource2  /* Pin index for alternate-function routing of PWM1 motor-driver output. */
+/* Alternate-function selector connecting PWM1 motor-driver output to its peripheral. */
 #define PEO_PM_PWM1_AF                   GPIO_AF_TIM5
-#define PEO_PM_PWM1_PHYS_PIN             (25U)
-#define PEO_PM_PWM1_TIM_HZ               PEO_PM_TIM_APB1_HZ
+#define PEO_PM_PWM1_PHYS_PIN             (25U)  /* LQFP100 package lead number for PWM1 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM1_TIM_HZ               PEO_PM_TIM_APB1_HZ  /* Timer input clock frequency in Hz for PWM1 motor-driver output. */
 
 /* PWM2: TIM5_CH4, PA3, LQFP100 pin 26. */
-#define PEO_PM_PWM2_TIM                  TIM5
-#define PEO_PM_PWM2_CH                   TIM_Channel_4
-#define PEO_PM_PWM2_PORT                 GPIOA
-#define PEO_PM_PWM2_PIN                  GPIO_Pin_3
-#define PEO_PM_PWM2_SRC                  GPIO_PinSource3
+#define PEO_PM_PWM2_TIM                  TIM5  /* Hardware timer assigned to PWM2 motor-driver output. */
+#define PEO_PM_PWM2_CH                   TIM_Channel_4  /* Timer channel selector for PWM2 motor-driver output. */
+#define PEO_PM_PWM2_PORT                 GPIOA  /* GPIO peripheral containing the PWM2 motor-driver output pin. */
+#define PEO_PM_PWM2_PIN                  GPIO_Pin_3  /* GPIO bit mask selecting the PWM2 motor-driver output pin. */
+#define PEO_PM_PWM2_SRC                  GPIO_PinSource3  /* Pin index for alternate-function routing of PWM2 motor-driver output. */
+/* Alternate-function selector connecting PWM2 motor-driver output to its peripheral. */
 #define PEO_PM_PWM2_AF                   GPIO_AF_TIM5
-#define PEO_PM_PWM2_PHYS_PIN             (26U)
-#define PEO_PM_PWM2_TIM_HZ               PEO_PM_TIM_APB1_HZ
+#define PEO_PM_PWM2_PHYS_PIN             (26U)  /* LQFP100 package lead number for PWM2 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM2_TIM_HZ               PEO_PM_TIM_APB1_HZ  /* Timer input clock frequency in Hz for PWM2 motor-driver output. */
 
 /* PWM3: TIM9_CH1, PE5, LQFP100 pin 4. */
-#define PEO_PM_PWM3_TIM                  TIM9
-#define PEO_PM_PWM3_CH                   TIM_Channel_1
-#define PEO_PM_PWM3_PORT                 GPIOE
-#define PEO_PM_PWM3_PIN                  GPIO_Pin_5
-#define PEO_PM_PWM3_SRC                  GPIO_PinSource5
+#define PEO_PM_PWM3_TIM                  TIM9  /* Hardware timer assigned to PWM3 motor-driver output. */
+#define PEO_PM_PWM3_CH                   TIM_Channel_1  /* Timer channel selector for PWM3 motor-driver output. */
+#define PEO_PM_PWM3_PORT                 GPIOE  /* GPIO peripheral containing the PWM3 motor-driver output pin. */
+#define PEO_PM_PWM3_PIN                  GPIO_Pin_5  /* GPIO bit mask selecting the PWM3 motor-driver output pin. */
+#define PEO_PM_PWM3_SRC                  GPIO_PinSource5  /* Pin index for alternate-function routing of PWM3 motor-driver output. */
+/* Alternate-function selector connecting PWM3 motor-driver output to its peripheral. */
 #define PEO_PM_PWM3_AF                   GPIO_AF_TIM9
-#define PEO_PM_PWM3_PHYS_PIN             (4U)
-#define PEO_PM_PWM3_TIM_HZ               PEO_PM_TIM_APB2_HZ
+#define PEO_PM_PWM3_PHYS_PIN             (4U)  /* LQFP100 package lead number for PWM3 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM3_TIM_HZ               PEO_PM_TIM_APB2_HZ  /* Timer input clock frequency in Hz for PWM3 motor-driver output. */
 
 /* PWM4: TIM9_CH2, PE6, LQFP100 pin 5. */
-#define PEO_PM_PWM4_TIM                  TIM9
-#define PEO_PM_PWM4_CH                   TIM_Channel_2
-#define PEO_PM_PWM4_PORT                 GPIOE
-#define PEO_PM_PWM4_PIN                  GPIO_Pin_6
-#define PEO_PM_PWM4_SRC                  GPIO_PinSource6
+#define PEO_PM_PWM4_TIM                  TIM9  /* Hardware timer assigned to PWM4 motor-driver output. */
+#define PEO_PM_PWM4_CH                   TIM_Channel_2  /* Timer channel selector for PWM4 motor-driver output. */
+#define PEO_PM_PWM4_PORT                 GPIOE  /* GPIO peripheral containing the PWM4 motor-driver output pin. */
+#define PEO_PM_PWM4_PIN                  GPIO_Pin_6  /* GPIO bit mask selecting the PWM4 motor-driver output pin. */
+#define PEO_PM_PWM4_SRC                  GPIO_PinSource6  /* Pin index for alternate-function routing of PWM4 motor-driver output. */
+/* Alternate-function selector connecting PWM4 motor-driver output to its peripheral. */
 #define PEO_PM_PWM4_AF                   GPIO_AF_TIM9
-#define PEO_PM_PWM4_PHYS_PIN             (5U)
-#define PEO_PM_PWM4_TIM_HZ               PEO_PM_TIM_APB2_HZ
+#define PEO_PM_PWM4_PHYS_PIN             (5U)  /* LQFP100 package lead number for PWM4 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM4_TIM_HZ               PEO_PM_TIM_APB2_HZ  /* Timer input clock frequency in Hz for PWM4 motor-driver output. */
 
 /* PWM5: TIM12_CH1, PB14, LQFP100 pin 53. */
-#define PEO_PM_PWM5_TIM                  TIM12
-#define PEO_PM_PWM5_CH                   TIM_Channel_1
-#define PEO_PM_PWM5_PORT                 GPIOB
-#define PEO_PM_PWM5_PIN                  GPIO_Pin_14
-#define PEO_PM_PWM5_SRC                  GPIO_PinSource14
+#define PEO_PM_PWM5_TIM                  TIM12  /* Hardware timer assigned to PWM5 motor-driver output. */
+#define PEO_PM_PWM5_CH                   TIM_Channel_1  /* Timer channel selector for PWM5 motor-driver output. */
+#define PEO_PM_PWM5_PORT                 GPIOB  /* GPIO peripheral containing the PWM5 motor-driver output pin. */
+#define PEO_PM_PWM5_PIN                  GPIO_Pin_14  /* GPIO bit mask selecting the PWM5 motor-driver output pin. */
+#define PEO_PM_PWM5_SRC                  GPIO_PinSource14  /* Pin index for alternate-function routing of PWM5 motor-driver output. */
+/* Alternate-function selector connecting PWM5 motor-driver output to its peripheral. */
 #define PEO_PM_PWM5_AF                   GPIO_AF_TIM12
-#define PEO_PM_PWM5_PHYS_PIN             (53U)
-#define PEO_PM_PWM5_TIM_HZ               PEO_PM_TIM_APB1_HZ
+#define PEO_PM_PWM5_PHYS_PIN             (53U)  /* LQFP100 package lead number for PWM5 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM5_TIM_HZ               PEO_PM_TIM_APB1_HZ  /* Timer input clock frequency in Hz for PWM5 motor-driver output. */
 
 /* PWM6: TIM12_CH2, PB15, LQFP100 pin 54. */
-#define PEO_PM_PWM6_TIM                  TIM12
-#define PEO_PM_PWM6_CH                   TIM_Channel_2
-#define PEO_PM_PWM6_PORT                 GPIOB
-#define PEO_PM_PWM6_PIN                  GPIO_Pin_15
-#define PEO_PM_PWM6_SRC                  GPIO_PinSource15
+#define PEO_PM_PWM6_TIM                  TIM12  /* Hardware timer assigned to PWM6 motor-driver output. */
+#define PEO_PM_PWM6_CH                   TIM_Channel_2  /* Timer channel selector for PWM6 motor-driver output. */
+#define PEO_PM_PWM6_PORT                 GPIOB  /* GPIO peripheral containing the PWM6 motor-driver output pin. */
+#define PEO_PM_PWM6_PIN                  GPIO_Pin_15  /* GPIO bit mask selecting the PWM6 motor-driver output pin. */
+#define PEO_PM_PWM6_SRC                  GPIO_PinSource15  /* Pin index for alternate-function routing of PWM6 motor-driver output. */
+/* Alternate-function selector connecting PWM6 motor-driver output to its peripheral. */
 #define PEO_PM_PWM6_AF                   GPIO_AF_TIM12
-#define PEO_PM_PWM6_PHYS_PIN             (54U)
-#define PEO_PM_PWM6_TIM_HZ               PEO_PM_TIM_APB1_HZ
+#define PEO_PM_PWM6_PHYS_PIN             (54U)  /* LQFP100 package lead number for PWM6 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM6_TIM_HZ               PEO_PM_TIM_APB1_HZ  /* Timer input clock frequency in Hz for PWM6 motor-driver output. */
 
 /* PWM7: TIM10_CH1, PB8, LQFP100 pin 95. */
-#define PEO_PM_PWM7_TIM                  TIM10
-#define PEO_PM_PWM7_CH                   TIM_Channel_1
-#define PEO_PM_PWM7_PORT                 GPIOB
-#define PEO_PM_PWM7_PIN                  GPIO_Pin_8
-#define PEO_PM_PWM7_SRC                  GPIO_PinSource8
+#define PEO_PM_PWM7_TIM                  TIM10  /* Hardware timer assigned to PWM7 motor-driver output. */
+#define PEO_PM_PWM7_CH                   TIM_Channel_1  /* Timer channel selector for PWM7 motor-driver output. */
+#define PEO_PM_PWM7_PORT                 GPIOB  /* GPIO peripheral containing the PWM7 motor-driver output pin. */
+#define PEO_PM_PWM7_PIN                  GPIO_Pin_8  /* GPIO bit mask selecting the PWM7 motor-driver output pin. */
+#define PEO_PM_PWM7_SRC                  GPIO_PinSource8  /* Pin index for alternate-function routing of PWM7 motor-driver output. */
+/* Alternate-function selector connecting PWM7 motor-driver output to its peripheral. */
 #define PEO_PM_PWM7_AF                   GPIO_AF_TIM10
-#define PEO_PM_PWM7_PHYS_PIN             (95U)
-#define PEO_PM_PWM7_TIM_HZ               PEO_PM_TIM_APB2_HZ
+#define PEO_PM_PWM7_PHYS_PIN             (95U)  /* LQFP100 package lead number for PWM7 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM7_TIM_HZ               PEO_PM_TIM_APB2_HZ  /* Timer input clock frequency in Hz for PWM7 motor-driver output. */
 
 /* PWM8: TIM11_CH1, PB9, LQFP100 pin 96. */
-#define PEO_PM_PWM8_TIM                  TIM11
-#define PEO_PM_PWM8_CH                   TIM_Channel_1
-#define PEO_PM_PWM8_PORT                 GPIOB
-#define PEO_PM_PWM8_PIN                  GPIO_Pin_9
-#define PEO_PM_PWM8_SRC                  GPIO_PinSource9
+#define PEO_PM_PWM8_TIM                  TIM11  /* Hardware timer assigned to PWM8 motor-driver output. */
+#define PEO_PM_PWM8_CH                   TIM_Channel_1  /* Timer channel selector for PWM8 motor-driver output. */
+#define PEO_PM_PWM8_PORT                 GPIOB  /* GPIO peripheral containing the PWM8 motor-driver output pin. */
+#define PEO_PM_PWM8_PIN                  GPIO_Pin_9  /* GPIO bit mask selecting the PWM8 motor-driver output pin. */
+#define PEO_PM_PWM8_SRC                  GPIO_PinSource9  /* Pin index for alternate-function routing of PWM8 motor-driver output. */
+/* Alternate-function selector connecting PWM8 motor-driver output to its peripheral. */
 #define PEO_PM_PWM8_AF                   GPIO_AF_TIM11
-#define PEO_PM_PWM8_PHYS_PIN             (96U)
-#define PEO_PM_PWM8_TIM_HZ               PEO_PM_TIM_APB2_HZ
-#define PEO_PM_PWM1_2_AF GPIO_AF_TIM5
-#define PEO_PM_PWM3_4_AF GPIO_AF_TIM9
-#define PEO_PM_PWM5_6_AF GPIO_AF_TIM12
-#define PEO_PM_PWM7_8_AF GPIO_AF_TIM10
+#define PEO_PM_PWM8_PHYS_PIN             (96U)  /* LQFP100 package lead number for PWM8 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM8_TIM_HZ               PEO_PM_TIM_APB2_HZ  /* Timer input clock frequency in Hz for PWM8 motor-driver output. */
+#define PEO_PM_PWM1_2_AF GPIO_AF_TIM5  /* Alternate-function selector connecting PWM1 motor-driver output to its peripheral. */
+#define PEO_PM_PWM3_4_AF GPIO_AF_TIM9  /* Alternate-function selector connecting PWM3 motor-driver output to its peripheral. */
+#define PEO_PM_PWM5_6_AF GPIO_AF_TIM12  /* Alternate-function selector connecting PWM5 motor-driver output to its peripheral. */
+#define PEO_PM_PWM7_8_AF GPIO_AF_TIM10  /* Alternate-function selector connecting PWM7 motor-driver output to its peripheral. */
 /* TIM10 and TIM11 both use GPIO AF3; per-channel AF macros above preferred. */
 
 /* ============================================================================
@@ -285,15 +308,15 @@
    ============================================================================ */
 
 /** I2C1 - MPU6050 dedicated bus (PB6/PB7, AF4) **/
-#define PEO_PM_MPU6050_I2C          I2C1
-#define PEO_PM_MPU6050_I2C_CLKSPEED (400000U)
-#define PEO_PM_MPU6050_SCL_PORT     GPIOB
-#define PEO_PM_MPU6050_SCL_PIN      GPIO_Pin_6
-#define PEO_PM_MPU6050_SCL_SRC      GPIO_PinSource6
-#define PEO_PM_MPU6050_SDA_PORT     GPIOB
-#define PEO_PM_MPU6050_SDA_PIN      GPIO_Pin_7
-#define PEO_PM_MPU6050_SDA_SRC      GPIO_PinSource7
-#define PEO_PM_MPU6050_I2C_AF       GPIO_AF_I2C1
+#define PEO_PM_MPU6050_I2C          I2C1  /* Hardware I2C peripheral assigned to MPU6050 attitude sensor. */
+#define PEO_PM_MPU6050_I2C_CLKSPEED (400000U)  /* I2C clock frequency in Hz for MPU6050 attitude sensor. */
+#define PEO_PM_MPU6050_SCL_PORT     GPIOB  /* GPIO peripheral containing the MPU6050 attitude sensor clock signal pin. */
+#define PEO_PM_MPU6050_SCL_PIN      GPIO_Pin_6  /* GPIO bit mask selecting the MPU6050 attitude sensor clock signal pin. */
+#define PEO_PM_MPU6050_SCL_SRC      GPIO_PinSource6  /* Pin index for alternate-function routing of MPU6050 attitude sensor clock signal. */
+#define PEO_PM_MPU6050_SDA_PORT     GPIOB  /* GPIO peripheral containing the MPU6050 attitude sensor data signal pin. */
+#define PEO_PM_MPU6050_SDA_PIN      GPIO_Pin_7  /* GPIO bit mask selecting the MPU6050 attitude sensor data signal pin. */
+#define PEO_PM_MPU6050_SDA_SRC      GPIO_PinSource7  /* Pin index for alternate-function routing of MPU6050 attitude sensor data signal. */
+#define PEO_PM_MPU6050_I2C_AF       GPIO_AF_I2C1  /* Alternate-function selector connecting MPU6050 attitude sensor to its peripheral. */
 
 /** I2C1 slave address (7-bit) **/
 #define PEO_PM_MPU6050_ADDR     (0x68U)         /* whole-vehicle vibration */
@@ -315,19 +338,20 @@
    ============================================================================ */
 
 /** I2C3 - VL53L1X dedicated bus (PA8/PC9, AF4) **/
-#define PEO_PM_VL53_I2C          I2C3
-#define PEO_PM_VL53_I2C_CLKSPEED (400000U)
-#define PEO_PM_VL53_SCL_PORT     GPIOA
-#define PEO_PM_VL53_SCL_PIN      GPIO_Pin_8
+#define PEO_PM_VL53_I2C          I2C3  /* Hardware I2C peripheral assigned to three VL53L1X range sensors. */
+#define PEO_PM_VL53_I2C_CLKSPEED (400000U)  /* I2C clock frequency in Hz for three VL53L1X range sensors. */
+#define PEO_PM_VL53_SCL_PORT     GPIOA  /* GPIO peripheral containing the three VL53L1X range sensors clock signal pin. */
+#define PEO_PM_VL53_SCL_PIN      GPIO_Pin_8  /* GPIO bit mask selecting the three VL53L1X range sensors clock signal pin. */
+/* Pin index for alternate-function routing of three VL53L1X range sensors clock signal. */
 #define PEO_PM_VL53_SCL_SRC      GPIO_PinSource8
-#define PEO_PM_VL53_SDA_PORT     GPIOC
-#define PEO_PM_VL53_SDA_PIN      GPIO_Pin_9
-#define PEO_PM_VL53_SDA_SRC      GPIO_PinSource9
-#define PEO_PM_VL53_I2C_AF       GPIO_AF_I2C3
+#define PEO_PM_VL53_SDA_PORT     GPIOC  /* GPIO peripheral containing the three VL53L1X range sensors data signal pin. */
+#define PEO_PM_VL53_SDA_PIN      GPIO_Pin_9  /* GPIO bit mask selecting the three VL53L1X range sensors data signal pin. */
+#define PEO_PM_VL53_SDA_SRC      GPIO_PinSource9  /* Pin index for alternate-function routing of three VL53L1X range sensors data signal. */
+#define PEO_PM_VL53_I2C_AF       GPIO_AF_I2C3  /* Alternate-function selector connecting three VL53L1X range sensors to its peripheral. */
 
 /** VL53 driver address convention retained: 8-bit shifted addresses.
  * Equivalent 7-bit addresses: 0x29 / 0x2A / 0x2B. */
-#define PEO_PM_VL53_DEFAULT_ADDR        (0x52U)
+#define PEO_PM_VL53_DEFAULT_ADDR        (0x52U)  /* Factory VL53 bus address in shifted form, 0x52 (7-bit address 0x29). */
 #define PEO_PM_VL53_FRONT_ADDR          (0x52U)          /* I2C3 */
 #define PEO_PM_VL53_LEFT_ADDR           (0x54U)          /* I2C3 */
 #define PEO_PM_VL53_RIGHT_ADDR          (0x56U)          /* I2C3 */
@@ -341,19 +365,21 @@
    ============================================================================ */
 
 /** I2C2 - INA3221 dedicated bus (PB10=SCL/PB11=SDA, AF4) **/
-#define PEO_PM_INA_I2C          I2C2
-#define PEO_PM_INA_I2C_CLKSPEED (400000U)
-#define PEO_PM_INA_SCL_PORT              GPIOB
-#define PEO_PM_INA_SCL_PIN               GPIO_Pin_10
+#define PEO_PM_INA_I2C          I2C2  /* Hardware I2C peripheral assigned to INA3221 current-monitor bus. */
+#define PEO_PM_INA_I2C_CLKSPEED (400000U)  /* I2C clock frequency in Hz for INA3221 current-monitor bus. */
+#define PEO_PM_INA_SCL_PORT              GPIOB  /* GPIO peripheral containing the INA3221 current-monitor bus clock signal pin. */
+#define PEO_PM_INA_SCL_PIN               GPIO_Pin_10  /* GPIO bit mask selecting the INA3221 current-monitor bus clock signal pin. */
+/* Pin index for alternate-function routing of INA3221 current-monitor bus clock signal. */
 #define PEO_PM_INA_SCL_SRC               GPIO_PinSource10
-#define PEO_PM_INA_SDA_PORT              GPIOB
-#define PEO_PM_INA_SDA_PIN               GPIO_Pin_11
+#define PEO_PM_INA_SDA_PORT              GPIOB  /* GPIO peripheral containing the INA3221 current-monitor bus data signal pin. */
+#define PEO_PM_INA_SDA_PIN               GPIO_Pin_11  /* GPIO bit mask selecting the INA3221 current-monitor bus data signal pin. */
+/* Pin index for alternate-function routing of INA3221 current-monitor bus data signal. */
 #define PEO_PM_INA_SDA_SRC               GPIO_PinSource11
-#define PEO_PM_INA_I2C_AF       GPIO_AF_I2C2
+#define PEO_PM_INA_I2C_AF       GPIO_AF_I2C2  /* Alternate-function selector connecting INA3221 current-monitor bus to its peripheral. */
 
-/** I2C2 slave addresses (7-bit) — two INA3221 share the bus **/
-#define PEO_PM_INA3221_ADDR_A   (0x40U)   /* 片A：A0=GND，测 M1/M2 */
-#define PEO_PM_INA3221_ADDR_B   (0x41U)   /* 片B：A0=VS，测 M3/M4 */
+/** I2C2 slave addresses (7-bit) - two INA3221 share the bus **/
+#define PEO_PM_INA3221_ADDR_A   (0x40U)   /* Device A: A0 tied to GND; monitors motors M1/M2. */
+#define PEO_PM_INA3221_ADDR_B   (0x41U)   /* Device B: A0 tied to VS; monitors motors M3/M4. */
 
 /* ============================================================================
    9. VL53L1X XSHUT x3  (restored v2.0)
@@ -366,49 +392,51 @@
    ============================================================================ */
 
 /** VL53L1X XSHUT (active-low; low = held in reset) **/
+/* GPIO peripheral containing the three VL53L1X range sensors reset/shutdown signal pin. */
 #define PEO_PM_VL53_XSHUT_PORT              GPIOC
-#define PEO_PM_VL53_FRONT_XSHUT_PIN         GPIO_Pin_0
-#define PEO_PM_VL53_LEFT_XSHUT_PIN          GPIO_Pin_1
-#define PEO_PM_VL53_RIGHT_XSHUT_PIN         GPIO_Pin_2
+#define PEO_PM_VL53_FRONT_XSHUT_PIN         GPIO_Pin_0  /* GPIO bit mask selecting the front VL53L1X sensor reset/shutdown signal pin. */
+#define PEO_PM_VL53_LEFT_XSHUT_PIN          GPIO_Pin_1  /* GPIO bit mask selecting the left VL53L1X sensor reset/shutdown signal pin. */
+#define PEO_PM_VL53_RIGHT_XSHUT_PIN         GPIO_Pin_2  /* GPIO bit mask selecting the right VL53L1X sensor reset/shutdown signal pin. */
 
 /* ============================================================================
    9b. VL53L1X INT x3 + MPU6050 INT  (data-ready interrupt outputs)  [v2.6]
    ----------------------------------------------------------------------------
-   VL53L1X GPIO1 asserts when a ranging result is ready (active-high default).
+   VL53L1X GPIO1 signals a ready ranging result; this driver configures it active-low.
    MPU6050 INT asserts on data-ready (or FIFO/motion, per MPU6050_Config).
    Each sensor INT is wired to a dedicated MCU input + EXTI line so the host
    reads results interrupt-driven instead of polling.
      VL53L1X INT front = PE0 (EXTI0)   left = PE1 (EXTI1)   right = PE2 (EXTI2)
      MPU6050 INT      = PE3 (EXTI3)
-   MCU side: floating input (sensor drives push-pull); EXTI rising edge.
+   MCU side: VL53 inputs use pull-ups and falling edges; MPU uses a pull-down
+   and a rising edge. See TOF400C_Init() and reg_int_cb() for configuration.
    All four on INDEPENDENT EXTI lines - no shared EXTI9_5 vector.
    ============================================================================ */
 
-/** VL53L1X INT (GPIO1, active-high data-ready) **/
-#define PEO_PM_VL53_INT_PORT                GPIOE
-#define PEO_PM_VL53_FRONT_INT_PIN           GPIO_Pin_0
-#define PEO_PM_VL53_LEFT_INT_PIN            GPIO_Pin_1
-#define PEO_PM_VL53_RIGHT_INT_PIN           GPIO_Pin_2
+/** VL53L1X INT (GPIO1, configured active-low by TOF400C_BOOT_Init). **/
+#define PEO_PM_VL53_INT_PORT                GPIOE  /* GPIO peripheral containing the three VL53L1X range sensors pin. */
+#define PEO_PM_VL53_FRONT_INT_PIN           GPIO_Pin_0  /* GPIO bit mask selecting the front VL53L1X sensor pin. */
+#define PEO_PM_VL53_LEFT_INT_PIN            GPIO_Pin_1  /* GPIO bit mask selecting the left VL53L1X sensor pin. */
+#define PEO_PM_VL53_RIGHT_INT_PIN           GPIO_Pin_2  /* GPIO bit mask selecting the right VL53L1X sensor pin. */
 
 /** MPU6050 INT (data-ready / FIFO / motion, per config) **/
-#define PEO_PM_MPU_INT_PORT           GPIOE
-#define PEO_PM_MPU_INT_PIN            GPIO_Pin_3
+#define PEO_PM_MPU_INT_PORT           GPIOE  /* GPIO peripheral containing the MPU6050 data-ready signal pin. */
+#define PEO_PM_MPU_INT_PIN            GPIO_Pin_3  /* GPIO bit mask selecting the MPU6050 data-ready signal pin. */
 
 /** EXTI lines / pin sources (RM0090 sec.10.2) **/
-#define PEO_PM_VL53_FRONT_INT_EXTI_LINE     EXTI_Line0
-#define PEO_PM_VL53_FRONT_INT_EXTI_PSRC     EXTI_PortSourceGPIOE
-#define PEO_PM_VL53_FRONT_INT_EXTI_SRC      EXTI_PinSource0
+#define PEO_PM_VL53_FRONT_INT_EXTI_LINE     EXTI_Line0  /* Interrupt-line bit mask for front VL53L1X sensor. */
+#define PEO_PM_VL53_FRONT_INT_EXTI_PSRC     EXTI_PortSourceGPIOE  /* GPIO port selector for routing front VL53L1X sensor into EXTI. */
+#define PEO_PM_VL53_FRONT_INT_EXTI_SRC      EXTI_PinSource0  /* Pin-number selector for routing front VL53L1X sensor into EXTI. */
 
-#define PEO_PM_VL53_LEFT_INT_EXTI_LINE      EXTI_Line1
-#define PEO_PM_VL53_LEFT_INT_EXTI_PSRC      EXTI_PortSourceGPIOE
-#define PEO_PM_VL53_LEFT_INT_EXTI_SRC       EXTI_PinSource1
+#define PEO_PM_VL53_LEFT_INT_EXTI_LINE      EXTI_Line1  /* Interrupt-line bit mask for left VL53L1X sensor. */
+#define PEO_PM_VL53_LEFT_INT_EXTI_PSRC      EXTI_PortSourceGPIOE  /* GPIO port selector for routing left VL53L1X sensor into EXTI. */
+#define PEO_PM_VL53_LEFT_INT_EXTI_SRC       EXTI_PinSource1  /* Pin-number selector for routing left VL53L1X sensor into EXTI. */
 
-#define PEO_PM_VL53_RIGHT_INT_EXTI_LINE     EXTI_Line2
-#define PEO_PM_VL53_RIGHT_INT_EXTI_PSRC     EXTI_PortSourceGPIOE
-#define PEO_PM_VL53_RIGHT_INT_EXTI_SRC      EXTI_PinSource2
+#define PEO_PM_VL53_RIGHT_INT_EXTI_LINE     EXTI_Line2  /* Interrupt-line bit mask for right VL53L1X sensor. */
+#define PEO_PM_VL53_RIGHT_INT_EXTI_PSRC     EXTI_PortSourceGPIOE  /* GPIO port selector for routing right VL53L1X sensor into EXTI. */
+#define PEO_PM_VL53_RIGHT_INT_EXTI_SRC      EXTI_PinSource2  /* Pin-number selector for routing right VL53L1X sensor into EXTI. */
 
-#define PEO_PM_MPU_INT_EXTI_LINE            EXTI_Line3
-#define PEO_PM_MPU_INT_EXTI_SRC             EXTI_PinSource3
+#define PEO_PM_MPU_INT_EXTI_LINE            EXTI_Line3  /* Interrupt-line bit mask for MPU6050 data-ready signal. */
+#define PEO_PM_MPU_INT_EXTI_SRC             EXTI_PinSource3  /* Pin-number selector for routing MPU6050 data-ready signal into EXTI. */
 
 
 /* ============================================================================
@@ -431,26 +459,35 @@
    Release JTAG functions on PA15/PB3/PB4 and do not enable SWO on PB3;
    retain SWD on PA13/PA14. This pinmap does not initialize the flash.
    ============================================================================ */
-#define PEO_PM_FLASH_SPI                  SPI1
+#define PEO_PM_FLASH_SPI                  SPI1  /* Hardware SPI peripheral reserved for external W25Q16BV flash. */
+/* Alternate-function selector connecting external W25Q16BV flash to its peripheral. */
 #define PEO_PM_FLASH_SPI_AF               GPIO_AF_SPI1
-#define PEO_PM_FLASH_SPI_RCC              RCC_APB2Periph_SPI1
+#define PEO_PM_FLASH_SPI_RCC              RCC_APB2Periph_SPI1  /* APB2 clock-enable bit for the reserved external flash SPI controller. */
+/* GPIO clock-enable mask needed by the external flash wiring. */
 #define PEO_PM_FLASH_GPIO_RCC             (RCC_AHB1Periph_GPIOA | RCC_AHB1Periph_GPIOB)
-#define PEO_PM_FLASH_CS_PORT              GPIOA
-#define PEO_PM_FLASH_CS_PIN               GPIO_Pin_15
+#define PEO_PM_FLASH_CS_PORT              GPIOA  /* GPIO peripheral containing the external W25Q16BV flash chip-select signal pin. */
+#define PEO_PM_FLASH_CS_PIN               GPIO_Pin_15  /* GPIO bit mask selecting the external W25Q16BV flash chip-select signal pin. */
+/* LQFP100 package lead number for external W25Q16BV flash chip-select signal; not a GPIO bit mask. */
 #define PEO_PM_FLASH_CS_PHYS_PIN          (77U)
-#define PEO_PM_FLASH_CS_ACTIVE_LEVEL      Bit_RESET
-#define PEO_PM_FLASH_CS_IDLE_LEVEL        Bit_SET
-#define PEO_PM_FLASH_SCK_PORT             GPIOB
-#define PEO_PM_FLASH_SCK_PIN              GPIO_Pin_3
+#define PEO_PM_FLASH_CS_ACTIVE_LEVEL      Bit_RESET  /* Electrical level that selects the flash device: low. */
+#define PEO_PM_FLASH_CS_IDLE_LEVEL        Bit_SET  /* Electrical level that deselects the flash device: high. */
+#define PEO_PM_FLASH_SCK_PORT             GPIOB  /* GPIO peripheral containing the external W25Q16BV flash SPI clock signal pin. */
+#define PEO_PM_FLASH_SCK_PIN              GPIO_Pin_3  /* GPIO bit mask selecting the external W25Q16BV flash SPI clock signal pin. */
+/* Pin index for alternate-function routing of external W25Q16BV flash SPI clock signal. */
 #define PEO_PM_FLASH_SCK_SRC              GPIO_PinSource3
+/* LQFP100 package lead number for external W25Q16BV flash SPI clock signal; not a GPIO bit mask. */
 #define PEO_PM_FLASH_SCK_PHYS_PIN         (89U)
-#define PEO_PM_FLASH_MISO_PORT            GPIOB
-#define PEO_PM_FLASH_MISO_PIN             GPIO_Pin_4
+#define PEO_PM_FLASH_MISO_PORT            GPIOB  /* GPIO peripheral containing the external W25Q16BV flash SPI data from flash pin. */
+#define PEO_PM_FLASH_MISO_PIN             GPIO_Pin_4  /* GPIO bit mask selecting the external W25Q16BV flash SPI data from flash pin. */
+/* Pin index for alternate-function routing of external W25Q16BV flash SPI data from flash. */
 #define PEO_PM_FLASH_MISO_SRC             GPIO_PinSource4
+/* LQFP100 package lead number for external W25Q16BV flash SPI data from flash; not a GPIO bit mask. */
 #define PEO_PM_FLASH_MISO_PHYS_PIN        (90U)
-#define PEO_PM_FLASH_MOSI_PORT            GPIOB
-#define PEO_PM_FLASH_MOSI_PIN             GPIO_Pin_5
+#define PEO_PM_FLASH_MOSI_PORT            GPIOB  /* GPIO peripheral containing the external W25Q16BV flash SPI data to flash pin. */
+#define PEO_PM_FLASH_MOSI_PIN             GPIO_Pin_5  /* GPIO bit mask selecting the external W25Q16BV flash SPI data to flash pin. */
+/* Pin index for alternate-function routing of external W25Q16BV flash SPI data to flash. */
 #define PEO_PM_FLASH_MOSI_SRC             GPIO_PinSource5
+/* LQFP100 package lead number for external W25Q16BV flash SPI data to flash; not a GPIO bit mask. */
 #define PEO_PM_FLASH_MOSI_PHYS_PIN        (91U)
 
 /* ============================================================================
@@ -459,13 +496,14 @@
    PA15(77), PB3(89), PB4(90), PB5(91): W25Q16BV SPI1, see section 10.
    SWD PA13(72)/PA14(76), NRST(14): retain debug/reset.
    USB PA11/PA12 retained. SD socket unused: PC9 belongs to I2C3.
-   Button is polled: EXTI1 already belongs to VL53 left INT on PE1.
+   Use polling for the reserved button: its PA0/EXTI0 line is already assigned
+   to the VL53 front INT on PE0. No button driver is initialized here.
    ============================================================================ */
-#define PEO_PM_LED_PORT GPIOA
-#define PEO_PM_LED_PIN GPIO_Pin_1
+#define PEO_PM_LED_PORT GPIOA  /* GPIO peripheral containing the onboard active-low status LED pin. */
+#define PEO_PM_LED_PIN GPIO_Pin_1  /* GPIO bit mask selecting the onboard active-low status LED pin. */
 #define PEO_PM_LED_ON_LEVEL Bit_RESET /* Existing active-low convention retained. */
-#define PEO_PM_BUTTON_PORT GPIOA
-#define PEO_PM_BUTTON_PIN GPIO_Pin_0
+#define PEO_PM_BUTTON_PORT GPIOA  /* GPIO peripheral containing the reserved user button pin. */
+#define PEO_PM_BUTTON_PIN GPIO_Pin_0  /* GPIO bit mask selecting the reserved user button pin. */
 
 /* ============================================================================
    12. INTERRUPT HANDLER NAMES (StdPeriph, startup_stm32f40xx.s)
@@ -490,14 +528,17 @@
 
 
 /** ESP32 link USART2 DMA (RM0090 Table 43 - DMA1 request mapping) **/
+/* ESP32-S3 USART2 reception: hardware DMA stream that moves bytes without per-byte CPU work. */
 #define PEO_DMA_ESP_RX_STREAM   DMA1_Stream5
-#define PEO_DMA_ESP_RX_CH       DMA_Channel_4
+#define PEO_DMA_ESP_RX_CH       DMA_Channel_4  /* ESP32-S3 USART2 reception: DMA request-channel selector for this peripheral route. */
+/* ESP32-S3 USART2 transmission: hardware DMA stream that moves bytes without per-byte CPU work. */
 #define PEO_DMA_ESP_TX_STREAM   DMA1_Stream6
-#define PEO_DMA_ESP_TX_CH       DMA_Channel_4
+#define PEO_DMA_ESP_TX_CH       DMA_Channel_4  /* ESP32-S3 USART2 transmission: DMA request-channel selector for this peripheral route. */
 
-/** 手柄 USART3 DMA (RM0090 Table 43 - DMA1 request mapping) **/
+/* Gamepad USART3 DMA mapping: RM0090 Table 43, DMA1 requests. */
+/* ESP32-C3 USART3 reception: hardware DMA stream that moves bytes without per-byte CPU work. */
 #define PEO_DMA_GAMEPAD_RX_STREAM  DMA1_Stream1
-#define PEO_DMA_GAMEPAD_RX_CH      DMA_Channel_4
+#define PEO_DMA_GAMEPAD_RX_CH      DMA_Channel_4  /* ESP32-C3 USART3 reception: DMA request-channel selector for this peripheral route. */
 
 /* ============================================================================
    14. EXTI LINES
