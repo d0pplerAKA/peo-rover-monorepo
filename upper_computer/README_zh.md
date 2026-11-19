@@ -125,3 +125,7 @@
 ## 8. 版权
 
 Copyright (c) 2026 Danny — MIT License（见 `LICENSE`）。
+
+第三方组件保留各自许可——见 `THIRD_PARTY_NOTICES.md`：PySide6
+（LGPL v3，Python 动态导入）、numpy（BSD-3-Clause）、opencv-python
+（Apache-2.0）。

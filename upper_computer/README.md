@@ -125,3 +125,7 @@ Read-only namespaces: `mpu.quat/accel`, `vl53.front_mm/left_mm/right_mm/*_ok`, `
 ## 8. License
 
 Copyright (c) 2026 Danny — MIT License (see `LICENSE`).
+
+Third-party components retain their own licenses — see
+`THIRD_PARTY_NOTICES.md`: PySide6 (LGPL v3, imported dynamically by
+Python), numpy (BSD-3-Clause), opencv-python (Apache-2.0).

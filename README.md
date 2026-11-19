@@ -34,5 +34,7 @@ Building firmware requires ESP-IDF v6.1 (`esp32s3/`, `esp32c3/`) or Keil MDK (`f
 
 ## License
 
-All four projects: Copyright (c) 2026 Danny, MIT License.
-Each subdirectory contains its own `LICENSE` file.
+- **Own code**: Copyright (c) 2026 Danny, MIT License. Each subdirectory
+  contains its own `LICENSE` file.
+- **Third-party components**: each retains its own license — see
+  `THIRD_PARTY_NOTICES.md` in this directory and in each subdirectory.

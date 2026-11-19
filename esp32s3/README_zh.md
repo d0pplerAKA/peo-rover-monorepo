@@ -132,3 +132,10 @@ OV2640，模组自带 20MHz XCLK（`CAM_XCLK_HZ=20000000`，ESP32 不输出时�
 ## 8. 版权
 
 Copyright (c) 2026 Danny — MIT License（见 `LICENSE`）。
+
+第三方组件保留各自许可——见 `THIRD_PARTY_NOTICES.md`：ESP-IDF
+（Apache-2.0）、esp32-camera（Apache-2.0）、cJSON（MIT）、托管组件按
+各自许可。
+
+LGPL 说明：本固件静态链接 arduino-esp32（LGPL-2.1）。用本公开源码
+重新编译固件即可满足 LGPL 的重新链接要求（见上文构建说明）。

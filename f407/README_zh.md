@@ -141,3 +141,7 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
 ## 8. 版权
 
 Copyright (c) 2026 Danny — MIT License（见 `LICENSE`）。
+
+第三方组件保留各自许可——见 `THIRD_PARTY_NOTICES.md`：ST 标准外设库
+（ST Liberty License）、ARM CMSIS（Apache-2.0/BSD）、VL53L1X Ultra Lite
+Driver（ST SLA0103）、InvenSense Motion Driver（InvenSense 专有许可）。

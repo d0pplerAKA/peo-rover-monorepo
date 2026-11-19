@@ -132,3 +132,11 @@ OV2640 with its own 20 MHz XCLK crystal (`CAM_XCLK_HZ=20000000`, the ESP32 outpu
 ## 8. License
 
 Copyright (c) 2026 Danny — MIT License (see `LICENSE`).
+
+Third-party components retain their own licenses — see
+`THIRD_PARTY_NOTICES.md`: ESP-IDF (Apache-2.0), esp32-camera (Apache-2.0),
+cJSON (MIT), managed components under their own licenses.
+
+LGPL note: this firmware statically links arduino-esp32 (LGPL-2.1).
+Rebuilding the firmware from this public source satisfies the LGPL
+re-linking requirement (see the build instructions above).

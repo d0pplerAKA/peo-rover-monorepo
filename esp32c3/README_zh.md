@@ -117,3 +117,9 @@ C3（ESP32-C3 SuperMini，ESP-IDF v6.1）专职一件事：**把手柄状态从�
 ## 8. 版权
 
 Copyright (c) 2026 Danny — MIT License（见 `LICENSE`）。
+
+第三方组件保留各自许可——见 `THIRD_PARTY_NOTICES.md`：ESP-IDF
+（Apache-2.0）、esp-nimble-cpp（Apache-2.0）、asukiaaa Xbox 手柄库（MIT）。
+
+LGPL 说明：本固件静态链接 arduino-esp32（LGPL-2.1）。用本公开源码
+重新编译固件即可满足 LGPL 的重新链接要求（见上文构建说明）。

@@ -117,3 +117,11 @@ Task-split rules: lock state, fill_state, update_lock, and UART send are all own
 ## 8. License
 
 Copyright (c) 2026 Danny — MIT License (see `LICENSE`).
+
+Third-party components retain their own licenses — see
+`THIRD_PARTY_NOTICES.md`: ESP-IDF (Apache-2.0), esp-nimble-cpp
+(Apache-2.0), asukiaaa Xbox controller library (MIT).
+
+LGPL note: this firmware statically links arduino-esp32 (LGPL-2.1).
+Rebuilding the firmware from this public source satisfies the LGPL
+re-linking requirement (see the build instructions above).

@@ -141,3 +141,8 @@ All sensors are **init-only at boot and off by default**; the gamepad keys turn 
 ## 8. License
 
 Copyright (c) 2026 Danny — MIT License (see `LICENSE`).
+
+Third-party components retain their own licenses — see
+`THIRD_PARTY_NOTICES.md`: ST Standard Peripheral Library (ST Liberty
+License), ARM CMSIS (Apache-2.0/BSD), VL53L1X Ultra Lite Driver
+(ST SLA0103), InvenSense Motion Driver (InvenSense proprietary license).
