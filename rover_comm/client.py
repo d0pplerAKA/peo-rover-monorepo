@@ -110,7 +110,12 @@ def _sensor_from_json(j: dict) -> SensorData:
         speed_d100=vector(wheels, 'speed_d100', 4), odometer=vector(wheels, 'odometer', 4),
         current_mA=vector(power, 'current_mA', 4), bus_voltage_mV=vector(power, 'bus_voltage_mV', 4),
         sys_tick_ms=number(j.get('tick', 0)), last_cmd_id=number(ack.get('id', 0)),
-        last_cmd_status=number(ack.get('status', 0)), link_stale=j.get('link_stale', False) is not False)
+        last_cmd_status=number(ack.get('status', 0)),
+        control_mode=number(j.get('control_mode', 0)),
+        fw_version=number(j.get('fw_version', 0)),
+        s3_fw=number(j.get('s3_fw', 0)),
+        lock=number(j.get('lock', 0)),
+        link_stale=j.get('link_stale', False) is not False)
 
 
 
@@ -330,6 +335,18 @@ class RoverClient:
 
     def sys_reset(self):
         return self.send_json({'cmd': 'SYS_RESET'})
+
+    def led_toggle(self):
+        return self.send_json({'cmd': 'LED_TOGGLE'})
+
+    def led_on(self):
+        return self.send_json({'cmd': 'LED_ON'})
+
+    def led_off(self):
+        return self.send_json({'cmd': 'LED_OFF'})
+
+    def motor(self, motor, speed):
+        return self.send_json({'cmd': 'MOTOR', 'motor': motor, 'speed': speed})
 
     def _sender_loop(self, session):
         try:

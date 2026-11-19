@@ -23,8 +23,8 @@ app = QApplication(sys.argv)
 
 # 1) 协议层自检（含 SYS_RESET 0x08）
 assert crc16_ccitt(b"123456789") == 0x29B1
-frame = pack_esp_frame(bytes(112))
-assert unpack_esp_frame(frame) == bytes(112)
+frame = pack_esp_frame(bytes(116))
+assert unpack_esp_frame(frame) == bytes(116)
 from rover_comm.protocol import CMD_SYS_RESET, cmd_sys_reset
 assert CMD_SYS_RESET == 0x08
 assert cmd_sys_reset() == bytes([0x08])   # payload = cmd_id(1B)
@@ -140,11 +140,15 @@ txt = _shell_drain()
 assert "NotConnected" in txt, txt
 print("8) shell REPL ✓  回显/变量持久/多行续行/提示符/peo 注入")
 
-# 9) IDE 状态机（空编辑区保护）
+# 9) IDE 状态机（默认代码预填 + 空编辑区保护）
+assert "peo.cam.set_resolution" in win.ide_edit.toPlainText()   # 默认代码已预填
+win.ide_edit.setPlainText("")                                    # 清空测空脚本保护
 win._on_run_script()
 assert not win._script_running   # 空脚本不启动
 assert "为空" in win.lbl_ide_status.text() or "empty" in win.lbl_ide_status.text()
-print("9) IDE 空脚本保护 ✓")
+from app.gui import _DEFAULT_SCRIPT
+win.ide_edit.setPlainText(_DEFAULT_SCRIPT)   # 还原默认代码（后续项不受影响）
+print("9) IDE 默认代码 + 空脚本保护 ✓")
 
 # 10) 日志行数上限（自动覆盖最旧）
 for i in range(560):

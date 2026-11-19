@@ -20,13 +20,14 @@ FRAME_OVH = 5                      # SOF(2) + LEN(1) + CRC(2)
 
 # 命令 ID（esp_link 方向2，与 esp_link.h 一致）
 CMD_LED_TOGGLE    = 0x01
-CMD_SENSOR_RESET  = 0x02
 CMD_MOTOR         = 0x03
 CMD_PID           = 0x04
 CMD_MOTOR_CLOSED  = 0x05
 CMD_STOP_ALL      = 0x06
 CMD_ODOMETER_RESET = 0x07
 CMD_SYS_RESET     = 0x08
+CMD_LED_ON        = 0x09
+CMD_LED_OFF       = 0x0A
 
 # 命令结果码（回显在 SensorData.last_cmd_status）
 ST_OK          = 0x00
@@ -42,7 +43,7 @@ VIDEO_MAGIC    = 0xCAFE
 # =============================================================================
 # 结构体（与 C 布局逐位对齐，勿动格式串；PROTOCOL.md §1.2/§1.3/§3 有偏移表）
 # =============================================================================
-SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBB2x')   # 112B
+SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBBBBBxxx')   # 116B
 VIDEO_REC   = struct.Struct('>HHI')                              # 8B 大端: magic+fid+len（TCP 自带完整性校验，无应用层 CRC）
 
 # =============================================================================
@@ -120,6 +121,21 @@ def cmd_sys_reset() -> bytes:
     return encode_cmd(CMD_SYS_RESET)
 
 
+def cmd_led_toggle() -> bytes:
+    """翻转板载 LED（无参）。"""
+    return encode_cmd(CMD_LED_TOGGLE)
+
+
+def cmd_led_on() -> bytes:
+    """点亮板载 LED（无参，绝对状态）。"""
+    return encode_cmd(CMD_LED_ON)
+
+
+def cmd_led_off() -> bytes:
+    """熄灭板载 LED（无参，绝对状态）。"""
+    return encode_cmd(CMD_LED_OFF)
+
+
 # =============================================================================
 # 数据结构（解析自方向1 上报帧）
 # =============================================================================
@@ -150,5 +166,9 @@ class SensorData:
     sys_tick_ms: int = 0
     last_cmd_id: int = 0
     last_cmd_status: int = 0
-    link_stale: bool = False       # S3 JSON metadata; not part of the 112-byte UART payload
+    control_mode: int = 0          # 控制模式：0=闭环，1=开环
+    fw_version: int = 0            # F407 固件版本号（116B 字段）
+    s3_fw: int = 0                 # S3 固件版本号（JSON metadata）
+    lock: int = 0                  # 控制权锁：0=手操，1=自主
+    link_stale: bool = False       # S3 JSON metadata; not part of the 116-byte UART payload
 

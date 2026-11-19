@@ -1,4 +1,4 @@
-"""Toggle the F407 LED; LED_TOGGLE has no absolute on/off state."""
+"""Blink the F407 LED by toggling. peo.led(True) / peo.led(False) set absolute on/off."""
 import os
 import sys
 

@@ -169,6 +169,24 @@ _CAM_RESOLUTIONS = (("QQVGA (160x120)", "QQVGA"),
                     ("VGA (640x480)", "VGA"),
                     ("SVGA (800x600)", "SVGA"))
 
+# IDE 默认代码（用户定案 2026-11-17）：组员首次打开 IDE 时编辑器预填。
+# 缩进统一 4 空格（Python 惯例，与 IDE Tab 设置一致）。
+_DEFAULT_SCRIPT = (
+    "import peo\n"
+    "peo.connect()\n"
+    "peo.delay(500)\n"
+    "peo.cam.set_resolution(\"SVGA\")\n"
+    "peo.cam.on()\n"
+    "peo.sys_reset()\n"
+    "\n"
+    "\n"
+    "while True:\n"
+    "    peo.led(True)\n"
+    "    peo.delay(1000)\n"
+    "    peo.led(False)\n"
+    "    peo.delay(1000)\n"
+)
+
 
 class _PeoConsole(code.InteractiveConsole):
     """真 REPL：标准库 InteractiveConsole，输出转发到 GUI 控制台。
@@ -272,6 +290,7 @@ class MainWindow(QMainWindow):
         self._script_thread = None
         self._shell_thread = None
         self._script_running = False
+        self._current_file = None      # 当前脚本关联路径（None=默认代码未保存）
         self._bad_seq = -1             # Tab2 已知坏帧 seq（只解码一次）
         self._shown_seq = -1           # Tab2 已显示帧 seq（积压重复通知去重）
         self._last_ide_show = None     # Tab2 上次显示时刻（节流用）
@@ -328,6 +347,10 @@ class MainWindow(QMainWindow):
         self.lbl_app.setStyleSheet("color: #9aa0ac; font-size: 12px;")
         topbar.addWidget(self.lbl_app)
         topbar.addStretch(1)
+        self.lbl_file_path = QLabel()          # 当前脚本文件位置（右上区域）
+        self.lbl_file_path.setStyleSheet("color: #9aa0ac; font-size: 11px;")
+        topbar.addWidget(self.lbl_file_path)
+        topbar.addSpacing(12)
         self.lang_btn = QPushButton()
         self.lang_btn.setMinimumWidth(64)      # 自适应内容，避免"中文"被截半
         self.lang_btn.setMaximumWidth(80)
@@ -342,10 +365,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._build_tab1(), "")   # 文本 _retranslate 填
         self.tabs.addTab(self._build_tab2(), "")
 
-        # 状态栏：性能/帧率（右留边距防贴边截断）
+        # 状态栏：性能/帧率 + 锁状态指示（锁在最右）
         self.lbl_perf = QLabel()
-        self.lbl_perf.setContentsMargins(0, 0, 12, 0)
+        self.lbl_perf.setContentsMargins(0, 0, 8, 0)
         self.statusBar().addPermanentWidget(self.lbl_perf)
+
+        self._lock_val = None
+        self.lbl_lock = QLabel()
+        self.lbl_lock.setContentsMargins(0, 0, 12, 0)
+        self.statusBar().addPermanentWidget(self.lbl_lock)
+        self._set_lock_indicator(None)   # 初始：未知
 
     # ---------------- Tab1：手动监控 ----------------
 
@@ -468,10 +497,14 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # 工具行：打开 / 运行 / 停止 + 状态
+        # 工具行：打开 / 保存 / 另存为 / 运行 / 停止 + 状态
         toolbar = QHBoxLayout()
         self.btn_open = QPushButton()
         self.btn_open.clicked.connect(self._on_open_script)
+        self.btn_save = QPushButton()
+        self.btn_save.clicked.connect(self._on_save_script)
+        self.btn_save_as = QPushButton()
+        self.btn_save_as.clicked.connect(self._on_save_as_script)
         self.btn_run = QPushButton()
         self.btn_run.clicked.connect(self._on_run_script)
         self.btn_stop_script = QPushButton()
@@ -479,15 +512,18 @@ class MainWindow(QMainWindow):
         self.btn_stop_script.setEnabled(False)
         self.lbl_ide_status = QLabel()
         toolbar.addWidget(self.btn_open)
+        toolbar.addWidget(self.btn_save)
+        toolbar.addWidget(self.btn_save_as)
         toolbar.addWidget(self.btn_run)
         toolbar.addWidget(self.btn_stop_script)
         toolbar.addWidget(self.lbl_ide_status)
         toolbar.addStretch(1)
         lay.addLayout(toolbar)
 
-        # 上：脚本编辑区（带行号 + 当前行高亮）
+        # 上：脚本编辑区（带行号 + 当前行高亮），预填默认代码
         self.ide_edit = CodeEditor()
         self.ide_edit.setFont(QFont("Consolas", 10))
+        self.ide_edit.setPlainText(_DEFAULT_SCRIPT)
         lay.addWidget(self.ide_edit, 3)
 
         # 下：左视频窗 / 右 shell + 控制台（含全局日志）
@@ -560,6 +596,8 @@ class MainWindow(QMainWindow):
 
         # Tab2 文本
         self.btn_open.setText(tr("btn_open"))
+        self.btn_save.setText(tr("btn_save"))
+        self.btn_save_as.setText(tr("btn_save_as"))
         self.btn_run.setText(tr("btn_run"))
         self.btn_stop_script.setText(tr("btn_stop_script"))
         self.lbl_script_console.setText(tr("grp_console"))
@@ -568,6 +606,9 @@ class MainWindow(QMainWindow):
         self.btn_console_clear.setText(tr("console_clear"))
         self.video.update()    # 视频占位文本按新语言重绘
         self.ide_video.update()
+        self._update_file_label()   # 右上文件位置（默认代码状态随语言刷新）
+        if hasattr(self, "lbl_lock"):   # __init__ 里 _retranslate 先于 lbl_lock 创建
+            self._set_lock_indicator(self._lock_val)
 
     # ---------------- Tab 切换 ----------------
 
@@ -623,9 +664,47 @@ class MainWindow(QMainWindow):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.ide_edit.setPlainText(f.read())
+            self._current_file = path
             self._set_ide_status(os.path.basename(path))
+            self._update_file_label()
         except OSError as e:
             self._log("✗ " + tr("log_open_fail") + str(e))
+
+    def _on_save_script(self):
+        """保存：已关联路径 → 直接写回；未保存的默认代码 → 走另存为。"""
+        if not self._current_file:
+            self._on_save_as_script()
+            return
+        try:
+            with open(self._current_file, "w", encoding="utf-8") as f:
+                f.write(self.ide_edit.toPlainText())
+            self._log("✓ " + tr("log_save_ok") + self._current_file)
+            self._set_ide_status(os.path.basename(self._current_file))
+            self._update_file_label()
+        except OSError as e:
+            self._log("✗ " + tr("log_save_fail") + str(e))
+
+    def _on_save_as_script(self):
+        """另存为：选路径保存并关联。"""
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("dlg_save_as"), "script.py",
+            "Python (*.py);;All Files (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.ide_edit.toPlainText())
+            self._current_file = path
+            self._log("✓ " + tr("log_save_ok") + path)
+            self._set_ide_status(os.path.basename(path))
+            self._update_file_label()
+        except OSError as e:
+            self._log("✗ " + tr("log_save_fail") + str(e))
+
+    def _update_file_label(self):
+        """右上区域：显示当前脚本文件位置；未关联时提示默认代码状态。"""
+        self.lbl_file_path.setText(
+            self._current_file if self._current_file else tr("file_default"))
 
     def _on_run_script(self):
         if self._script_running:
@@ -1031,6 +1110,23 @@ class MainWindow(QMainWindow):
             self.lbl_cur[i].setText("—")
         self.lbl_imu.setText("—")
         self.lbl_ack.setText("—")
+        self._set_lock_indicator(None)
+
+    def _set_lock_indicator(self, lock_val):
+        """右下角锁状态指示：0=手操(绿)、1=自主(橙)、None=未知(灰)。"""
+        self._lock_val = lock_val
+        qss = ("QLabel {{ background-color: {}; color: {}; "
+               "padding: 2px 8px; border-radius: 9px; font-weight: bold; }}")
+        if lock_val == 0:
+            self.lbl_lock.setText("🔒 " + tr("lock_manual"))
+            self.lbl_lock.setStyleSheet(qss.format("#2e7d32", "#ffffff"))
+        elif lock_val == 1:
+            self.lbl_lock.setText("🔓 " + tr("lock_auto"))
+            self.lbl_lock.setStyleSheet(qss.format("#e65100", "#ffffff"))
+        else:
+            self.lbl_lock.setText("—")
+            self.lbl_lock.setStyleSheet(qss.format("#3a3f4a", "#9aa0ac"))
+        self.lbl_lock.setToolTip(tr("lock_tooltip"))
 
     @Slot(object)
     def _on_sensor(self, s: SensorData):
@@ -1048,6 +1144,7 @@ class MainWindow(QMainWindow):
         self.lbl_ack.setText(
             f"id={s.last_cmd_id} "
             + (tr("st_ok") if s.last_cmd_status == 0 else tr("st_err") + str(s.last_cmd_status)))
+        self._set_lock_indicator(s.lock)
 
     @Slot(object)
     def _on_ack(self, ack: dict):

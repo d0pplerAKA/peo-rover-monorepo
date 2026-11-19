@@ -73,16 +73,13 @@ def _reset_drive():
     sent.clear()
 
 _reset_drive()
-peo.drive(2, 30)                    # 单轮：其余三轮自动 0
+peo.drive(2, 30)                    # 只改 M2（数据更新，其余保持）
 assert sent == [
-    {"cmd": "MOTOR_CLOSED", "motor": 0, "speed_d100": 0},
-    {"cmd": "MOTOR_CLOSED", "motor": 1, "speed_d100": 0},
     {"cmd": "MOTOR_CLOSED", "motor": 2, "speed_d100": 3000},
-    {"cmd": "MOTOR_CLOSED", "motor": 3, "speed_d100": 0},
 ], sent
 n_before = len(sent)
 peo.drive(2, 30)                    # 重复目标也发送：STOP/拒绝后不能静默跳过
-assert len(sent) == n_before + 4, "重复目标必须重新提交"
+assert len(sent) == n_before + 1, "重复目标必须重新提交"
 
 _reset_drive()
 peo.drive(0, 100, 1, 100, 2, 100, 3, 100)   # 四轮同速
@@ -93,7 +90,7 @@ peo.drive(0, 100, 1, 100, 2, -100, 3, -100)  # 原地转向（负速度）
 assert [o["speed_d100"] for o in sent] == [10000, 10000, -10000, -10000], sent
 
 _reset_drive()
-peo.drive(0, 0, 1, 100, 2, 0, 3, 0)          # 显式单轮（未列出的轮 0）
+peo.drive(0, 0, 1, 100, 2, 0, 3, 0)          # 显式四轮（含 0）
 assert [o["speed_d100"] for o in sent] == [0, 10000, 0, 0], sent
 
 # 非法：奇数参数 / 电机越界 / 重复指定
@@ -108,7 +105,7 @@ for bad_args, exc in [
         raise AssertionError(f"drive{bad_args} 应抛 {exc.__name__}")
     except exc:
         pass
-print("4) drive 变参语义 ✓  单轮=其余0 / 四轮 / 原地转向 / 非法参数校验")
+print("4) drive 变参语义 ✓  单轮=数据更新 / 四轮 / 原地转向 / 非法参数校验")
 
 # 5) delay 停止标志
 import threading

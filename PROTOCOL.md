@@ -20,16 +20,23 @@
                                                           esp_link 帧协议（见 §1）
                                                                   │
                                                               [F407 主控]（传感器 hub / 电机 / 命令队列）
+                                                                  ▲
+                                                          USART3 @ 115200（PD8=TX / PD9=RX）
+                                                          c3_gamepad 帧（见 §1.4）
+                                                                  │
+ [Xbox 手柄] ──── BLE ────> [ESP32-C3]（手柄桥，发原始摇杆状态，100Hz）
 ```
 
-> **2026-11-15 系统收敛**（用户拍板）：① Xbox 手柄 BLE 桥（ESP32-C3 + c3_link）废弃；
-> ② ESP32 宏引擎（macro_engine）废弃；③ GUI 算法插件（algorithms/）废弃。
+> **2026-11-18 手操链路（方案 A）**：Xbox 手柄经 ESP32-C3 BLE 桥 → USART3 有线直连 F407，
+> 发原始摇杆状态帧（100Hz），F407 端解析 + 锁仲裁 + 摇杆映射（§1.4）。物理隔离于 WiFi/自主链路。
+> **2026-11-15 系统收敛**：ESP32 宏引擎（macro_engine）、GUI 算法插件（algorithms/）废弃；
 > 组员自动化 = §2.4 组员编程模型（上位机原生 Python 脚本，ESP32 负责桥接与停车屏障）。
 
 | 链路 | 物理层 | 协议 | 方向 |
 |---|---|---|---|
 | ESP32-S3 ↔ F407 | USART2 921600 | esp_link 帧（§1）| 双向 |
-| ESP32-S3 ↔ 上位机 | WiFi（ESP32 开 AP）| TCP 8888 JSON 命令（§2）+ TCP 8890 视频（§3）| 双向 / 单向 |
+| ESP32-S3 ↔ 上位机 | WiFi（STA，连笔记本热点）| TCP 8888 JSON 命令（§2）+ TCP 8890 视频（§3）| 双向 / 单向 |
+| ESP32-C3 → F407 | USART3 115200 | c3_gamepad 帧（§1.4）| 单向（手柄状态，100Hz）|
 
 ### 0.1 组员资源清单（上位机可获得的全部资源）
 
@@ -64,10 +71,10 @@ Python 侧对应：`SensorData` 字段（§4）、`rover_comm.client.RoverClient
 - **LEN**：1 字节，payload 长度
 - **CRC16-CCITT-FALSE**：多项式 `0x1021`，初始 `0xFFFF`，覆盖 **SOF ~ PAYLOAD 全部字节**（不含 CRC 本身），帧尾**低字节在前**。
 
-### 1.2 方向1（F407 → ESP32-S3，~50Hz 持续上报）：PAYLOAD = SensorData_t（112B）
+### 1.2 方向1（F407 → ESP32-S3，~50Hz 持续上报）：PAYLOAD = SensorData_t（116B）
 
 F407 端序列化 = **整个 struct 内存拷贝（原生 C 布局，含 padding）**。
-帧总长 = 5 + 112 = 117 字节。
+帧总长 = 5 + 116 = 121 字节。
 
 **SensorData_t 字节布局（Cortex-M4 ARM EABI，4 字节对齐，逐字节偏移表）：**
 
@@ -98,9 +105,12 @@ F407 端序列化 = **整个 struct 内存拷贝（原生 C 布局，含 padding
 | 104 | 4 | sys_tick_ms | uint32 LE | 整帧快照时间戳 |
 | 108 | 1 | last_cmd_id | uint8 | 最近命令 ID（回显）|
 | 109 | 1 | last_cmd_status | uint8 | 0=OK，非0=错误码 |
-| 110 | 2 | **padding** | — | 尾部对齐（跳过）|
+| 110 | 1 | control_mode | uint8 | 控制模式：0=闭环，1=开环 |
+| 111 | 1 | fw_version | uint8 | F407 固件版本号（递增整数，28=v2.28）|
+| 112 | 1 | lock | uint8 | 控制权锁：0=手操，1=自主 |
+| 113 | 3 | **padding** | — | 尾部对齐（116B）|
 
-**总计 112 字节。**
+**总计 116 字节。**
 
 ### 1.3 方向2（ESP32-S3 → F407）：PAYLOAD = 命令帧（cmd_id + param，每帧一条）
 
@@ -114,13 +124,15 @@ F407 端序列化 = **整个 struct 内存拷贝（原生 C 布局，含 padding
 | cmd_id | 名称 | param 布局 | 说明 |
 |---:|---|---|---|
 | 0x01 | LED_TOGGLE | 无 | |
-| 0x02 | SENSOR_RESET | 无 | |
+| 0x02 | ~~SENSOR_RESET~~ | — | 已废弃（2026-11-18 移除，传感器复位由 SYS_RESET 0x08 兜底）|
 | 0x03 | MOTOR | motor(1B) + speed(2B, int16 LE) | 开环直驱 |
 | 0x04 | PID | kp(4B, float32 LE) + ki(4B, float32 LE) | 共享增益 |
 | 0x05 | MOTOR_CLOSED | motor(1B) + speed_d100(4B, int32 LE) | 闭环目标速度 |
 | 0x06 | STOP_ALL | 无 | 全停急刹（断连保护/安全刹车）|
 | 0x07 | ODOMETER_RESET | 无 | 清零四轮里程 |
 | 0x08 | SYS_RESET | 无 | F407 软复位（S3 不重启）|
+| 0x09 | LED_ON | 无 | 板载 LED 点亮（绝对状态）|
+| 0x0A | LED_OFF | 无 | 板载 LED 熄灭（绝对状态）|
 
 **命令结果码（F407 回显在 SensorData_t.last_cmd_status）：**
 
@@ -133,6 +145,61 @@ F407 端序列化 = **整个 struct 内存拷贝（原生 C 布局，含 padding
 
 ---
 
+### 1.4 手柄链路（ESP32-C3 → F407，100Hz 状态流）：PAYLOAD = type + gamepad body
+
+Xbox 手柄经 ESP32-C3 BLE 桥，C3 发原始手柄状态帧（**方案 A**：摇杆原始值保留到 F407，
+映射/死区/斜坡集中在 F407，手感可调且不必重烧 C3）。物理隔离于 WiFi/自主链路。
+
+```
+┌────────────┬─────┬──────────────────────────────┬─────────┐
+│ SOF        │ LEN │ PAYLOAD（type + body）        │ CRC16   │
+│ 0xAA 0x55  │ 1B  │ 27B（type 1B + body 26B）     │ 2B（低字节在前）│
+└────────────┴─────┴──────────────────────────────┴─────────┘
+```
+
+- **LEN** = 27（type 1 + body 26）；**type** = `0x10`（GAMEPAD_STATE）
+- **body** = `c3_gamepad_payload_t`（26B，小端，逐字节偏移表）：
+
+| 偏移 | 大小 | 字段 | 类型 | 说明 |
+|---:|---:|---|---|---|
+| 0 | 4 | seq | uint32 LE | 通知序列号 |
+| 4 | 4 | disc_gen | uint32 LE | 断连代数 |
+| 8 | 1 | connected | uint8 | 手柄是否连接 |
+| 9 | 1 | battery | uint8 | 电量 |
+| 10 | 1 | input_fresh | uint8 | 5s 内有 HID 通知 |
+| 11 | 2 | joy_lx | uint16 LE | 左摇杆水平 |
+| 13 | 2 | joy_ly | uint16 LE | 左摇杆垂直（前进/后退油门）|
+| 15 | 2 | joy_rx | uint16 LE | 右摇杆水平（单边差速转向）|
+| 17 | 2 | joy_ry | uint16 LE | 右摇杆垂直 |
+| 19 | 2 | trigger_lt | uint16 LE | 左扳机 |
+| 21 | 2 | trigger_rt | uint16 LE | 右扳机 |
+| 23 | 2 | buttons | uint16 LE | 按键位图（下表）|
+| 25 | 1 | lock | uint8 | 控制权锁：0=手操，1=自主 |
+
+**总计 26 字节，帧总长 32 字节。**
+
+**摇杆值**：uint16 0–65535，中值 32768，死区 ±500，满偏映射到速度 ±4424（0.01 cm/s）。
+**锁状态**：C3 长按 SELECT 键（1.5s）翻转；lock=0 手操（手柄控制），lock=1 自主（上位机控制）。
+**锁切换瞬间** F407 `CONTROL_StopAll()` 停车；急停键（Xbox）双源越过锁。
+
+**按键位图（buttons）：**
+
+| bit | 键 | | bit | 键 |
+|---|---|---|---|---|
+| 0 | A | | 8 | Share |
+| 1 | B | | 9 | LS |
+| 2 | X | | 10 | RS |
+| 3 | Y | | 11 | DPAD Up |
+| 4 | LB | | 12 | DPAD Down |
+| 5 | RB | | 13 | DPAD Left |
+| 6 | Start | | 14 | DPAD Right |
+| 7 | Select（锁键）| | 15 | Xbox（急停键）|
+
+**失联保护**：锁关闭（手操）时，C3 超 500ms 无帧 / 手柄断连 / 输入过期 → F407 停车；
+锁开启（自主）时手柄断连不影响自主。
+
+---
+
 ## 2. TCP JSON（端口 8888）
 
 每行一个 JSON 对象，以换行结束。S3 仅接受一个客户端；视频、遥测和命令共享该控制会话。最大命令行 16384 B（不含换行），S3 完整行队列总字节预算 65536 B。Python 接收端也对单行设置 16384 B 上限。
@@ -141,7 +208,7 @@ F407 端序列化 = **整个 struct 内存拷贝（原生 C 布局，含 padding
 
 | cmd | 参数 |
 | --- | --- |
-| `LED_TOGGLE` / `SENSOR_RESET` / `STOP_ALL` / `ODOMETER_RESET` / `SYS_RESET` | 无参数；SYS_RESET 只请求 F407 复位 |
+| `LED_TOGGLE` / `LED_ON` / `LED_OFF` / `STOP_ALL` / `ODOMETER_RESET` / `SYS_RESET` | 无参数；LED_ON/LED_OFF 设绝对状态，LED_TOGGLE 翻转；SYS_RESET 只请求 F407 复位 |
 | `MOTOR` | `motor` 整数 0–3，`speed` 为 int16 范围整数 |
 | `MOTOR_CLOSED` | `motor` 整数 0–3，`speed_d100` 为 int32 范围整数（0.01 cm/s） |
 | `PID` | 有限 float32 可表示的 `kp`、`ki` |
@@ -167,6 +234,8 @@ S3 每次锁存 STOP 递增 uint32 `gen` 并在遥测发送。带 gen 时须为�
 STOP/单向安全心跳不受 gen 限制。SDK 四轮目标作为一个本机发送批次（最多四条 JSON）排队，F407 仍逐条执行。STOP 前已提交的一批可能先发出，不能保证物理瞬时停车。普通动作返回只表示本机入队成功；`peo.stop()` 单独等待新收到的成功 STOP ACK，300 ms 超时后重发一次，仍未确认抛异常。协议没有请求 ID，无法提供严格逐请求 ACK 关联。
 
 S3 按 50 ms 固定节拍读取快照并发 JSON，名义 **20 Hz**。UART 传感器源更新频率与 TCP 发送频率不同。
+**锁驱动遥测降速（2026-11-18）**：锁关闭（手操，lock=0）时遥测降到 **2Hz**（500ms 一帧），
+锁开启（自主，lock=1）时恢复 20Hz；视频流全程不受影响。
 
 ```json
 {"type":"sensor","tick":12345,"gen":3,
@@ -175,10 +244,14 @@ S3 按 50 ms 固定节拍读取快照并发 JSON，名义 **20 Hz**。UART 传�
  "wheels":{"speed_d100":[0,0,0,0],"odometer":[0,0,0,0]},
  "power":{"current_mA":[100,110,-95,105],"bus_voltage_mV":[11800,11800,11800,11800]},
  "cmd_ack":{"id":3,"status":0},
+ "control_mode":0,
+ "lock":0,
+ "fw_version":28,
+ "s3_fw":28,
  "sys":{"cpu0":12,"cpu1":34,"ram_free":123456,"ram_total":200000}}
 ```
 
-无 UART 快照或快照接收年龄超过 500 ms 时，S3 添加 `link_stale:true`，仍可发送自身资源数据。上位机将此标记保存在 `SensorData.link_stale`（不改变 112 B UART 布局），SDK fresh 还要求已连接且最近 250 ms 收到遥测。缺失测距字段按无效处理。历史 sensor `cmd_ack` 不能确认当前 STOP。
+无 UART 快照或快照接收年龄超过 500 ms 时，S3 添加 `link_stale:true`，仍可发送自身资源数据。上位机将此标记保存在 `SensorData.link_stale`（不改变 116 B UART 布局），SDK fresh 还要求已连接且最近 250 ms 收到遥测。缺失测距字段按无效处理。历史 sensor `cmd_ack` 不能确认当前 STOP。
 
 遥测为**最新值邮箱**语义（2026-11-18 起）：S3 只保留最近一帧待发遥测，新帧覆盖旧帧；链路拥塞时遥测可被丢弃（ACK 不受影响），拥塞不再导致断连。上位机依赖 250 ms fresh 超时与 `link_stale` 判断链路，不假设遥测逐帧必达。数字精度：`quat` 4 位小数、`accel_g` 3 位小数、非有限浮点输出 `null`。
 
@@ -213,7 +286,7 @@ C3 手柄桥、S3 本地宏引擎和上位机宏面板均已移除。`{"type":"m
 
 每 500 ms 一次，S3 仅更新此客户端的安全看门狗活动时间，不回包、不测 RTT、不恢复运动。此消息不带 `cmd`，不受 gen 校验限制。
 
-S3 在连接成功提交 MOTOR/MOTOR_CLOSED/PID 后监督活动；这些成功命令或单向安全心跳续期，超过 2000 ms 则锁存 STOP 并断开。其他本地命令不续期。后台心跳不能证明算法本身在推进，循环需自行检查传感器和图像新鲜度。断线/软件崩溃时硬件侧仍需独立看门狗。
+S3 在连接成功提交 MOTOR/MOTOR_CLOSED/PID 后监督活动；这些成功命令或单向安全心跳续期，超过 2000 ms 则锁存 STOP 并断开。其他本地命令不续期。后台心跳不能证明算法本身在推进，循环需自行检查传感器和图像新鲜度。断线/软件崩溃时硬件侧仍需独立看门狗。**F407 失联自停（deadman，2026-11-18 已实现）**：S3 每 200ms 发一个 LEN=0 空帧心跳给 F407，F407 超过 500ms 无有效帧（CRC 通过）自动 `CONTROL_StopAll()`——即使 S3 掉电/死机，F407 也能自行停车。
 
 SDK `drive` 不再按未确认的旧目标去重，也不声称实现固定 5 ms 节流。调用方应显式 `delay` 控制频率。GUI Stop 立即请求优先 STOP，随后由 SDK 检查协作取消；不能强杀不合作的 Python 线程。
 
@@ -230,7 +303,7 @@ SDK `drive` 不再按未确认的旧目标去重，也不声称实现固定 5 ms
 ## 4. Python 二进制参考
 
 ```python
-SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBB2x')  # 112 B
+SENSOR_DATA = struct.Struct('<HHHBBBxxxIfffffffI8iI4h4HIIBBBBBxxx')  # 116 B
 VIDEO_REC = struct.Struct('>HHI')                              # 8 B：magic+fid+len
 ```
 

@@ -169,10 +169,20 @@ def _request_stop() -> None:
 # ---------------- 动作 ----------------
 
 def led(on: bool | None = None) -> None:
-    """Toggle the onboard LED. Legacy on argument cannot set an absolute state."""
+    """控制板载 LED。
+
+    on=True  -> LED_ON（点亮，绝对状态）
+    on=False -> LED_OFF（熄灭，绝对状态）
+    on=None  -> LED_TOGGLE（翻转，默认）
+    """
     if on is not None and type(on) is not bool:
-        raise ValueError("legacy LED argument must be bool")
-    _bridge.send({"cmd": "LED_TOGGLE"})
+        raise ValueError("led() argument must be bool or None")
+    if on is True:
+        _bridge.send({"cmd": "LED_ON"})
+    elif on is False:
+        _bridge.send({"cmd": "LED_OFF"})
+    else:
+        _bridge.send({"cmd": "LED_TOGGLE"})
 
 
 def drive_all(speed_cm_s: float) -> None:
@@ -182,22 +192,26 @@ def drive_all(speed_cm_s: float) -> None:
 
 def drive(*pairs) -> None:
     """变参马达控制：peo.drive(motor, speed_cm_s, ...) 成对传入，
-    **未列出的轮自动写 0**。
+    **只发指定的电机（数据更新）**，未指定的电机在 F407 端保持当前转速。
 
     例：
         peo.drive(0, 100, 1, 100, 2, 100, 3, 100)   四轮同速前进
         peo.drive(0, 100, 1, 100, 2, -100, 3, -100) 原地转向
-        peo.drive(0, 0, 1, 100, 2, 0, 3, 0)         单轮转（其余 0）
-        peo.drive(1, 100)                           单轮转（其余自动 0）
+        peo.drive(1, 30)                            只改 M1（其余保持）
 
     motor ∈ 0~3（重复指定同一轮报错）。速度单位 cm/s，可为负（反转）。
+    全停用 peo.stop()（发 STOP_ALL）。
     """
     if len(pairs) % 2 != 0:
         raise ValueError(tr(
             "drive() arguments must come in (motor, speed) pairs",
             "drive() 参数必须成对：peo.drive(motor, speed, ...)"))
-    speeds = [0.0] * 4
+    if not pairs:
+        raise ValueError(tr(
+            "drive() requires at least one (motor, speed) pair; use stop() to halt",
+            "drive() 至少需要一对 (motor, speed)；全停请用 stop()"))
     seen = set()
+    cmds = []
     for i in range(0, len(pairs), 2):
         motor, spd = pairs[i], pairs[i + 1]
         if not isinstance(motor, int) or isinstance(motor, bool) \
@@ -210,8 +224,64 @@ def drive(*pairs) -> None:
                 f"motor {motor} specified twice in one call",
                 f"电机 {motor} 在一次调用中重复指定"))
         seen.add(motor)
-        speeds[motor] = spd
-    _drive_four(speeds)
+        if isinstance(spd, bool):
+            raise ValueError(tr(
+                "speed must be a finite number",
+                "速度必须是有限数值"))
+        value = float(spd)
+        if not _math.isfinite(value) or not -2147483648 <= value * 100 <= 2147483647:
+            raise ValueError(tr(
+                "speed outside finite int32 d100 range",
+                "速度超出 int32 d100 范围"))
+        cmds.append({"cmd": "MOTOR_CLOSED", "motor": motor,
+                     "speed_d100": int(round(value * 100))})
+    _bridge.send_batch(cmds)
+
+
+def motor(*pairs) -> None:
+    """开环 PWM 直驱（千分比），绕过速度闭环——闭环 PID 参数异常时的保底手段。
+    **只发指定的电机（数据更新）**，未指定的电机在 F407 端保持当前 PWM。
+
+    speed 单位 = 千分比（per-mille）：-1000 全速反转 ~ +1000 全速正转，
+    0 = coast（滑行）。正=前进，负=反转。**不是 cm/s**（闭环 drive() 才是 cm/s）。
+
+    例：
+        peo.motor(0, 500, 1, 500, 2, 500, 3, 500)     四轮半速前进（开环）
+        peo.motor(0, -800, 1, -800, 2, -800, 3, -800) 四轮后退
+        peo.motor(0, 500, 1, 500, 2, -500, 3, -500)   原地转向（开环）
+        peo.motor(1, 800)                             只改 M1（其余保持）
+
+    motor ∈ 0~3（重复指定同一轮报错）。speed 须为 -1000~1000 的整数（非 bool）。
+    发 MOTOR 会让 F407 切到开环模式；发 MOTOR_CLOSED（drive/drive_all）切回闭环。
+    全停用 peo.stop()。
+    """
+    if len(pairs) % 2 != 0:
+        raise ValueError(tr(
+            "motor() arguments must come in (motor, speed) pairs",
+            "motor() 参数必须成对：peo.motor(motor, speed, ...)"))
+    if not pairs:
+        raise ValueError(tr(
+            "motor() requires at least one (motor, speed) pair; use stop() to halt",
+            "motor() 至少需要一对 (motor, speed)；全停请用 stop()"))
+    seen = set()
+    cmds = []
+    for i in range(0, len(pairs), 2):
+        m, spd = pairs[i], pairs[i + 1]
+        if not isinstance(m, int) or isinstance(m, bool) or not 0 <= m <= 3:
+            raise ValueError(tr(
+                f"invalid motor index {m!r} (must be int 0-3)",
+                f"电机编号 {m!r} 非法（须为 0~3 的整数）"))
+        if m in seen:
+            raise ValueError(tr(
+                f"motor {m} specified twice in one call",
+                f"电机 {m} 在一次调用中重复指定"))
+        if isinstance(spd, bool) or not isinstance(spd, int) or not -1000 <= spd <= 1000:
+            raise ValueError(tr(
+                f"invalid motor speed {spd!r} (must be int -1000..1000 per-mille)",
+                f"电机速度 {spd!r} 非法（须为 -1000~1000 的整数千分比）"))
+        seen.add(m)
+        cmds.append({"cmd": "MOTOR", "motor": m, "speed": spd})
+    _bridge.send_batch(cmds)
 
 
 def _drive_four(speeds: list) -> None:
@@ -310,14 +380,27 @@ def sys_reset() -> None:
 def __getattr__(name):
     if name == "fresh":
         return _bridge.fresh
+    if name == "control_mode":
+        s = _bridge._snapshot()
+        return None if s is None else s.control_mode
+    if name == "fw_version":
+        s = _bridge._snapshot()
+        return None if s is None else s.fw_version
+    if name == "s3_fw":
+        s = _bridge._snapshot()
+        return None if s is None else s.s3_fw
+    if name == "lock":
+        s = _bridge._snapshot()
+        return None if s is None else s.lock
     raise AttributeError(name)
 
 
 __all__ = [
     "connect", "disconnect", "delay",
     "mpu", "vl53", "wheels", "sys", "cam",
-    "led", "drive_all", "drive", "set_pid", "stop",
+    "led", "drive_all", "drive", "motor", "set_pid", "stop",
     "reset_odometer", "sys_reset", "ws2812",
+    "control_mode", "fw_version", "s3_fw", "lock",
     "ScriptStopped", "NotConnected", "LinkLost", "CamOff",
     "_request_stop", "_clear_stop_flag", "_bridge",
 ]

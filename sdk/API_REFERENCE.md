@@ -56,6 +56,10 @@ variable captures its value at that moment.
 | `wheels.bus_voltage_mV` | four bus voltages, mV |
 | `sys.cpu0 / cpu1` | S3 CPU utilization percent |
 | `sys.ram` | internal RAM used percent |
+| `control_mode` | 0 = closed loop (speed PI), 1 = open loop (direct PWM) |
+| `fw_version` | F407 firmware version number |
+| `s3_fw` | S3 firmware version number |
+| `lock` | 0 = manual (gamepad), 1 = auto (upper computer) |
 
 Sensor properties return `None` when disconnected or before the first snapshot.
 A stale connected snapshot is retained for inspection; check `fresh` before
@@ -72,24 +76,49 @@ rejected before sending. STOP has the separate confirmation behavior below.
 ### `drive(*pairs) -> None`
 
 Pass `(motor, speed_cm_s)` pairs. Motor must be an integer 0–3 (not bool), cannot
-repeat, and arguments must be paired. Unlisted wheels are sent zero.
+repeat, and arguments must be paired. **Only the specified wheels are sent (data
+update); unspecified wheels keep their current F407 target.**
 
 ```python
-peo.drive(1, 30)                    # wheels 0, 2, 3 = 0
+peo.drive(1, 30)                    # only M1 updated; others keep current
 peo.drive(0, 30, 1, 30, 2, -30, 3, -30)
-peo.drive()                        # all targets zero; not STOP_ALL
+peo.drive()                        # ValueError: at least one pair required
 ```
 
-Speeds must be finite and fit signed int32 after multiplying by 100. Conversion
-uses Python round-to-nearest then integer conversion. All four are validated
-before one local queue entry is published. On local queue rejection the bridge
-requests STOP and raises `LinkLost`. The four F407 operations are not atomic.
+Speeds must be finite (bool rejected) and fit signed int32 after multiplying by
+100. Conversion uses Python round-to-nearest then integer conversion. All
+specified wheels are validated before one local queue entry is published. On
+local queue rejection the bridge requests STOP and raises `LinkLost`. The four
+F407 operations are not atomic (each is a separate MOTOR_CLOSED). Halt all wheels
+with `peo.stop()`.
 Repeated targets are resent, so a previous STOP, reset or rejected command cannot
 leave a deduplication cache suppressing an intentional new drive request.
 
 ### `drive_all(speed_cm_s) -> None`
 
 Equivalent to specifying the same closed-loop target for all four wheels.
+
+### `motor(*pairs) -> None`
+
+Open-loop PWM drive that bypasses the speed PI loop — the fallback for when the
+closed-loop PID parameters are not working. Pass `(motor, speed)` pairs; motor
+must be an integer 0–3 (not bool), cannot repeat, and arguments must be paired.
+**Only the specified wheels are sent (data update); unspecified wheels keep their
+current F407 PWM.**
+
+`speed` is **per-mille** (-1000 = full reverse, +1000 = full forward, 0 = coast),
+**not cm/s** (that is `drive()`). Positive = forward, negative = reverse.
+
+```python
+peo.motor(0, 500, 1, 500, 2, 500, 3, 500)      # four wheels half speed, open loop
+peo.motor(0, -800, 1, -800, 2, -800, 3, -800)  # reverse
+peo.motor(1, 800)                              # only M1 updated; others keep
+```
+
+Sending `MOTOR` switches the F407 into open-loop mode; `MOTOR_CLOSED`
+(`drive`/`drive_all`) switches back to closed loop, and `STOP_ALL` returns to
+closed loop. Encoder speed feedback keeps reporting in open-loop mode. Invalid
+speed (non-int, bool, or outside -1000..1000) raises `ValueError`.
 
 ### `set_pid(*args, kp=None, ki=None) -> None`
 
@@ -115,9 +144,8 @@ already committed batch may precede STOP. Physical cutoff/watchdogs are separate
 
 ### `led(on=None) -> None`
 
-Send `LED_TOGGLE`. The firmware exposes toggle only, not absolute on/off state.
-Prefer `peo.led()`; legacy bool `on` is accepted for compatibility but does not
-set a desired state. Non-bool/non-None arguments are rejected.
+`on=True` sends `LED_ON` (absolute on), `on=False` sends `LED_OFF` (absolute off),
+`on=None` (default) sends `LED_TOGGLE`. Non-bool/non-None arguments are rejected.
 
 ### `ws2812(r, g, b, brightness=100) -> None`
 
