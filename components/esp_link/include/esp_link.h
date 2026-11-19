@@ -127,7 +127,8 @@ extern QueueHandle_t esp_link_sensor_queue;   /* 出：esp_link_snapshot_t（1 �
  * At most one previously committed old frame, possibly not yet physically sent,
  * can precede STOP; the single TX task preserves their UART order. UART calls are
  * outside the safety lock. Resume requires the observed generation and a transmitted STOP.
- * Caller must require deliberate fresh input, never automatically resume old work.
+ * Motion callers must require deliberate fresh input, never resume old work.
+ * Stored PID restore may resume automatically: PID changes gains only, not motion.
  */
 void esp_link_request_stop(void);
 
@@ -140,5 +141,13 @@ bool esp_link_resume_commands(uint32_t observed_generation);
 /** Enqueue only if the producer's captured epoch is still current. */
 bool esp_link_send_command_for_generation(uint8_t cmd_id, const uint8_t *param,
                                           uint8_t param_len, uint32_t generation);
+
+/** PID 专用转发 + NVS 保存（param 必须为 8 字节 kp/ki 小端 blob）。
+ * 与自动恢复串行；仅成功入队后写入并 commit。返回值表示转发入队成功，
+ * 持久化失败单独记错误日志。调用者先按当前 generation resume。 */
+bool esp_link_send_pid_and_save(const uint8_t *param, uint32_t generation);
+/** 异步恢复 NVS PID；RX 首帧和 TCP 命令客户端连接时调用。
+ * TX 负责 resume/入队及重试；NVS 没有有效 PID 时不覆盖 F407 默认值。 */
+void esp_link_request_pid_push(void);
 
 #endif /* __ESP_LINK_H__ */

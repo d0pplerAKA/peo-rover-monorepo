@@ -270,7 +270,9 @@ static void handle_command(const cJSON *root, uint32_t generation,
     }
     if (esp_link_resume_commands(generation) &&
         generation == esp_link_command_generation() &&
-        esp_link_send_command_for_generation(k_cmd_table[idx].id, param, param_len, generation))
+        (k_cmd_table[idx].id == ESP_CMD_PID
+            ? esp_link_send_pid_and_save(param, generation)
+            : esp_link_send_command_for_generation(k_cmd_table[idx].id, param, param_len, generation)))
     {
         if (k_cmd_table[idx].id == ESP_CMD_MOTOR ||
             k_cmd_table[idx].id == ESP_CMD_MOTOR_CLOSED ||

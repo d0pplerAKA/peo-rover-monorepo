@@ -6,4 +6,5 @@ idf_component_register(SRCS "main.cpp"
                                 esp_net
                                 telemetry
                                 cmd_parser
-                                camera_service)
+                                camera_service
+                       PRIV_REQUIRES nvs_flash)

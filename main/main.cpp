@@ -22,6 +22,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_psram.h>
+#include "nvs_flash.h"
 
 #include "esp_link.h"
 #include "esp_net.h"
@@ -55,6 +56,9 @@ static void start_task(TaskFunction_t entry, const char *name, uint32_t stack,
 extern "C" void app_main()
 {
     ESP_LOGI(TAG, "ESP32-S3 N8R8 boot");
+    /* PID/WiFi 共用默认 NVS 分区；必须在 Arduino 和队列/任务初始化前就绪。
+       初始化失败明确报错，不自动擦除车上保存的 PID。 */
+    ESP_ERROR_CHECK(nvs_flash_init());
     initArduino();
     ESP_LOGI(TAG, "PSRAM=%u bytes; internal heap=%u, largest block=%u",
              (unsigned)esp_psram_get_size(),
@@ -79,5 +83,5 @@ extern "C" void app_main()
         start_task(camera_task, "camera", 8192, 3, 1, false);
     else
         ESP_LOGE(TAG, "camera queue init failed; camera disabled");
-    ESP_LOGI(TAG, "Task assembly complete; fresh deliberate input required to resume");
+    ESP_LOGI(TAG, "Task assembly complete; stored PID restores automatically, motion requires fresh input");
 }

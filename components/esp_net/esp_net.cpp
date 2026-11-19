@@ -30,7 +30,6 @@
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <esp_timer.h>
-#include <nvs_flash.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <lwip/sockets.h>
@@ -716,7 +715,6 @@ void esp_net_task(void *arg)
     s_net_task = xTaskGetCurrentTaskHandle();
     xSemaphoreGive(s_video_queue_mutex);
     /* app_main 已在任务创建前统一建队；本任务以 STA 模式连接热点并运行 select。 */
-    ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_sta();
@@ -913,6 +911,8 @@ void esp_net_task(void *arg)
                     s_client_activity[slot].fd = cfd;
                     portEXIT_CRITICAL(&s_activity_lock);
                     ESP_LOGI(TAG, "client %d connected: fd=%d wake=%d", slot, cfd, s_wake_fd);
+                    /* 8888 命令连接建立：以车上 NVS PID 为准，TX 异步恢复。 */
+                    esp_link_request_pid_push();
                     if (s_conn_eg)
                         xEventGroupSetBits(s_conn_eg, PEO_NET_EVT_CLIENT);
                 }

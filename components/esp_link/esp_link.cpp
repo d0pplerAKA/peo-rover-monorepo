@@ -16,10 +16,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <atomic>
 #include <freertos/event_groups.h>
 #include <driver/uart.h>
 #include <esp_log.h>
+#include "nvs_flash.h"
+#include "nvs.h"
 #include <string.h>
 
 static const char *TAG = "esp_link";
@@ -35,6 +38,104 @@ static bool s_fatal = false;          /* 启动健康故障永久锁存，由 s_
 static bool s_stop_pending = false;
 static TaskHandle_t s_tx_task = NULL;   /* 注册/读取均由 s_safety_lock 保护；TX 常驻 */
 static constexpr uint32_t TX_WAKE = 1U; /* 通知只唤醒；STOP 状态与命令队列才是数据源 */
+
+/* PID blob 直接保存线协议的 8 字节：kp(float LE) + ki(float LE)。
+   此互斥锁串行化「手动 PID 入队 + 保存」和「恢复读取 + 入队」，避免旧值后发。
+   NVS 操作不持有 s_safety_lock；RX/net 只发布请求，不访问 flash。 */
+static constexpr size_t PID_BLOB_SIZE = 8;
+static constexpr uint32_t PID_RETRY_MS = 50;
+static SemaphoreHandle_t s_pid_mutex = NULL;
+static std::atomic<bool> s_pid_push_pending{false};
+
+static bool load_pid(uint8_t *param)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("esp_link", NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        if (err != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGW(TAG, "PID NVS open failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    size_t size = PID_BLOB_SIZE;
+    err = nvs_get_blob(handle, "pid", param, &size);
+    nvs_close(handle);
+    if (err != ESP_OK || size != PID_BLOB_SIZE) {
+        if (err != ESP_ERR_NVS_NOT_FOUND)
+            ESP_LOGW(TAG, "PID NVS read failed: %s (size=%u)",
+                     esp_err_to_name(err), (unsigned)size);
+        return false;  /* 缺失/无效 blob 不下发，保留 F407 默认值。 */
+    }
+    return true;
+}
+
+static bool save_pid(const uint8_t *param)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("esp_link", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PID NVS open for write failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_blob(handle, "pid", param, PID_BLOB_SIZE);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PID NVS save failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
+}
+
+bool esp_link_send_pid_and_save(const uint8_t *param, uint32_t generation)
+{
+    if (param == NULL || s_pid_mutex == NULL) return false;
+    xSemaphoreTake(s_pid_mutex, portMAX_DELAY);
+    const bool sent = esp_link_send_command_for_generation(ESP_CMD_PID, param,
+                                                           PID_BLOB_SIZE, generation);
+    if (sent && !save_pid(param))
+        ESP_LOGW(TAG, "PID forwarded but not persisted; reboot will use previous PID");
+    xSemaphoreGive(s_pid_mutex);
+    return sent;  /* 保留 ACK 的原语义：成功转发入队，不是 F407 执行确认。 */
+}
+
+void esp_link_request_pid_push(void)
+{
+    s_pid_push_pending.store(true);
+    portENTER_CRITICAL(&s_safety_lock);
+    const TaskHandle_t tx_task = s_tx_task;
+    portEXIT_CRITICAL(&s_safety_lock);
+    if (tx_task != NULL) xTaskNotify(tx_task, TX_WAKE, eSetBits);
+}
+
+/* 仅 TX 调用；失败保留请求，空闲时每 50ms 重试，队列有工作时随消费重试。
+   TX 不等待 PID 互斥锁，确保另一核写 flash 时仍能处理 STOP。 */
+static void try_push_pid(void)
+{
+    static bool retry_logged = false;
+    if (!s_pid_push_pending.load() || xSemaphoreTake(s_pid_mutex, 0) != pdTRUE)
+        return;
+    s_pid_push_pending.exchange(false);  /* 此后新到的触发不会被本次完成清掉。 */
+    uint8_t param[PID_BLOB_SIZE];
+    bool queued = false;
+    if (load_pid(param)) {
+        const uint32_t generation = esp_link_command_generation();
+        queued = esp_link_resume_commands(generation) &&
+                 esp_link_send_command_for_generation(ESP_CMD_PID, param,
+                                                       PID_BLOB_SIZE, generation);
+        if (!queued) {
+            s_pid_push_pending.store(true);
+            if (!retry_logged)
+                ESP_LOGW(TAG, "PID restore deferred by STOP/fatal/queue; will retry");
+            retry_logged = true;
+        } else {
+            retry_logged = false;
+            ESP_LOGI(TAG, "stored PID queued for F407");
+        }
+    } else {
+        retry_logged = false;
+    }
+    xSemaphoreGive(s_pid_mutex);
+}
 
 void esp_link_request_stop(void)
 {
@@ -131,6 +232,12 @@ static void handle_frame(uint16_t payload_len)
     snapshot.received_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     snapshot.seq = ++s_snapshot_seq;
     xQueueOverwrite(esp_link_sensor_queue, &snapshot);
+    /* 只认第一帧 CRC/长度均有效的 sensor；独立标记避免 seq 回绕再触发。 */
+    static bool first_sensor_received = false;
+    if (!first_sensor_received) {
+        first_sensor_received = true;
+        esp_link_request_pid_push();
+    }
 }
 
 void esp_link_queues_init(void)
@@ -140,7 +247,8 @@ void esp_link_queues_init(void)
     if (esp_link_cmd_queue == NULL)
         esp_link_cmd_queue = xQueueCreate(8, sizeof(esp_link_cmd_t));
     if (s_uart_event == NULL) s_uart_event = xEventGroupCreate();
-    configASSERT(esp_link_sensor_queue && esp_link_cmd_queue && s_uart_event);
+    if (s_pid_mutex == NULL) s_pid_mutex = xSemaphoreCreateMutex();
+    configASSERT(esp_link_sensor_queue && esp_link_cmd_queue && s_uart_event && s_pid_mutex);
     crc_build_table();
 }
 
@@ -309,14 +417,19 @@ void esp_link_tx_task(void *arg)
             }
             continue;
         }
+        /* STOP 优先；每轮都检查恢复请求，避免持续命令流令 PID 恢复饥饿。
+           恢复仍经普通队列发送，与手动 PID 的顺序由 s_pid_mutex 保证。 */
+        try_push_pid();
         esp_link_cmd_t cmd;
         if (xQueueReceive(esp_link_cmd_queue, &cmd, 0) != pdTRUE) {
             /* 队列优先，通知只作唤醒信号。成功入队与 STOP 都发送通知，
                因而“查空队列到进入等待”之间到达的工作也能唤醒本任务。
                清除通知后回到循环，重新检查 STOP，再非阻塞查队列；
                即使通知已合并/过时，也不会跳过队列或丢失唤醒。
-               失联自停：200ms 无命令/通知则发空帧心跳给 F407（deadman 喂狗）。 */
-            if (xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(200)) == pdFALSE)
+               失联自停：200ms 无命令/通知则发空帧心跳给 F407（deadman 喂狗）；
+               PID 待恢复时缩短为 50ms，确保暂时禁止 resume/队列忙后能重试。 */
+            const uint32_t wait_ms = s_pid_push_pending.load() ? PID_RETRY_MS : 200;
+            if (xTaskNotifyWait(0, UINT32_MAX, NULL, pdMS_TO_TICKS(wait_ms)) == pdFALSE)
                 transmit_heartbeat();
             continue;
         }
@@ -329,7 +442,12 @@ void esp_link_tx_task(void *arg)
             if (!transmit_command(cmd)) {
                 ESP_LOGE(TAG, "UART TX failed; requesting STOP");
                 esp_link_request_stop();
+                if (cmd.cmd_id == ESP_CMD_PID) esp_link_request_pid_push();
             }
+        } else if (cmd.cmd_id == ESP_CMD_PID) {
+            /* 入队后若被新 STOP 作废，重新读取最新 NVS，不能丢失恢复请求。 */
+            ESP_LOGW(TAG, "queued PID invalidated by STOP; scheduling restore");
+            esp_link_request_pid_push();
         }
     }
 }
