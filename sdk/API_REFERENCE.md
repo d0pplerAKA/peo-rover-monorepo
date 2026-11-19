@@ -1,8 +1,9 @@
 # peo SDK — Current API Reference
 
-Updated 2026-11-17. This document describes the checked-in implementation.
+Updated 2026-11-19. This document describes the checked-in implementation.
 Install from the repository root; see [README.md](README.md) and
-[wire protocol](../PROTOCOL.md). The old PDF is not synchronized with this revision.
+[wire protocol](../PROTOCOL.md). The PDF beside this file is regenerated
+from this Markdown; on any conflict, this Markdown wins.
 
 ## Lifecycle
 
