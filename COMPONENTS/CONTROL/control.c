@@ -18,6 +18,13 @@ static volatile uint32_t g_loop_tick     = 0;
 static volatile int32_t  g_odometer[4]   = { 0, 0, 0, 0 };   /* accumulated count (32-bit) */
 static volatile int32_t  g_speed_d100[4] = { 0, 0, 0, 0 };   /* speed, 0.01 cm/s */
 
+/* ---- Sliding-window speed measurement (1 tick = 1 ms) ----
+ * g_delta_hist : last N delta samples (circular), g_delta_idx : write index,
+ * g_delta_sum  : running sum of the window (speed = sum * 1031 / N). */
+static int16_t  g_delta_hist[4][PEO_CTRL_SPEED_WINDOW_TICKS];
+static uint8_t  g_delta_idx[4];
+static int32_t  g_delta_sum[4];
+
 /* ---- Speed PI state ----
  * g_target_d100 : target speed (0.01 cm/s), written by the app, read in ISR.
  * g_pi_u        : accumulated PI output (PWM per-mille), written in ISR,
@@ -63,9 +70,14 @@ void CONTROL_Init(void)
 
     for (m = 0; m < 4; m++)
     {
+        uint8_t i;
         g_pi_u[m]        = 0.0f;
         g_pi_e_prev[m]   = 0.0f;
         g_target_d100[m] = 0;
+        g_delta_idx[m]   = 0;
+        g_delta_sum[m]   = 0;
+        for (i = 0; i < PEO_CTRL_SPEED_WINDOW_TICKS; i++)
+            g_delta_hist[m][i] = 0;
     }
     g_mode = CONTROL_MODE_CLOSED;
 }
@@ -91,7 +103,14 @@ void TIM6_DAC_IRQHandler(void)
         int16_t delta = ENCODER_GetDelta(m);
 
         g_odometer[m]  += delta;                                        /* 32-bit odometry */
-        g_speed_d100[m] = (int32_t)delta * PEO_CTRL_CM_S_D100_PER_DELTA; /* 0.01 cm/s      */
+
+        /* 滑动窗口测速：sum = 最近 N tick 的 delta 和（改善低速量化，见 control.h）。
+           speed = sum × 1031 / N；量化步长 = 1031/N（N=10 → 1.03 cm/s）。 */
+        g_delta_sum[m] += delta - g_delta_hist[m][g_delta_idx[m]];
+        g_delta_hist[m][g_delta_idx[m]] = delta;
+        g_delta_idx[m] = (uint8_t)((g_delta_idx[m] + 1) % PEO_CTRL_SPEED_WINDOW_TICKS);
+        g_speed_d100[m] = g_delta_sum[m] * PEO_CTRL_CM_S_D100_PER_DELTA
+                        / (int32_t)PEO_CTRL_SPEED_WINDOW_TICKS;
 
         /* 仅闭环模式运行速度 PI 并覆盖 PWM。开环模式下编码器照常测速
            （speed 仍回显真实转速），但 PI 不跑、PWM 保持开环命令设的值。 */
