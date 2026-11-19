@@ -1,122 +1,127 @@
-# PEO Rover 上位机 / Upper Computer
+# PEO Rover — Upper Computer (PySide6 GUI + peo SDK)
 
-> **一句话定位 / One-line role**：上位机是组员和车之间的「控制台」——能看车（视频）、看数据（遥测）、发命令（GUI 控制台），更重要的是能写 Python 脚本来自动化控制车（peo SDK）。
->
-> The upper computer is the "console" between the team and the rover — you can see the rover (video), see its data (telemetry), send commands (GUI console), and above all write Python scripts to drive it automatically (peo SDK).
+> **One-line role**: The upper computer is the "console" between the team and the rover — see the rover (video), see its data (telemetry), send commands (GUI), and above all write Python scripts that drive it in real time (peo SDK).
 
 ---
 
-## 工程意义 / Why This Project Exists
+## 1. Project Overview
 
-**中文**：组员大多没有嵌入式背景，直接写 C 固件不现实。上位机把「控制一台车」这件事抽象成一组 Python 动作函数（`peo.drive()`、`peo.stop()`、`peo.cam.read()` …），组员像写单片机代码一样「动作 → 延时 → 动作」，实时通过 WiFi 下发命令。它同时提供一个桌面 GUI：看视频、看遥测仪表盘、手动急停，方便现场调试。
+The upper computer (Python ≥3.10, PySide6) is layered in three parts:
 
-**English**: Most team members have no embedded background, so writing C firmware directly is unrealistic. The upper computer abstracts "driving a rover" into a set of Python action functions (`peo.drive()`, `peo.stop()`, `peo.cam.read()` …) — team members write scripts in a blocking style ("act → delay → act") and the commands stream out over WiFi in real time. It also provides a desktop GUI: video view, telemetry dashboard, and a manual emergency stop for field debugging.
+- **app/**: PySide6 desktop GUI — Tab 1 "Monitor" (video/dashboard/emergency stop), Tab 2 "Team IDE" (script editor + console);
+- **rover_comm/**: communication library (importable by teammates) — command encoding, RoverClient (TCP 8888 command/telemetry + TCP 8890 video), control lock;
+- **sdk/peo/**: the teammate SDK (single entry point `peo`) — action functions (drive/stop/set_pid…) + read-only sensor namespaces + on-disk config cache.
 
-## 功能与作用 / What It Does
+Connection model: the PC joins the S3 hotspot as WiFi STA; TCP 8888 carries commands/telemetry, TCP 8890 carries video; a heartbeat is sent one-way every 0.5 s; every normal command automatically carries the latest telemetry generation (gen).
 
-| 功能 Function | 说明 Description |
+## 2. Why This Project Exists
+
+1. **Teammates have no embedded background**: driving a rover is abstracted into a set of Python action functions — teammates write scripts in a blocking style ("act → delay → act") that stream commands over WiFi in real time.
+2. **Vision lives here**: video frames arrive in `peo.cam` as ndarrays (cv2), so vision algorithms (line following, obstacle avoidance) run on the PC with compute the MCU could never provide.
+3. **Field debugging console**: the GUI dashboard (distance/speed/current/attitude/CPU), the emergency-stop button, and the IDE console make on-site troubleshooting visible.
+4. **Configuration management**: PID/resolution are cached in `~/.peo_rover_config.json` and re-sent automatically after reconnect or F407 reset — tuned parameters are never lost.
+
+## 3. What It Does
+
+| Feature | Implementation |
 |---|---|
-| 桌面 GUI | 视频显示 + 遥测仪表盘 + 控制台 + 急停（空格键） |
-| peo SDK | 组员写 Python 脚本调用 `peo.*` 动作函数实时下发命令 |
-| 命令/遥测 | TCP 8888 收发 JSON 命令 + 50 Hz 遥测 |
-| 视频接收 | TCP 8890 收 JPEG，FrameAssembler 拼帧解码 |
-| PID 调参 | `peo.set_pid()` 下发 + 本地 config.json 缓存 |
+| Monitor tab | connect, resolution select, video toggle, sensor dashboard, emergency-stop button (the only command button on Tab 1) |
+| Team IDE tab | script edit/run/stop, persistent shell REPL, latest video, unified console |
+| peo SDK | action functions + read-only sensor namespaces + blocking `delay()` + single-instance control lock |
+| Video RX | TCP 8890, 8-byte header (0xCAFE+fid+len) + JPEG, structural guard + bad-frame drop |
+| Heartbeat | one-way `{"type":"heartbeat"}` every 0.5 s (no ACK, no timestamp — only renews the watchdog) |
+| Emergency stop | button + spacebar shortcut; SDK `peo.stop()` waits for a *new* S3 ACK (0.3 s × 2 retries) |
+| Config cache | PID + resolution in `~/.peo_rover_config.json` (override via PEO_CONFIG_PATH) |
+| i18n | GUI zh/en toggle (default English, international teammates), SDK error messages follow the GUI language |
 
-## 与其它三端的联系 / Connections to the Other Three Nodes
+## 4. Connections to the Other Three Nodes
 
 ```
-        ┌──────────────────────────────────────┐
-        │  上位机 Upper Computer (PC)        ★  │
-        │  PySide6 GUI + peo SDK（组员脚本）    │
-        └──────────────────┬───────────────────┘
-                WiFi STA   │ TCP 8888 命令/遥测
-                            │ TCP 8890 视频
-        ┌──────────────────▼───────────────────┐
-        │     ESP32-S3（WiFi 桥 Bridge）        │
-        └──────────────────┬───────────────────┘
-                            │ USART2
-        ┌──────────────────▼───────────────────┐
-        │  STM32F407（主控 Main Controller）    │
-        └──────────────────┬───────────────────┘
-                            │ USART3
-        ┌──────────────────▼───────────────────┐
-        │   ESP32-C3（手柄 BLE 桥 Gamepad）     │
-        └──────────────────────────────────────┘
+        ┌──────────────────────────────────┐
+        │   Upper Computer (PC, this) ★     │
+        │   PySide6 GUI + peo SDK scripts   │
+        └───────────────┬──────────────────┘
+              WiFi STA  │ TCP 8888 cmd/telemetry
+                         │ TCP 8890 video
+        ┌───────────────▼──────────────────┐
+        │     ESP32-S3 (WiFi bridge)        │
+        └───────────────┬──────────────────┘
+                         │ USART2
+        ┌───────────────▼──────────────────┐
+        │   STM32F407 (main controller)     │
+        └───────────────┬──────────────────┘
+                         │ USART3
+        ┌───────────────▼──────────────────┐
+        │   ESP32-C3 (gamepad BLE bridge)   │
+        └──────────────────────────────────┘
 ```
 
-- **↔ ESP32-S3**：唯一出口——WiFi STA 连 S3 热点，TCP 8888 命令/遥测、TCP 8890 视频。
-- **↔ STM32F407 / ESP32-C3**：无直接连接，一切经 S3 中转。
+- **↔ ESP32-S3**: the only exit — 8888 commands/telemetry, 8890 video; the heartbeat feeds the S3's watchdog.
+- **↔ STM32F407 / ESP32-C3**: no direct link, everything relays through the S3; the on-vehicle `lock` field (manual/autonomous) is display-only here (the lock badge).
 
----
+## 5. Main Implementation
 
-## 技术细节 / Technical Details
+### 5.1 Module layering
 
-更新：2026-11-16。PySide6 桌面监控/组员 IDE，以及可独立安装的 `peo` Python SDK。上位机通过单个 TCP 8888 连接收发命令/遥测，通过 TCP 8890 接收 JPEG 视频（2026-11-16 起视频流完全走 TCP）；S3 负责桥接与停车屏障，F407 执行电机和传感器操作。
+| Layer | File | Duty |
+|---|---|---|
+| GUI | app/gui.py | MainWindow v2: Tab 1 monitor + Tab 2 IDE + language toggle + emergency stop |
+| GUI | app/video.py | VideoWidget decodes JPEG with QImage directly (no OpenCV dependency) + 30-frame fps |
+| GUI | app/i18n.py | zh/en dictionaries + tr() |
+| Comm | rover_comm/protocol.py | pure data layer: command IDs/CRC16/frame packing/SensorData |
+| Comm | rover_comm/client.py | RoverClient: three threads (send/tcp/heartbeat) + video thread + gen machinery |
+| Comm | rover_comm/control.py | ControlLock: local lease lock on 127.0.0.1:8892 |
+| SDK | sdk/peo/__init__.py | action functions + read-only namespaces |
+| SDK | sdk/peo/_bridge.py | connection bridge: RoverClient + 50 Hz snapshot + config cache + re-send monitor thread |
+| SDK | sdk/peo/cam.py | single-slot latest-frame mailbox + cv2 lazy decode |
 
-## 启动
+### 5.2 peo SDK action list
 
-需要 Python 3.10+。在本仓库根目录执行：
+| Action | Semantics |
+|---|---|
+| `connect(host="peo_rover.local")` | connect 8888+8890+heartbeat+lease; auto re-sends cached PID/resolution |
+| `disconnect()` | disconnect and release the lease |
+| `delay(ms)` | blocking wait; raises ScriptStopped if the stop flag is set |
+| `led(on=None)` | True→LED_ON / False→LED_OFF / None→LED_TOGGLE |
+| `drive_all(speed_cm_s)` | all wheels at one closed-loop speed (**unit cm/s**, MOTOR_CLOSED) |
+| `drive(*pairs)` | variadic (motor, speed_cm_s); sends only the named motors (data update); negative = reverse |
+| `motor(*pairs)` | open-loop PWM **per-mille -1000..1000** (MOTOR); mutually toggles open/closed-loop mode with drive |
+| `set_pid(kp=…, ki=…)` | PI shared by all wheels; merges cache defaults (kp 0.25 / ki 0.005); sends command + writes cache |
+| `stop()` | priority STOP + waits for a **new** S3 ACK (0.3 s × 2), raises TimeoutError if unconfirmed |
+| `reset_odometer()` | zero all four odometers |
+| `ws2812(r,g,b,brightness=100)` | status LED color (S3-local command) |
+| `sys_reset()` | F407 soft reset (S3 keeps running); cached config auto re-sent after recovery |
 
-```powershell
-python -m pip install -r requirements.txt
-python -m app.main
-```
+Read-only namespaces: `mpu.quat/accel`, `vl53.front_mm/left_mm/right_mm/*_ok`, `wheels.speed_cm_s/odometer/current_mA/bus_voltage_mV`, `sys.cpu0/cpu1/ram`, `cam`, and top-level `fresh/control_mode/fw_version/s3_fw/lock` (None when no data).
 
-`run.bat` 保留了本机 Python 3.13 的绝对路径；其他电脑使用上面的通用命令，或修改该路径。无需连接真车即可打开 GUI。连接真车前加入 `PEO_Rover` AP（密码 `12345678`），默认主机 `192.168.4.1`。
+### 5.3 Connection & safety machinery
 
-## 当前功能
+- **Generation (gen)**: normal commands automatically carry the latest telemetry generation; STOP_ALL is sent alone (clears the queue, invalidates the generation, clears ready); telemetry updates the generation only when it is valid and not blocked by a STOP.
+- **Heartbeat**: 0.5 s one-way, renews the S3 watchdog only (S3 auto-stops after 2 s of silence) — **the heartbeat does not prove the algorithm is making progress**; the algorithm must check `fresh`/video freshness itself.
+- **fresh semantics**: connected + snapshot present + no link_stale + within 250 ms of the latest snapshot (`FRESH_MS=250`).
+- **Control lock**: `ControlLock` (127.0.0.1:8892) — GUI and SDK scripts are mutually exclusive on this machine; switching to Tab 2 auto-disconnects the GUI.
+- **Config re-send monitor**: a background thread polls every 0.1 s for the fresh recovery edge (after connect / after F407 reset / after link_stale clears) and re-sends cached PID + CAM_RES.
 
-- **Monitor**：连接、分辨率选择、视频开关、传感器/资源监控和 STOP；不含旧版直控、手柄或宏面板。
-- **Team IDE**：Python 脚本编辑/运行/停止、持久 shell、最新视频和有界输出控制台。脚本与正在执行/续行中的 shell 互斥。
-- 切换到 IDE 会取消正在建立的 Monitor 连接或断开现有连接。Monitor 与 SDK 共用本机控制锁；S3 同时只允许一个客户端。
-- IDE Stop 设置协作取消标志并立即排入优先 STOP，不等待脚本主动调用 `delay`。脚本只有在 SDK 动作/等待检查到标志时才退出；纯 CPU 死循环无法被强制终止，但不能继续通过 SDK 下发普通命令。
-- 正常结束、异常结束或关闭窗口会清理控制连接。空格急停按当前 tab 选择控制路径，文本编辑框聚焦时不触发。
+### 5.4 Video reception
 
-## 通信与停车语义
+8-byte big-endian header (magic 0xCAFE + frame_id + JPEG length) + JPEG body; frame assembly lives in `RoverClient._video_loop` (read the header exactly, then the body exactly); bad magic or length outside 1..512 KB → drop the stream and reconnect (2 s backoff); frames pass `jpeg_structure_ok` (SOI/SOF/SOS/EOI, width/height ≤5M pixels) before decoding. The GUI Tab 1 takes the latest frame from a mailbox; Tab 2 goes through `peo.cam` (single-slot latest frame + 1 s freshness window + cv2 lazy decode).
 
-- 每 500 ms 发送单向安全心跳 `{"type":"heartbeat"}`，仅续期控制看门狗；无 ACK、无时间戳，已取消 PING/RTT。
-- `connect()` 只连接 TCP 8888；`VIDEO_ON` / `peo.cam.on()` 后才连接视频端口，`VIDEO_OFF` 关闭视频连接并停止重试。`video_port=None` 禁用此会话的视频功能。
-- 状态栏两个 Tab 仅显示 CPU0/CPU1/RAM；来源为 `sensor.sys`，不再显示 Hz、fps、Loss、RTT。
-- 普通命令须先获得遥测中的 `gen`。每次连接拥有独立的 socket、发送队列、停止事件和线程；旧连接不能向新连接发送积压命令。
-- STOP 清除本机尚未发送的普通命令，并在有界队列满时仍可入队。一个已提交的 TCP 批次可能先发出（每批最多四条）；TCP 或硬件故障时不保证送达。
-- `peo.stop()` 等待调用后收到的成功 S3 STOP ACK，超时重发一次；仍未确认时抛 `TimeoutError`。这表示 S3 接受请求，**不表示 F407 已执行，也不是硬件急停**。
-- SDK 的 `peo.fresh` 是动态布尔值：已连接、最近 250 ms 收到遥测、且 S3 没有报告 `link_stale`。S3 遥测约 20 Hz；UART 数据年龄超过 500 ms 时标为 stale。断线清除快照。
-- 心跳仅证明通信线程仍在运行，不能证明用户算法正在推进。算法必须自行检查数据/视频新鲜度；F407 仍需独立的命令过期停车和物理断电手段。
+## 6. What Each Feature Affects and Constrains
 
-## 视频与性能
+- **The two speed units must not be mixed**: `drive/drive_all` is **cm/s** (closed-loop, MOTOR_CLOSED); `motor` is **per-mille ±1000** (open-loop, MOTOR). Sending `motor` switches the F407 to open-loop mode; sending `drive` switches back — the two semantics are mutually exclusive.
+- **A STOP ACK only means "S3 received it"**: the protocol has no request ID, so `peo.stop()` waits for the S3's confirmation, not for the F407 to have acted; the GUI button/spacebar does not wait at all. The real emergency stop is the S3 STOP latch plus the F407's independent deadman working together.
+- **The heartbeat does not keep an algorithm alive**: a pure CPU busy-loop script cannot be force-killed (the IDE Stop is a cooperative cancel flag); the heartbeat only prevents the S3 from false-tripping — a moving rover still relies on the S3 heartbeat timeout or a physical power cutoff.
+- **Single-client hard constraint**: local ControlLock + the S3's `PEO_NET_MAX_CLIENTS=1` double-lock the connection; concurrent scripts are refused (multi-script concurrency is explicitly forbidden by the project).
+- **Video freshness window is 1 s**: frames older than 1 s are no longer returned by `cam.read()` (`_FRAME_FRESH_MS=1000`); vision algorithms must check `cam.fresh`.
+- **Config-cache write failures are swallowed**: `_save_config` only logs on failure — a teammate script never aborts over a disk issue, but the parameter may silently fail to persist.
+- **Telemetry cadence**: the F407 uploads at 50 Hz, the S3 telemetry JSON is 20 Hz in autonomous mode and 2 Hz in manual mode — `fresh` (250 ms window) still holds at 2 Hz, but in manual mode the effective sensor refresh rate is only 2 Hz.
 
-S3 目标采集节拍为 24 fps；当前支持 QQVGA/QVGA/VGA/SVGA。视频默认关闭，开启/切换包含传感器初始化与预热，首帧延迟不是固定 0.5 s。
+## 7. Tech Stack & Run
 
-视频走 TCP 8890，定界为 8 B 大端头（magic+fid+len）+ JPEG 体，单帧上限 512 KiB；TCP 保证有序可靠，无分包/乱序概念。帧先过 SOI/SOF/SOS/段长/EOI 结构守卫再交解码器。视频连接断开或流错位时接收端自动重连（2 s 退避），命令通道不受影响。
+- Python ≥3.10 + PySide6 + numpy + opencv-python (optional extra `[vision]`).
+- Run: `python -m pip install -r requirements.txt` → `python -m app.main` (`run.bat` holds the local absolute path).
+- Tests: `python tests/regression_test.py` (32 offline cases), `python tests/sdk_test.py`, `python tests/smoke_test.py`.
 
-SDK 只保留最新完整帧，超过 1 s 不再作为可读新鲜图像；重复读取缓存解码结果并返回独立 ndarray。GUI 合并 Monitor 帧通知、约 30 Hz 轮询 IDE 最新帧，避免积压解码。输出队列最多 256 个 8192 字符块，每轮最多取 64 块；高频输出会丢弃旧块，显示文档最多保留 500 行。
+## 8. License
 
-JPEG 结构检查不等于完整解码成功；Qt/OpenCV 仍可能拒绝或容错解码损坏图像。图像质量需实机验收。
-
-## SDK 安装与使用
-
-安装入口已移到仓库根目录，wheel 同时包含 `peo` 和所依赖的 `rover_comm`：
-
-```powershell
-python -m pip install .
-# 需要 cam.read() 的 BGR 图像时：
-python -m pip install '.[vision]'
-```
-
-GUI 使用源码中的 `sdk/peo`。也可以运行 `python examples/blink.py`、`python examples/avoid.py` 或 `python examples/vision_line.py`；示例自行加入正确源码路径。涉及运动的示例需要先校准轮序/方向和速度。
-
-完整 API 见 [sdk/API_REFERENCE.md](sdk/API_REFERENCE.md)，入门说明见 [sdk/README.md](sdk/README.md)，线协议见 [PROTOCOL.md](PROTOCOL.md)。`sdk/API_REFERENCE.pdf` 是旧版静态导出，未随本轮 Markdown 自动重建，不作为当前 API 依据。
-
-## 测试
-
-以下命令分别在独立进程执行，不连接真车：
-
-```powershell
-python tests/regression_test.py
-python tests/sdk_test.py
-python tests/smoke_test.py
-```
-
-回归测试使用模拟 socket；GUI 测试使用 offscreen Qt。SDK 测试通过 `PEO_CONFIG_PATH` 指向临时目录，不再覆盖或删除用户的 `~/.peo_rover_config.json`。测试不验证真实无线电、S3/F407 执行、急停时延或相机图像质量。
-
-审查发现、修复范围及最新验证结果见 [REVIEW_AND_REPAIR.md](REVIEW_AND_REPAIR.md)。
+Copyright (c) 2026 Danny — MIT License (see `LICENSE`).
