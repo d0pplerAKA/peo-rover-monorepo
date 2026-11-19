@@ -22,6 +22,9 @@ Rules:
     - The ESP32 must be powered on (AP "PEO_Rover").
     - The GUI must NOT be connected at the same time
       (single-client rule: one controller per vehicle).
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import os
 import sys
@@ -41,7 +44,7 @@ except ImportError:
 from rover_comm.client import RoverClient
 from collections import deque
 
-_FPS_WINDOW = 30   # rolling window for FPS calculation
+_FPS_WINDOW = 30   # rolling window (frames) for FPS calculation
 _RING_FRAMES = 96  # forensics ring: last ~4 s of raw JPEGs @24fps (~6 MB)
 
 
@@ -77,7 +80,7 @@ def main(host: str = "peo_rover.local", res: str = "QQVGA") -> None:
     client.on_frame = on_frame
 
     try:
-        client.connect(host)          # 先连 TCP 8888；video_on() 后才连接 TCP 8890。
+        client.connect(host)   # TCP 8888 first; TCP 8890 only after video_on().
         client.wait_ready(1.0)
     except (OSError, ConnectionError, RuntimeError) as e:
         print(f"connect failed: {e}")
@@ -114,8 +117,9 @@ def main(host: str = "peo_rover.local", res: str = "QQVGA") -> None:
             if key in ("q", "\x1b"):
                 break
             if key == "s":
-                # 事后取证：花屏后按键也来得及——把 ring 里最近 ~4 秒
-                # 的所有原始 JPEG 落盘（含已经滑过去的花屏帧）。
+                # Post-hoc forensics: even after a glitch you can still save the
+                # last ~4 s of raw JPEGs from the ring (including frames that
+                # already scrolled past).
                 snap = list(ring)
                 if not snap:
                     print("ring empty — no frames received yet")
@@ -129,7 +133,7 @@ def main(host: str = "peo_rover.local", res: str = "QQVGA") -> None:
                         fh.write(jpeg)
                 print(f"saved {len(snap)} frames (f{snap[0][0]}..f{snap[-1][0]}) "
                       f"to bad_frames/")
-                ring.clear()   # 防重复落盘同一批
+                ring.clear()   # avoid dumping the same batch twice
     except KeyboardInterrupt:
         pass
     finally:

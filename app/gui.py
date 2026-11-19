@@ -1,14 +1,23 @@
 """
-app.gui — 主窗口 v2（2026-11-16 组员编程模型定案后重构）
+app.gui - main window v2 (rebuilt after the 2026-11-16 team programming model).
 
-Tab1 手动监控：连接 + 视频 + 参数仪表盘（只读）+ 急停。
-Tab2 组员 IDE：脚本编辑/运行/停止 + shell REPL + 视频窗 + 输出控制台（含全局日志）。
-    - 脚本跑在独立线程（阻塞式脚本不卡 GUI）；停止 = 协作式（peo.delay 检查标志）。
-    - 切到 Tab2 自动断开 GUI 连接（单客户端规范，PROTOCOL §2.3）。
-    - shell 与运行中的脚本互斥（单控制源原则）。
+Tab 1 "Monitor": connection + video + read-only parameter dashboard + E-STOP.
+Tab 2 "Team IDE": script editor / run / stop + shell REPL + video window +
+output console (including global logs).
+    - Scripts run on a separate thread (a blocking script never freezes the
+      GUI); stopping is cooperative (peo.delay checks a flag).
+    - Switching to Tab 2 automatically disconnects the GUI connection
+      (single-client rule, PROTOCOL §2.3).
+    - The shell and a running script are mutually exclusive (single control
+      source).
 
-线程模型：RoverClient 接收线程回调 → 跨线程 emit Qt signal → 主线程槽更新 UI。
-双语：所有界面文本经 app.i18n.tr() 取；语言切换时 _retranslate() 刷新。
+Thread model: RoverClient receive-thread callbacks -> cross-thread Qt signal
+emit -> main-thread slots update the UI.
+Bilingual: every UI string goes through app.i18n.tr(); _retranslate() refreshes
+on language switch.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import code
 import contextlib
@@ -39,7 +48,8 @@ from app.video import VideoWidget
 
 
 def _enqueue_output(target, text):
-    # Bound both queued item count and each item's bytes/characters.
+    """Push text into a bounded queue in chunks, dropping the oldest chunk when
+    full (bounds both the item count and each item's size)."""
     for offset in range(0, len(text), 8192):
         chunk = text[offset:offset + 8192]
         try:
@@ -56,10 +66,11 @@ def _enqueue_output(target, text):
 
 
 class _StreamRelay(io.TextIOBase):
-    """流式输出转发：脚本线程每次 write 立即入队（主线程 50ms drain 显示）。
+    """Streaming output forwarder: a script thread's write() enqueues
+    immediately (a main-thread 50 ms timer drains it to the console).
 
-    替代 io.StringIO 缓冲——脚本运行中 print 的内容实时进控制台，
-    而不是结束后一次性刷出。
+    Replaces io.StringIO buffering so print() output during a script appears
+    live in the console instead of all at once at the end.
     """
 
     def __init__(self, q: "queue.Queue"):
@@ -76,7 +87,8 @@ class _StreamRelay(io.TextIOBase):
 
 
 class LineNumberArea(QWidget):
-    """代码编辑器左侧行号栏（Qt 官方 LineNumberArea 移植）。"""
+    """The left-hand line-number gutter of the code editor (ported from the
+    official Qt LineNumberArea example)."""
 
     def __init__(self, editor: "CodeEditor"):
         super().__init__(editor)
@@ -90,11 +102,12 @@ class LineNumberArea(QWidget):
 
 
 class CodeEditor(QPlainTextEdit):
-    """带行号 + 当前行高亮的纯文本编辑器（组员 IDE 用）。"""
+    """Plain-text editor with a line-number gutter and current-line highlight
+    (used by the team IDE)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Tab 键缩进 = 4 空格（Python 惯例，默认 8 太宽）
+        # Tab indents 4 spaces (Python convention; the Qt default of 8 is too wide)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self._line_area = LineNumberArea(self)
         self.blockCountChanged.connect(self._update_area_width)
@@ -104,11 +117,13 @@ class CodeEditor(QPlainTextEdit):
         self._highlight_current()
 
     def setFont(self, font):
-        """换字体后重算 Tab 宽度，任何字体下都保持 4 空格缩进。"""
+        """Recompute the Tab width after a font change so indentation stays at
+        4 spaces under any font."""
         super().setFont(font)
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
 
     def line_number_area_width(self) -> int:
+        """Width (px) needed to render the largest line number plus padding."""
         digits = max(3, len(str(max(1, self.blockCount()))))
         return 14 + self.fontMetrics().horizontalAdvance("9") * digits
 
@@ -151,26 +166,29 @@ class CodeEditor(QPlainTextEdit):
             number += 1
 
     def _highlight_current(self):
-        """当前行整行高亮（写代码时的光标行指示）。"""
+        """Highlight the whole current line (cursor-line indicator while
+        typing)."""
         sel = QTextEdit.ExtraSelection()
-        sel.format.setBackground(QColor("#242c3a"))   # 明显亮于编辑器底色
+        sel.format.setBackground(QColor("#242c3a"))   # clearly brighter than the editor bg
         sel.format.setProperty(QTextFormat.FullWidthSelection, True)
         sel.cursor = self.textCursor()
         sel.cursor.clearSelection()
         self.setExtraSelections([sel])
 
-_MAX_LOG_BLOCKS = 500      # 日志行数上限：超出自动覆盖最旧
-_PERF_INTERVAL_MS = 1000   # CPU/RAM 状态刷新周期
-_IDE_VIDEO_MS = 33         # Main-thread latest-frame polling; bounded rendering cadence
-_IDE_SHOW_MIN_S = 0.030    # Tab2 显示最小间隔：均匀节奏（24fps=42ms 帧间隔不丢帧）
+_MAX_LOG_BLOCKS = 500      # max console log lines; older lines scroll off
+_PERF_INTERVAL_MS = 1000   # status-bar refresh period (CPU/RAM)
+_IDE_VIDEO_MS = 33         # main-thread latest-frame polling; bounded render cadence
+_IDE_SHOW_MIN_S = 0.030    # Tab 2 minimum display interval: smooth cadence
+                           # (24 fps = 42 ms, so no frame is dropped)
 
 _CAM_RESOLUTIONS = (("QQVGA (160x120)", "QQVGA"),
                     ("QVGA (320x240)", "QVGA"),
                     ("VGA (640x480)", "VGA"),
                     ("SVGA (800x600)", "SVGA"))
 
-# IDE 默认代码（用户定案 2026-11-17）：组员首次打开 IDE 时编辑器预填。
-# 缩进统一 4 空格（Python 惯例，与 IDE Tab 设置一致）。
+# IDE default code (user decision 2026-11-17): pre-filled when a team member
+# first opens the IDE. Indentation is 4 spaces (Python convention, matching the
+# IDE Tab setting).
 _DEFAULT_SCRIPT = (
     "import peo\n"
     "peo.connect()\n"
@@ -189,9 +207,11 @@ _DEFAULT_SCRIPT = (
 
 
 class _PeoConsole(code.InteractiveConsole):
-    """真 REPL：标准库 InteractiveConsole，输出转发到 GUI 控制台。
+    """A true REPL: stdlib InteractiveConsole with output forwarded to the GUI
+    console.
 
-    提供：多行续行（... 提示）、表达式回显、变量会话持久、异常捕获。
+    Provides: multi-line continuation (the ... prompt), expression echo,
+    persistent variables across statements, and exception capture.
     """
 
     def __init__(self, env: dict, write_cb):
@@ -205,10 +225,12 @@ class _PeoConsole(code.InteractiveConsole):
         pass
 
     def runcode(self, code_):
-        """把 displayhook（表达式回显）/ print / stderr 全部收敛到 write。
+        """Converge displayhook (expression echo) / print / stderr into write.
 
-        默认实现写进程 sys.stdout（会打到终端而非 GUI 控制台）；此处重定向。
-        shell 与脚本互斥运行（脚本运行中 shell 锁住），全局 stdout 无并发写。"""
+        The default implementation writes to the process sys.stdout (the
+        terminal, not the GUI console); this redirects it. The shell and a
+        script are mutually exclusive (the shell locks while a script runs), so
+        global stdout has no concurrent writers."""
         old_out, old_err = sys.stdout, sys.stderr
         old_hook = sys.displayhook
         sys.stdout = sys.stderr = self
@@ -222,7 +244,7 @@ class _PeoConsole(code.InteractiveConsole):
 
 
 class ShellLineEdit(QLineEdit):
-    """shell 输入行：↑/↓ 历史、Tab 补全（rlcompleter）。"""
+    """The shell input line: ↑/↓ history and Tab completion (rlcompleter)."""
 
     def __init__(self, window, parent=None):
         super().__init__(parent)
@@ -243,22 +265,24 @@ class ShellLineEdit(QLineEdit):
 
 
 class MainWindow(QMainWindow):
-    # 跨线程信号（RoverClient 接收线程 emit → 主线程槽，Qt 自动 queued）
+    # Cross-thread signals (RoverClient receive threads emit -> main-thread
+    # slots; Qt auto-queues them).
     _sig_sensor = Signal(object)      # SensorData
     _sig_frame = Signal(int, bytes)   # frame_id, jpeg
     _sig_ack = Signal(object)         # dict {"ack":cmd,"status":n}
     _sig_log = Signal(str)
     _sig_disconn = Signal()
-    _sig_conn = Signal(bool, str)       # (成功?, host 或错误信息)
-    # IDE 输出（脚本/shell 线程 → 队列 → 主线程 QTimer drain 写控制台）
+    _sig_conn = Signal(bool, str)       # (success?, host or error message)
+    # IDE output (script/shell threads -> queue -> main-thread QTimer drain)
     _sig_shell_out = Signal(str)
     _sig_ide_status = Signal(str)
-    _sig_script_finished = Signal()     # 脚本线程结束 → 主线程恢复按钮状态
-    _sig_ide_frame = Signal()          # Tab2 视频帧到达通知（无参：主线程取最新帧）
+    _sig_script_finished = Signal()     # script thread done -> restore buttons
+    _sig_ide_frame = Signal()          # Tab 2 frame-arrived note (no payload:
+                                       # the main thread pulls the latest frame)
 
     def __init__(self):
         super().__init__()
-        self.resize(1280, 800)        # 初始窗口大小（三端工作台合理尺寸）
+        self.resize(1280, 800)        # initial window size (a sensible workbench)
         self._video_on = False
 
         self._control_lease = ControlLock()
@@ -270,7 +294,7 @@ class MainWindow(QMainWindow):
         self._frame_notification = False
         self._shell_busy = threading.Event()
         self.client = RoverClient()
-        self.client.on_sensor = self._sig_sensor.emit          # 接收线程
+        self.client.on_sensor = self._sig_sensor.emit          # receive thread
         self.client.on_frame = self._queue_frame
         self.client.on_ack = self._sig_ack.emit
         self.client.on_disconnected = self._client_disconnected
@@ -286,54 +310,54 @@ class MainWindow(QMainWindow):
         self._sig_script_finished.connect(self._on_script_finished)
         self._sig_ide_frame.connect(self._on_ide_frame)
 
-        # IDE 运行时状态
+        # IDE runtime state
         self._script_thread = None
         self._shell_thread = None
         self._script_running = False
-        self._current_file = None      # 当前脚本关联路径（None=默认代码未保存）
-        self._bad_seq = -1             # Tab2 已知坏帧 seq（只解码一次）
-        self._shown_seq = -1           # Tab2 已显示帧 seq（积压重复通知去重）
-        self._last_ide_show = None     # Tab2 上次显示时刻（节流用）
-        self._bad_dump_count = 0       # 坏帧取证落盘计数（上限 8）
-        # shell REPL 状态
-        self._shell_q = queue.Queue(maxsize=4)      # 主线程 → shell 线程的输入行
-        self._shell_out_q = queue.Queue(maxsize=256)  # shell 线程 → 主线程的输出（QTimer drain）
-        self._shell_more = False           # 续行模式（提示符 ...，主线程 UI 状态）
-        self._shell_more_flag = False      # shell 线程写入的续行标志（drain 同步到 UI）
+        self._current_file = None      # path of the current script (None = default, unsaved)
+        self._bad_seq = -1             # Tab 2 last-known bad-frame seq (decode once)
+        self._shown_seq = -1           # Tab 2 last-shown frame seq (dedupe backlog)
+        self._last_ide_show = None     # Tab 2 last display time (throttling)
+        self._bad_dump_count = 0       # bad-frame forensics dump count (max 8)
+        # shell REPL state
+        self._shell_q = queue.Queue(maxsize=4)      # main thread -> shell thread input lines
+        self._shell_out_q = queue.Queue(maxsize=256)  # shell thread -> main thread output
+        self._shell_more = False           # continuation mode (... prompt, UI state)
+        self._shell_more_flag = False      # continuation flag written by the shell thread
         self._shell_history = deque(maxlen=200)
         self._shell_hist_idx = None
-        self._shell_completer = None       # rlcompleter.Completer（shell 线程填充）
+        self._shell_completer = None       # rlcompleter.Completer (shell thread fills it)
         self._shell_started = False
 
-        self._build_ui()          # 只建控件和布局
-        self._retranslate()       # 按当前语言填文本
+        self._build_ui()          # build widgets and layouts only
+        self._retranslate()       # fill text per the current language
 
-        # 固定暗色主题
+        # Fixed dark theme
         apply_theme(QApplication.instance())
 
-        # 急停快捷键：空格（文本框聚焦时不触发）
+        # E-STOP shortcut: Space (ignored while a text box has focus)
         self._stop_sc = QShortcut(QKeySequence(Qt.Key_Space), self)
         self._stop_sc.activated.connect(self._on_shortcut_stop)
 
-        # 性能计数：1s 刷新一次状态栏
+        # Perf counters: refresh the status bar once a second
         self._perf_timer = QTimer(self)
         self._perf_timer.timeout.connect(self._update_perf)
         self._perf_timer.start(_PERF_INTERVAL_MS)
-        self._update_perf()     # 立即显示初始 "0 Hz / 0 fps"
+        self._update_perf()     # show the initial "0 Hz / 0 fps" immediately
 
-        # Tab2 latest-frame mailbox polling (~30Hz, capture target is 24fps)
+        # Tab 2 latest-frame mailbox polling (~30 Hz; capture target is 24 fps)
         self._ide_video_timer = QTimer(self)
         self._ide_video_timer.timeout.connect(self._pull_ide_video)
         self._ide_video_timer.start(_IDE_VIDEO_MS)
 
-        # shell 输出 drain（shell 线程 → 队列 → 主线程写控制台，50ms）
+        # Shell output drain (shell thread -> queue -> main-thread console, 50 ms)
         self._shell_drain_timer = QTimer(self)
         self._shell_drain_timer.timeout.connect(self._drain_shell_out)
         self._shell_drain_timer.start(50)
 
         self._log(tr("log_ready"))
 
-    # ============================ UI 构建 ============================
+    # ============================ UI building ============================
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -341,18 +365,19 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 6, 8, 4)
         root.setSpacing(4)
 
-        # 顶部栏：应用标题 + 双语切换按钮（右侧固定，不挤压 Tab 标题）
+        # Top bar: app title + language toggle button (fixed right, does not
+        # squeeze the tab titles)
         topbar = QHBoxLayout()
         self.lbl_app = QLabel()
         self.lbl_app.setStyleSheet("color: #9aa0ac; font-size: 12px;")
         topbar.addWidget(self.lbl_app)
         topbar.addStretch(1)
-        self.lbl_file_path = QLabel()          # 当前脚本文件位置（右上区域）
+        self.lbl_file_path = QLabel()          # current script file path (top right)
         self.lbl_file_path.setStyleSheet("color: #9aa0ac; font-size: 11px;")
         topbar.addWidget(self.lbl_file_path)
         topbar.addSpacing(12)
         self.lang_btn = QPushButton()
-        self.lang_btn.setMinimumWidth(64)      # 自适应内容，避免"中文"被截半
+        self.lang_btn.setMinimumWidth(64)      # fit its own content, avoid truncation
         self.lang_btn.setMaximumWidth(80)
         self.lang_btn.setToolTip("Switch language / 切换语言")
         self.lang_btn.clicked.connect(self._on_lang_toggle)
@@ -362,10 +387,10 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs)
-        self.tabs.addTab(self._build_tab1(), "")   # 文本 _retranslate 填
+        self.tabs.addTab(self._build_tab1(), "")   # text filled by _retranslate
         self.tabs.addTab(self._build_tab2(), "")
 
-        # 状态栏：性能/帧率 + 锁状态指示（锁在最右）
+        # Status bar: perf/frame rate + lock indicator (lock at the far right)
         self.lbl_perf = QLabel()
         self.lbl_perf.setContentsMargins(0, 0, 8, 0)
         self.statusBar().addPermanentWidget(self.lbl_perf)
@@ -374,9 +399,9 @@ class MainWindow(QMainWindow):
         self.lbl_lock = QLabel()
         self.lbl_lock.setContentsMargins(0, 0, 12, 0)
         self.statusBar().addPermanentWidget(self.lbl_lock)
-        self._set_lock_indicator(None)   # 初始：未知
+        self._set_lock_indicator(None)   # initial: unknown
 
-    # ---------------- Tab1：手动监控 ----------------
+    # ---------------- Tab 1: manual monitor ----------------
 
     def _build_tab1(self):
         w = QWidget()
@@ -385,7 +410,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         lay.addWidget(splitter)
 
-        # 左列：分辨率 + 视频
+        # Left column: resolution + video
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -394,7 +419,7 @@ class MainWindow(QMainWindow):
         camrow.addWidget(self.lbl_cam_res)
         self.cam_res_combo = QComboBox()
         self.cam_res_combo.addItems([d for d, _ in _CAM_RESOLUTIONS])
-        self.cam_res_combo.setCurrentIndex(1)   # 默认 QVGA (320x240)
+        self.cam_res_combo.setCurrentIndex(1)   # default QVGA (320x240)
         self.cam_res_combo.activated.connect(self._on_cam_res_changed)
         camrow.addWidget(self.cam_res_combo)
         camrow.addStretch(1)
@@ -403,13 +428,13 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.video, 1)
         splitter.addWidget(left)
 
-        # 右列：连接 + 仪表盘（只读）+ 急停
+        # Right column: connection + read-only dashboard + E-STOP
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.addWidget(self._build_conn_group())
         rv.addWidget(self._build_sensor_group())
-        # 急停（安全设施：Tab1 唯一命令按钮）
+        # E-STOP (safety feature: the only command button on Tab 1)
         self.btn_stop = QPushButton()
         self.btn_stop.setMinimumHeight(44)
         self.btn_stop.setObjectName("stopBtn")
@@ -468,7 +493,7 @@ class MainWindow(QMainWindow):
         self.lbl_imu = QLabel("—")
         self.lbl_ack = QLabel("—")
 
-        self._sensor_labels = []          # (QLabel 标题, tr key)，_retranslate 时刷新标题
+        self._sensor_labels = []          # (QLabel title, tr key); _retranslate refreshes
         r = 0
         for key, val in (("dist_front", self.lbl_dist_f), ("dist_left", self.lbl_dist_l),
                          ("dist_right", self.lbl_dist_r)):
@@ -485,19 +510,19 @@ class MainWindow(QMainWindow):
         t = QLabel(); grid.addWidget(t, r, 0); grid.addWidget(self.lbl_imu, r, 1, 1, 5)
         self._sensor_labels.append((t, "imu"))
         r += 1
-        # ACK 回显行
+        # ACK echo row
         t = QLabel(); grid.addWidget(t, r, 0); grid.addWidget(self.lbl_ack, r, 1, 1, 5)
         self._sensor_labels.append((t, "cmd_ack"))
         return g
 
-    # ---------------- Tab2：组员 IDE ----------------
+    # ---------------- Tab 2: team IDE ----------------
 
     def _build_tab2(self):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # 工具行：打开 / 保存 / 另存为 / 运行 / 停止 + 状态
+        # Toolbar: open / save / save-as / run / stop + status
         toolbar = QHBoxLayout()
         self.btn_open = QPushButton()
         self.btn_open.clicked.connect(self._on_open_script)
@@ -520,13 +545,14 @@ class MainWindow(QMainWindow):
         toolbar.addStretch(1)
         lay.addLayout(toolbar)
 
-        # 上：脚本编辑区（带行号 + 当前行高亮），预填默认代码
+        # Top: script editor (line numbers + current-line highlight), pre-filled
+        # with the default code
         self.ide_edit = CodeEditor()
         self.ide_edit.setFont(QFont("Consolas", 10))
         self.ide_edit.setPlainText(_DEFAULT_SCRIPT)
         lay.addWidget(self.ide_edit, 3)
 
-        # 下：左视频窗 / 右 shell + 控制台（含全局日志）
+        # Bottom: left video window / right shell + console (with global logs)
         lower = QSplitter(Qt.Horizontal)
         self.ide_video = VideoWidget()
         lower.addWidget(self.ide_video)
@@ -534,7 +560,7 @@ class MainWindow(QMainWindow):
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        # 统一控制台（shell 问答 + 脚本 stdout + 系统日志混流）+ 清空按钮
+        # Unified console (shell Q&A + script stdout + system logs) + clear button
         console_row = QHBoxLayout()
         self.lbl_script_console = QLabel()
         console_row.addWidget(self.lbl_script_console)
@@ -547,7 +573,7 @@ class MainWindow(QMainWindow):
         self.script_output = QPlainTextEdit()
         self.script_output.setReadOnly(True)
         rv.addWidget(self.script_output, 3)
-        # shell 输入行（回车执行；输入回显与结果进统一控制台）
+        # Shell input line (Enter to run; echo + result go to the console)
         shell_row = QHBoxLayout()
         self.lbl_shell_prompt = QLabel(">>> ")
         self.lbl_shell_prompt.setFont(QFont("Consolas", 10))
@@ -568,7 +594,7 @@ class MainWindow(QMainWindow):
     def _set_ide_status(self, text: str):
         self.lbl_ide_status.setText(text)
 
-    # ---------------- 文本（双语刷新） ----------------
+    # ---------------- Text (bilingual refresh) ----------------
 
     def _retranslate(self):
         self.setWindowTitle(tr("app_title"))
@@ -583,7 +609,8 @@ class MainWindow(QMainWindow):
         self.conn_status.setText(tr("conn_yes") if self.client.connected else tr("conn_no"))
         self.lbl_cam_res.setText(tr("cam_res"))
         self.btn_stop.setText(tr("btn_stop"))
-        # 顶部语言按钮：显示目标语言（当前 zh → "EN"，当前 en → "中文"）
+        # Top language button: shows the TARGET language (current zh -> "EN",
+        # current en -> "中文")
         self.lang_btn.setText("EN" if current_language() == "zh" else "中文")
         self.lbl_app.setText(tr("app_brand"))
 
@@ -594,7 +621,7 @@ class MainWindow(QMainWindow):
             self._spd_title[i].setText(tr("spd_col", i + 1))
             self._cur_title[i].setText(tr("cur_col", i + 1))
 
-        # Tab2 文本
+        # Tab 2 text
         self.btn_open.setText(tr("btn_open"))
         self.btn_save.setText(tr("btn_save"))
         self.btn_save_as.setText(tr("btn_save_as"))
@@ -604,26 +631,28 @@ class MainWindow(QMainWindow):
         self.ide_edit.setPlaceholderText(tr("ide_placeholder"))
         self.shell_input.setPlaceholderText(tr("shell_placeholder"))
         self.btn_console_clear.setText(tr("console_clear"))
-        self.video.update()    # 视频占位文本按新语言重绘
+        self.video.update()    # redraw the video placeholder in the new language
         self.ide_video.update()
-        self._update_file_label()   # 右上文件位置（默认代码状态随语言刷新）
-        if hasattr(self, "lbl_lock"):   # __init__ 里 _retranslate 先于 lbl_lock 创建
+        self._update_file_label()   # top-right file path (default-code state)
+        if hasattr(self, "lbl_lock"):   # _retranslate runs before lbl_lock is created
             self._set_lock_indicator(self._lock_val)
 
-    # ---------------- Tab 切换 ----------------
+    # ---------------- Tab switching ----------------
 
     def _on_tab_changed(self, idx: int):
         if idx == 1 and (self.client.connected or self._connecting):
             self._connect_cancel.set()
-            # 切到 IDE：自动断开 GUI 连接（单客户端规范），释放控制权给组员脚本
+            # Switching to the IDE auto-disconnects the GUI connection
+            # (single-client rule), releasing control to the team script.
             self.client.close()
             self._log(tr("log_tab2_disconn"))
             self._set_ide_status(tr("ide_ready"))
 
-    # ---------------- IDE 运行 ----------------
+    # ---------------- IDE execution ----------------
 
     def _ensure_sdk_path(self):
-        """把 sdk/ 加进 sys.path（组员脚本与 GUI 本体的 peo import 都依赖）。"""
+        """Add sdk/ to sys.path (both team scripts and the GUI's own peo
+        imports depend on it)."""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         sdk = os.path.join(root, "sdk")
         if sdk not in sys.path:
@@ -631,8 +660,9 @@ class MainWindow(QMainWindow):
         return sdk
 
     def _peo_env(self):
-        """构造脚本执行环境：注入 peo 模块（sdk 路径）——两种写法都支持：
-        `peo.drive_all(30)`（import peo 风格）与 `drive_all(30)`（from peo import * 风格）。"""
+        """Build the script execution environment: inject the peo module (sdk
+        path) so both styles work: `peo.drive_all(30)` (import peo) and
+        `drive_all(30)` (from peo import *)."""
         self._ensure_sdk_path()
         import peo
         env = {"__name__": "__main__", "peo": peo}
@@ -640,7 +670,8 @@ class MainWindow(QMainWindow):
         return env
 
     def _run_code_in_thread(self, code: str, out_q: queue.Queue):
-        """在独立线程 exec 脚本代码，stdout/stderr 流式重定向到队列（每次 write 即入队）。"""
+        """exec the script code on a separate thread, streaming stdout/stderr to
+        the queue (each write enqueues immediately)."""
         env = self._peo_env()
         relay = _StreamRelay(out_q)
         try:
@@ -650,7 +681,8 @@ class MainWindow(QMainWindow):
                 except SystemExit:
                     pass
                 except Exception as e:
-                    # 异常也进输出窗（组员在 IDE 控制台看到，不进终端）
+                    # Exceptions also go to the console (visible in the IDE
+                    # console, not the terminal).
                     relay.write(f"Traceback: {type(e).__name__}: {e}\n")
         finally:
             relay.flush()
@@ -671,7 +703,8 @@ class MainWindow(QMainWindow):
             self._log("✗ " + tr("log_open_fail") + str(e))
 
     def _on_save_script(self):
-        """保存：已关联路径 → 直接写回；未保存的默认代码 → 走另存为。"""
+        """Save: an associated path writes back in place; unsaved default code
+        falls through to Save As."""
         if not self._current_file:
             self._on_save_as_script()
             return
@@ -685,7 +718,7 @@ class MainWindow(QMainWindow):
             self._log("✗ " + tr("log_save_fail") + str(e))
 
     def _on_save_as_script(self):
-        """另存为：选路径保存并关联。"""
+        """Save As: choose a path, write, and associate it."""
         path, _ = QFileDialog.getSaveFileName(
             self, tr("dlg_save_as"), "script.py",
             "Python (*.py);;All Files (*)")
@@ -702,7 +735,8 @@ class MainWindow(QMainWindow):
             self._log("✗ " + tr("log_save_fail") + str(e))
 
     def _update_file_label(self):
-        """右上区域：显示当前脚本文件位置；未关联时提示默认代码状态。"""
+        """Top-right area: show the current script file path; when unassociated,
+        show the default-code status."""
         self.lbl_file_path.setText(
             self._current_file if self._current_file else tr("file_default"))
 
@@ -718,14 +752,14 @@ class MainWindow(QMainWindow):
             return
         if self.client.connected or self._connecting:
             self._connect_cancel.set()
-            self.client.close()   # 保险：脚本连接前 GUI 必须先断开
+            self.client.close()   # safety: GUI must disconnect before the script connects
 
         self._script_running = True
         self.btn_run.setEnabled(False)
         self.btn_stop_script.setEnabled(True)
         self._set_ide_status(tr("ide_running"))
         self.script_output.clear()
-        # 排空上次运行的残留输出（流式队列）
+        # Drain leftover output from the previous run (streaming queue)
         q = getattr(self, "_script_out_q", None)
         if q is not None:
             while True:
@@ -738,14 +772,15 @@ class MainWindow(QMainWindow):
         import peo as _peo
         _peo._clear_stop_flag()
 
-        self._script_out_q = queue.Queue(maxsize=256)   # 脚本线程流式输出 → 主线程 50ms drain
+        self._script_out_q = queue.Queue(maxsize=256)   # script thread output -> 50 ms drain
 
         def _runner():
             try:
                 self._run_code_in_thread(code, self._script_out_q)
             finally:
-                # 脚本结束（正常/停止/异常）→ 断开连接 + 释放单实例锁
-                # （单客户端规范：脚本不占着连接，下一脚本/GUI 可立即连）
+                # Script end (normal/stop/exception) -> disconnect + release the
+                # single-instance lease (single-client rule: the script does not
+                # hold the connection, the next script/GUI can connect at once).
                 self._ensure_sdk_path()
                 import peo as _peo
                 try:
@@ -753,7 +788,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self._sig_ide_status.emit(tr("ide_done"))
-                self._sig_script_finished.emit()   # 按钮状态回主线程恢复
+                self._sig_script_finished.emit()   # restore button state on main thread
 
         self._script_thread = threading.Thread(target=_runner, daemon=True,
                                                name="peo-script")
@@ -761,7 +796,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_script_finished(self):
-        """脚本线程结束（Qt 控件限主线程操作，按钮状态在此恢复）。"""
+        """Script thread done (Qt widgets must be touched only on the main
+        thread; button state is restored here)."""
         self._script_running = False
         self.btn_run.setEnabled(True)
         self.btn_stop_script.setEnabled(False)
@@ -769,20 +805,21 @@ class MainWindow(QMainWindow):
     def _on_stop_script(self):
         self._ensure_sdk_path()
         import peo as _peo
-        _peo._request_stop()      # 立即排入 STOP；后续 SDK 动作/等待抛 ScriptStopped
+        _peo._request_stop()      # queue STOP now; later SDK actions/waits raise ScriptStopped
         self._set_ide_status(tr("ide_stopping"))
 
-    # ---------------- shell REPL（真 REPL：InteractiveConsole） ----------------
+    # ---------------- shell REPL (true REPL: InteractiveConsole) ----------------
 
     def _start_shell(self):
-        """常驻 shell 线程：InteractiveConsole 有状态（变量持久），必须同一线程。"""
+        """Long-lived shell thread: InteractiveConsole is stateful (variables
+        persist), so it must stay on one thread."""
         if self._shell_started:
             return
         self._shell_started = True
         env = self._peo_env()
 
         def _write(data: str):
-            _enqueue_output(self._shell_out_q, data)   # 线程安全队列；主线程 QTimer drain 写控件
+            _enqueue_output(self._shell_out_q, data)   # thread-safe queue; main thread drains
 
         def _loop():
             console = _PeoConsole(env, _write)
@@ -796,10 +833,10 @@ class MainWindow(QMainWindow):
                 line = self._shell_q.get()
                 if line is None:
                     break
-                # 输入回显（带当前提示符）
+                # Input echo (with the current prompt)
                 _write(("... " if self._shell_more else ">>> ") + line + "\n")
                 try:
-                    more = console.push(line)   # 真 REPL 语义
+                    more = console.push(line)   # true REPL semantics
                 except SystemExit:
                     more = False
                 finally:
@@ -811,15 +848,16 @@ class MainWindow(QMainWindow):
         self._shell_thread.start()
 
     def _drain_shell_out(self):
-        """主线程周期 drain shell 输出队列 → 统一控制台（Qt 控件限主线程操作）。
-        同时把 shell 线程的续行标志同步到提示符标签。"""
+        """Main thread periodically drains the shell output queue into the
+        unified console (Qt widgets are main-thread only). Also syncs the shell
+        thread's continuation flag to the prompt label."""
         for _ in range(64):
             try:
                 data = self._shell_out_q.get_nowait()
             except queue.Empty:
                 break
             self._append_ide(self.script_output, data)
-        # 脚本流式输出也走同一 drain（脚本运行中 print 实时显示）
+        # Script streaming output uses the same drain (prints show live)
         q = getattr(self, "_script_out_q", None)
         if q is not None:
             chunks = []
@@ -841,9 +879,11 @@ class MainWindow(QMainWindow):
         text = self.shell_input.text()
         self.shell_input.clear()
         if not text.strip() and not self._shell_more_flag:
-            return   # 非续行模式空输入忽略；续行模式空行 = 结束多行块，放行
+            return   # empty input in normal mode is ignored; in continuation
+                     # mode an empty line ends the multi-line block
         self._start_shell()
-        # 历史：追加 + 重置游标（主线程维护，线程安全足够——deque 追加与 get 无并发写）
+        # History: append + reset cursor (main-thread only; deque append + get
+        # have no concurrent writer)
         self._shell_history.append(text)
         self._shell_hist_idx = None
         self._ensure_sdk_path()
@@ -872,14 +912,14 @@ class MainWindow(QMainWindow):
         self.shell_input.setText(self._shell_history[self._shell_hist_idx])
 
     def _shell_complete(self):
-        """Tab 补全：唯一匹配 → 补全；多个匹配 → 列出候选。"""
+        """Tab completion: a unique match completes; several matches are listed."""
         if self._shell_completer is None:
             return
         text = self.shell_input.text()
         pos = self.shell_input.cursorPosition()
         if not text or pos == 0:
             return
-        # 取光标前的"标识符.前缀"词
+        # Take the "identifier.prefix" word before the cursor
         i = pos - 1
         while i >= 0 and (text[i].isalnum() or text[i] in "_."):
             i -= 1
@@ -907,10 +947,11 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_ide_frame(self):
-        """主线程定时读取最新帧，跳过已显示/已知坏帧，限制解码频率。"""
+        """Main thread: read the latest frame, skip already-shown/known-bad
+        frames, and bound the decode rate."""
         if self._last_ide_show is not None and \
                 time.monotonic() - self._last_ide_show < _IDE_SHOW_MIN_S / 1.0:
-            return                            # 节流：等下个通知
+            return                            # throttled: wait for the next note
         try:
             self._ensure_sdk_path()
             import peo as _peo
@@ -919,30 +960,32 @@ class MainWindow(QMainWindow):
             return
         if jpeg is None:
             if self.ide_video._frame_id != -1:
-                self.ide_video.clear()      # 断连/off：回占位符
+                self.ide_video.clear()      # disconnected/off: back to placeholder
             return
         if seq == self._shown_seq or seq == self._bad_seq:
-            return                            # 已显示 / 已知坏帧
+            return                            # already shown / known bad
         img = QImage.fromData(jpeg, "JPEG")
         if img.isNull():
-            # QImage 严格模式拒绝 → cv2 宽容兜底：ESP32 偶发输出半截帧
-            # （熵数据写到一半但 EOI 齐全），cv2 能解出近乎完整的图像。
+            # QImage strict mode rejected it -> cv2 lenient fallback: the ESP32
+            # occasionally outputs a half frame (entropy cut short but EOI
+            # present); cv2 can still decode a nearly-complete image.
             img = self._cv2_decode_fallback(jpeg)
         if img is None or img.isNull():
-            self._bad_seq = seq               # 坏帧记 seq，只报一次
-            self._dump_bad_frame(jpeg, seq)   # 取证落盘（字节级分析用）
-            return                            # 保持上一帧（对齐 Tab1：坏帧无感）
+            self._bad_seq = seq               # record the bad seq, report once
+            self._dump_bad_frame(jpeg, seq)   # dump to disk (byte-level analysis)
+            return                            # keep the previous frame (like Tab 1)
         self._last_ide_show = time.monotonic()
         self._shown_seq = seq
         self.ide_video.show_image(seq, img)
 
     @staticmethod
     def _cv2_decode_fallback(jpeg: bytes):
-        """cv2 宽容解码兜底：截断帧（premature end）仍能出完整图。失败返回 None。
+        """cv2 lenient decode fallback: a truncated frame (premature end) can
+        still yield a complete image; returns None on failure.
 
-        解码期间重定向 stderr：libjpeg 的 premature end 警告吞掉——
-        Python 层警告进 sink 丢弃，C 层警告走 fd 2 归档 stderr.log，
-        任何可见输出（控制台/屏幕）都不再出现。
+        stderr is redirected during decoding: libjpeg's premature-end warning is
+        swallowed — Python-level warnings go to a sink, C-level warnings go to
+        fd 2 (archived in stderr.log); nothing visible (console/screen) remains.
         """
         try:
             import numpy as np
@@ -962,7 +1005,8 @@ class MainWindow(QMainWindow):
             return None
 
     def _dump_bad_frame(self, jpeg: bytes, seq: int) -> None:
-        """坏帧取证落盘（最多 8 个，最旧自动删）——字节级根因分析用。"""
+        """Dump a bad frame to disk for forensics (max 8, oldest deleted
+        first) — for byte-level root-cause analysis."""
         if getattr(self, "_bad_dump_count", 0) >= 8:
             return
         try:
@@ -977,7 +1021,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _pull_ide_video(self):
-        """Bounded 30Hz polling: render only the latest SDK frame, no Qt backlog."""
+        """Bounded 30 Hz polling: render only the latest SDK frame, no Qt
+        backlog."""
         try:
             self._ensure_sdk_path()
             import peo
@@ -991,10 +1036,10 @@ class MainWindow(QMainWindow):
             return
         self._on_ide_frame()
 
-    # ---------------- 槽（主线程） ----------------
+    # ---------------- Slots (main thread) ----------------
 
     def _on_shortcut_stop(self):
-        """空格急停；文本框聚焦时不触发。"""
+        """Space E-STOP; ignored while a text box has focus."""
         fw = QApplication.focusWidget()
         if isinstance(fw, (QLineEdit, QPlainTextEdit, QTextEdit)):
             return
@@ -1005,7 +1050,8 @@ class MainWindow(QMainWindow):
             self._log(tr("log_sc_stop"))
 
     def _on_cam_res_changed(self, idx: int):
-        """相机分辨率热切换：{"cmd":"CAM_RES","res":...}（ESP32-S3 本地命令）。"""
+        """Hot-switch camera resolution: {"cmd":"CAM_RES","res":...} (an
+        ESP32-S3 local command)."""
         if not 0 <= idx < len(_CAM_RESOLUTIONS):
             return
         disp, res = _CAM_RESOLUTIONS[idx]
@@ -1036,7 +1082,8 @@ class MainWindow(QMainWindow):
                     self._control_lease.release()
                     self._sig_conn.emit(False, "Connection cancelled")
                     return
-                # 这里只配置视频端口；点击开启视频后才真正连接 8890。
+                # Only the video PORT is configured here; 8890 is dialed after
+                # the user clicks Start Video.
                 self.client.connect(host, tcp_port=TCP_CMD_PORT, video_port=VIDEO_TCP_PORT)
                 self.client.wait_ready(1.0)
                 if cancel.is_set():
@@ -1061,7 +1108,8 @@ class MainWindow(QMainWindow):
             self.disconnect_btn.setEnabled(True)
             self.video_btn.setEnabled(True)
             self._log("✓ " + tr("log_conn_ok") + msg)
-            # 断开后配置回默认：连接成功即下发默认分辨率，与重置后的 UI 一致
+            # Reset config to default after disconnect: sending the default
+            # resolution on connect keeps the UI consistent after a reset.
             self.cam_res_combo.setCurrentIndex(1)          # QVGA
             if not self._send_json({"cmd": "CAM_RES", "res": "QVGA"}):
                 self._log(tr("log_cam_res").format("QVGA") + " (send failed)")
@@ -1085,8 +1133,8 @@ class MainWindow(QMainWindow):
         self.video_btn.setText(tr("btn_video_on"))
         with self._frame_mailbox_lock:
             self._frame_mailbox = None
-        self.video.clear()                        # 视频 → 占位
-        self._reset_sensor_placeholders()         # 仪表盘 → "—" 占位
+        self.video.clear()                        # video -> placeholder
+        self._reset_sensor_placeholders()         # dashboard -> "—" placeholders
         self._update_perf()
         self._log("✗ " + tr("log_disconn"))
 
@@ -1102,7 +1150,8 @@ class MainWindow(QMainWindow):
         self.video_btn.setText(tr("btn_video_off") if self._video_on else tr("btn_video_on"))
 
     def _reset_sensor_placeholders(self):
-        """断连后传感器仪表盘全部复位为占位符，清除旧会话残留数据。"""
+        """On disconnect, reset every sensor dashboard value to the placeholder
+        and clear stale session data."""
         for lbl in (self.lbl_dist_f, self.lbl_dist_l, self.lbl_dist_r):
             lbl.setText("—")
         for i in range(4):
@@ -1113,7 +1162,8 @@ class MainWindow(QMainWindow):
         self._set_lock_indicator(None)
 
     def _set_lock_indicator(self, lock_val):
-        """右下角锁状态指示：0=手操(绿)、1=自主(橙)、None=未知(灰)。"""
+        """Bottom-right lock badge: 0 = manual (green), 1 = autonomous (orange),
+        None = unknown (gray)."""
         self._lock_val = lock_val
         qss = ("QLabel {{ background-color: {}; color: {}; "
                "padding: 2px 8px; border-radius: 9px; font-weight: bold; }}")
@@ -1148,7 +1198,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_ack(self, ack: dict):
-        """ESP32 命令回执（PROTOCOL.md §2.1 ACK）。"""
+        """ESP32 command receipt (PROTOCOL.md §2.1 ACK)."""
         cmd = ack.get("ack", "?")
         status = ack.get("status", -1)
         self._log(f"{tr('log_ack')} {cmd} → "
@@ -1170,6 +1220,8 @@ class MainWindow(QMainWindow):
 
     @Slot(int, bytes)
     def _on_frame(self, frame_id: int, jpeg: bytes):
+        """True fps: only frames that decode and render count. QImage decoding
+        is the final check; bad frames never reach the video."""
         if not jpeg:
             with self._frame_mailbox_lock:
                 frame = self._frame_mailbox
@@ -1178,7 +1230,6 @@ class MainWindow(QMainWindow):
             if frame is None:
                 return
             frame_id, jpeg = frame
-        """真 fps：只统计能解码渲染的帧。QImage 解码做最终校验，坏帧不进视频。"""
         img = QImage.fromData(jpeg, "JPEG")
         if img.isNull():
             return
@@ -1187,7 +1238,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _append_log(self, text: str):
         self.script_output.appendPlainText(text.rstrip("\n"))
-        # 行数上限：超出自动裁剪最旧（滚动日志）
+        # Line cap: trim the oldest block once over the limit (scrolling log)
         doc = self.script_output.document()
         while doc.blockCount() > _MAX_LOG_BLOCKS:
             cur = QTextCursor(doc)
@@ -1201,16 +1252,16 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_clear_console(self):
-        """清空控制台日志。"""
+        """Clear the console log."""
         self.script_output.clear()
         self._log(tr("console_cleared"))
 
     def _on_lang_toggle(self):
-        """顶部双语按钮：zh ⇄ en 一键切换。"""
+        """Top bilingual button: one-click zh ⇄ en switch."""
         set_language("en" if current_language() == "zh" else "zh")
         self._retranslate()
 
-    # ============================ 发送 ============================
+    # ============================ Send ============================
 
     def _send_json(self, obj) -> bool:
         ok = self.client.send_json(obj)
@@ -1218,17 +1269,19 @@ class MainWindow(QMainWindow):
                    (tr("log_sent") if ok else tr("log_send_fail"))) + str(obj)[:80])
         return ok
 
-    # ============================ 性能 ============================
+    # ============================ Performance ============================
 
     def _update_perf(self):
-        """每秒刷新 CPU0/CPU1/RAM；来源为当前连接的 sensor.sys。"""
+        """Refresh CPU0/CPU1/RAM every second from the active connection's
+        sensor.sys."""
         if self.tabs.currentIndex() == 1:
             self._update_perf_ide()
             return
         self._show_sys_info(self.client.sys_info)
 
     def _show_sys_info(self, sys_info):
-        """两个 Tab 共用格式化；没有遥测时显示占位符，RAM 显示使用率。"""
+        """Shared formatting for both tabs; placeholders when no telemetry,
+        RAM shown as a usage percent."""
         sys_info = sys_info or {}
         cpu0, cpu1 = sys_info.get("cpu0"), sys_info.get("cpu1")
         cpu0_txt = "-" if cpu0 is None else f"{cpu0}%"
@@ -1242,7 +1295,8 @@ class MainWindow(QMainWindow):
             f"{tr('perf_ram')} {ram_txt}")
 
     def _update_perf_ide(self):
-        """Tab2 使用 SDK 连接的 sensor.sys（切换后 GUI 自身连接已关闭）。"""
+        """Tab 2 reads the SDK connection's sensor.sys (the GUI connection is
+        already closed after the tab switch)."""
         try:
             self._ensure_sdk_path()
             import peo

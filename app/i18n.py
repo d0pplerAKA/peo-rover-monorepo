@@ -1,10 +1,14 @@
 """
-app.i18n — 轻量双语支持（中文 / English），运行时切换，无需 Qt Linguist
+app.i18n - lightweight bilingual support (Chinese / English), switched at
+runtime without Qt Linguist.
 
-用法：
+Usage:
     from app.i18n import tr, set_language, current_language
-    label.setText(tr("btn_connect"))       # 按当前语言取文本
-    set_language("en"); window._retranslate()   # 切换语言后刷新 UI
+    label.setText(tr("btn_connect"))        # get text in the current language
+    set_language("en"); window._retranslate()   # refresh the UI after switching
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 T = {
     "zh": {
@@ -138,23 +142,40 @@ T = {
     },
 }
 
+# Selectable languages: (code, display name). The language button shows the
+# TARGET language, so this list doubles as its label source.
 LANG_NAMES = [("zh", "中文"), ("en", "English")]
 
-_current = "en"    # 默认英文（GUI 主要受众 = 国际组员；用户可一键切中文）
+_current = "en"    # Default English — the GUI's main audience is international
+                   # team members; anyone can switch to Chinese with one click.
 
 
 def set_language(lang: str):
-    """切换语言（"zh" / "en"），未知值忽略。"""
+    """Switch the active language ("zh" / "en"); unknown values are ignored.
+
+    Args:
+        lang: language code to switch to.
+    """
     global _current
     if lang in T:
         _current = lang
 
 
 def current_language() -> str:
+    """Return the currently active language code ("zh" or "en")."""
     return _current
 
 
 def tr(key: str, *args) -> str:
-    """取当前语言文本；key 缺失时原样返回（便于发现漏译）。"""
+    """Look up the text for the current language; a missing key returns the key
+    itself so untranslated entries are easy to spot.
+
+    Args:
+        key: translation dictionary key.
+        *args: optional format arguments applied to the template string.
+
+    Returns:
+        The localized string (formatted if args were given).
+    """
     s = T[_current].get(key, key)
     return s.format(*args) if args else s

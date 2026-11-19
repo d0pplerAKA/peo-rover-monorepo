@@ -1,4 +1,8 @@
-"""TCP client with bounded buffers and independent connection lifetimes."""
+"""TCP client with bounded buffers and independent connection lifetimes.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
+"""
 import json
 import logging
 import math
@@ -9,16 +13,19 @@ from collections import deque
 
 from .protocol import TCP_CMD_PORT, VIDEO_TCP_PORT, VIDEO_MAGIC, SensorData, VIDEO_REC
 
-HEARTBEAT_INTERVAL_S = 0.5
-MAX_JSON_LINE = 16384
-MAX_VIDEO_BYTES = 512 * 1024   # 单帧 JPEG 上限（定界头 4B 长度，超限即视为流错位）
+HEARTBEAT_INTERVAL_S = 0.5            # one-way safety heartbeat period (seconds)
+MAX_JSON_LINE = 16384                 # max bytes of a single JSON command line
+MAX_VIDEO_BYTES = 512 * 1024          # max bytes of one JPEG frame (the framing
+                                      # header carries a 4-byte length; anything
+                                      # larger is treated as stream corruption)
 _LOG = logging.getLogger(__name__)
 
 
 def jpeg_structure_ok(data: bytes) -> bool:
     """Check marker boundaries, SOF before SOS, scans and terminal EOI.
 
-    This is a structural guard, not an entropy decoder or an image validity proof.
+    This is a structural guard, not an entropy decoder or an image validity
+    proof.
     """
     if len(data) < 4 or data[:2] != b'\xff\xd8':
         return False
@@ -120,11 +127,31 @@ def _sensor_from_json(j: dict) -> SensorData:
 
 
 class _Session:
+    """Per-connection state bundle shared by the client's worker threads.
+
+    Attributes:
+        tcp: the command-channel socket.
+        video: the video-channel socket (None until video is requested).
+        video_port: TCP port the video channel connects to.
+        video_requested: True while VIDEO_ON is active.
+        video_revision: bumped on every OFF/ON transition so old in-flight
+            connects/reads are invalidated.
+        peer: the peer IP string (for the video channel to dial).
+        stop: set to end every worker thread for this session.
+        ready: set once a telemetry generation has been observed.
+        condition: guards pending/buffer state.
+        pending: outgoing byte chunks waiting to be sent (bounded deque).
+        generation: the current telemetry generation (None until first sensor).
+        blocked_generation: generation value ignored while a STOP is in flight.
+        stop_acks: count of successful S3 STOP ACKs received.
+        threads: worker threads owned by this session.
+    """
+
     def __init__(self, tcp, video_port):
         self.tcp, self.video = tcp, None
         self.video_port = video_port
         self.video_requested = False
-        self.video_revision = 0  # OFF/ON 切换使正在连接或读取的旧任务失效。
+        self.video_revision = 0  # OFF/ON transitions invalidate old in-flight tasks.
         self.peer = tcp.getpeername()[0]
         self.stop = threading.Event()
         self.ready = threading.Event()
@@ -137,11 +164,20 @@ class _Session:
 
 
 class RoverClient:
-    """Callbacks run on worker threads; callback errors cannot kill receivers.
+    """Asynchronous TCP client for commands, telemetry, and video.
 
+    Callbacks run on worker threads; callback errors cannot kill receivers.
     Queue acceptance is not an MCU execution acknowledgment. Normal commands
-    require a telemetry generation; STOP/安全心跳不依赖遥测代次。
+    require a telemetry generation; STOP and the safety heartbeat do not depend
+    on telemetry generation.
+
+    Attributes:
+        connected: True while a session is active and not stopped.
+        generation: the latest observed telemetry generation (or None).
+        sys_info: parsed S3 system stats {cpu0, cpu1, ram_free, ram_total}.
+        on_sensor / on_frame / on_ack / on_disconnected: user callbacks.
     """
+
     def __init__(self):
         self._state_lock = threading.RLock()
         self._connect_lock = threading.Lock()
@@ -156,20 +192,31 @@ class RoverClient:
 
     @property
     def connected(self):
+        """True while a session exists and its stop event is not set."""
         with self._state_lock:
             return self._session is not None and not self._session.stop.is_set()
 
     @property
     def generation(self):
+        """The latest observed telemetry generation (or None)."""
         return self._observed_gen
 
     def wait_ready(self, timeout=0.5):
+        """Block until a telemetry generation is ready (or timeout).
+
+        Args:
+            timeout: seconds to wait.
+
+        Returns:
+            True if the session became ready within the timeout.
+        """
         with self._state_lock:
             session = self._session
         return bool(session and session.ready.wait(timeout) and not session.stop.is_set())
 
     @staticmethod
     def _callback(callback, *args):
+        """Invoke a user callback; any exception is logged, never propagated."""
         if callback:
             try:
                 callback(*args)
@@ -178,6 +225,7 @@ class RoverClient:
 
     @staticmethod
     def _dispose(sock):
+        """Shutdown (to wake blocked reads) and close a socket, if any."""
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -186,10 +234,11 @@ class RoverClient:
             sock.close()
 
     def connect(self, host, tcp_port=TCP_CMD_PORT, video_port=VIDEO_TCP_PORT):
-        """只建立命令连接；VIDEO_ON 发出后才连接指定视频端口。
+        """Establish the command connection; the video port is dialed only after
+        VIDEO_ON is sent.
 
-        video_port=None 表示此会话禁用视频（VIDEO_ON 返回 False）。
-        视频线程空闲时阻塞等待，不建立 TCP，也不进行超时重连。
+        video_port=None disables video for this session (VIDEO_ON returns
+        False). The video thread blocks idle without opening TCP or retrying.
         """
         with self._connect_lock:
             self.close()
@@ -221,6 +270,8 @@ class RoverClient:
                 raise ConnectionError(f'Connection failed: {exc}') from exc
 
     def _close_session(self, session):
+        """Tear down a session: clear state, wake waiters, close sockets, then
+        emit on_disconnected before a new session can be installed."""
         with self._state_lock:
             if self._session is not session:
                 return
@@ -239,6 +290,8 @@ class RoverClient:
             self._callback(self.on_disconnected)
 
     def close(self):
+        """Close the current session and cancel any in-flight connect, then join
+        the worker threads (best-effort, bounded timeout)."""
         with self._state_lock:
             self._epoch += 1  # also cancels an in-flight connect
             session = self._session
@@ -251,6 +304,21 @@ class RoverClient:
                     thread.join(timeout=0.6)
 
     def send_json_batch(self, objects, *, expected_session=None):
+        """Queue one batch of up to four JSON commands atomically.
+
+        STOP_ALL must be sent alone (it clears the queue and invalidates the
+        current generation). Non-heartbeat commands require a known generation
+        and get `gen` attached automatically.
+
+        Args:
+            objects: list of command dicts.
+            expected_session: if set, the batch is dropped unless it targets
+                this exact session.
+
+        Returns:
+            True if the batch was queued (or trivially empty), False if the
+            queue is full / no generation / wrong session.
+        """
         if len(objects) > 4:
             raise ValueError("At most four commands per batch")
         with self._state_lock:
@@ -296,9 +364,11 @@ class RoverClient:
             return True
 
     def send_json(self, obj):
+        """Queue a single JSON command (convenience over send_json_batch)."""
         return self.send_json_batch([obj])
 
     def stop_all(self):
+        """Queue a priority STOP_ALL."""
         return self.send_json({'cmd': 'STOP_ALL'})
 
     def stop_and_wait(self, timeout=0.3, attempts=2):
@@ -325,30 +395,39 @@ class RoverClient:
             return False
 
     def video_on(self):
+        """Request video streaming (VIDEO_ON)."""
         return self.send_json({'cmd': 'VIDEO_ON'})
 
     def video_off(self):
+        """Request video streaming to stop (VIDEO_OFF)."""
         return self.send_json({'cmd': 'VIDEO_OFF'})
 
     def reset_odometer(self):
+        """Reset the four wheel odometers (ODOMETER_RESET)."""
         return self.send_json({'cmd': 'ODOMETER_RESET'})
 
     def sys_reset(self):
+        """Soft-reset the F407 (SYS_RESET)."""
         return self.send_json({'cmd': 'SYS_RESET'})
 
     def led_toggle(self):
+        """Toggle the onboard LED (LED_TOGGLE)."""
         return self.send_json({'cmd': 'LED_TOGGLE'})
 
     def led_on(self):
+        """Turn the onboard LED on (LED_ON)."""
         return self.send_json({'cmd': 'LED_ON'})
 
     def led_off(self):
+        """Turn the onboard LED off (LED_OFF)."""
         return self.send_json({'cmd': 'LED_OFF'})
 
     def motor(self, motor, speed):
+        """Open-loop motor command (MOTOR): motor index + per-mille speed."""
         return self.send_json({'cmd': 'MOTOR', 'motor': motor, 'speed': speed})
 
     def _sender_loop(self, session):
+        """Send thread: drains the pending queue with a blocking sendall."""
         try:
             while not session.stop.is_set():
                 with session.condition:
@@ -357,9 +436,11 @@ class RoverClient:
                         return
                     data = session.pending.popleft()
                 session.tcp.sendall(data)  # at most one committed batch may precede STOP
-                # 跟随真正发出的命令更新视频需求，而非仅跟随入队：STOP 可能清掉
-                # 未发送的 VIDEO_ON，不能因此留下没有视频流的永久重连任务。
-                # GUI、SDK、原始 JSON 共用此处；不增加任何往返或 ACK 等待。
+                # Track video demand from what was actually SENT, not merely
+                # queued: a STOP may clear an un-sent VIDEO_ON, which must not
+                # leave a permanent reconnect task with no video stream.
+                # GUI, SDK, and raw JSON share this path; no extra round-trips
+                # or ACK waits are added.
                 with self._state_lock:
                     if self._session is not session:
                         return
@@ -375,7 +456,7 @@ class RoverClient:
                             session.video_requested = requested
                             session.video_revision += 1
                             if not requested:
-                                self._dispose(session.video)  # 打断阻塞 recv。
+                                self._dispose(session.video)  # interrupt a blocked recv.
                                 session.video = self._video = None
                             session.condition.notify_all()
         except OSError:
@@ -384,6 +465,7 @@ class RoverClient:
             self._close_session(session)
 
     def _tcp_loop(self, session):
+        """Command-channel receive thread: newline-delimited JSON lines."""
         buf = bytearray()
         try:
             while not session.stop.is_set():
@@ -416,6 +498,7 @@ class RoverClient:
             self._close_session(session)
 
     def _dispatch(self, obj, session=None):
+        """Route one parsed JSON object to ACK handling or sensor handling."""
         with self._state_lock:
             session = session or self._session
             if session is None or self._session is not session:
@@ -440,18 +523,20 @@ class RoverClient:
                 self._callback(self.on_sensor, sensor)
 
     def _heartbeat_loop(self, session):
+        """One-way safety heartbeat: keeps the S3 watchdog alive. No ACK, no
+        timestamp, no RTT measurement, and it never restores motion."""
         while not session.stop.wait(HEARTBEAT_INTERVAL_S):
             with self._state_lock:
                 if self._session is not session:
                     return
-                # 单向安全续期：不回 ACK、不携带时间戳、不测 RTT，也不恢复运动。
                 if not self.send_json_batch([{'type': 'heartbeat'}], expected_session=session):
                     self._close_session(session)
                     return
 
     @staticmethod
     def _recv_exact(sock, length):
-        """读满 length 字节；超时/EOF/错误返回 None（TCP 帧边界不可妥协）。"""
+        """Read exactly length bytes; timeout/EOF/error returns None (TCP frame
+        boundaries are non-negotiable)."""
         parts = []
         remaining = length
         try:
@@ -466,10 +551,12 @@ class RoverClient:
         return b''.join(parts)
 
     def _video_loop(self, session):
-        """按需接收 12B 定界头和 JPEG；只有视频开启时才进行 5s 超时/2s 重连。
+        """On-demand video receiver: 8-byte framing header + JPEG body, with a
+        5 s read timeout and 2 s reconnect backoff, only while video is on.
 
-        每次 ON/OFF 使用独立 revision。关闭/重新开启期间完成的旧连接或旧帧
-        均丢弃，防止旧工作覆盖新 socket；重连始终使用本会话指定的视频端口。
+        Every ON/OFF uses its own revision; an old connection or old frame that
+        finishes during an off/re-on is dropped so it can never overwrite a new
+        socket. Reconnects always dial this session's video port.
         """
         while not session.stop.is_set():
             with session.condition:
@@ -496,7 +583,7 @@ class RoverClient:
                         break
                     magic, fid, length = VIDEO_REC.unpack(hdr)
                     if magic != VIDEO_MAGIC or not 1 <= length <= MAX_VIDEO_BYTES:
-                        break  # 定界错位不能继续复用字节流，关闭后重连。
+                        break  # framing lost sync: cannot reuse the stream, reconnect.
                     body = self._recv_exact(sock, length)
                     if body is None:
                         break
@@ -504,12 +591,13 @@ class RoverClient:
                         if (self._session is not session or not session.video_requested
                                 or session.video_revision != revision):
                             break
-                        # 结构守卫保留：缺 SOF/SOS/EOI 等坏帧绝不送入解码器。
+                        # Keep the structural guard: frames missing SOF/SOS/EOI
+                        # must never reach a decoder.
                         if not jpeg_structure_ok(body):
                             continue
                         self._callback(self.on_frame, fid, body)
             except OSError:
-                pass  # 视频失败不影响命令/遥测通道。
+                pass  # video failure must not affect the command/telemetry channel.
             finally:
                 with self._state_lock:
                     if session.video is sock:
@@ -517,7 +605,8 @@ class RoverClient:
                         if self._session is session:
                             self._video = None
                     self._dispose(sock)
-            # OFF、断连和下一次 ON 都可立即打断退避；关闭期间不会再连接。
+            # OFF, disconnect, and the next ON can all interrupt the backoff
+            # immediately; nothing reconnects while video is off.
             with session.condition:
                 session.condition.wait_for(
                     lambda: session.stop.is_set() or not session.video_requested

@@ -2,6 +2,9 @@
 
 Use this file directly to run only regressions. No vehicle, real sockets or user
 configuration are used. GUI checks run offscreen when PySide6 is installed.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import importlib.util
 import json
@@ -23,11 +26,13 @@ from rover_comm.protocol import SensorData, VIDEO_REC, VIDEO_MAGIC, TCP_CMD_PORT
 import peo
 from peo._bridge import _Bridge, _stop_requested
 
+# A minimal but structurally valid JPEG used by the frame/framing tests.
 JPEG = (b'\xff\xd8\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00'
         b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00abc\xff\xd9')
 
 
 def eventually(predicate, timeout=1.5):
+    """Poll predicate() every 5 ms until it is truthy or the deadline passes."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -37,6 +42,17 @@ def eventually(predicate, timeout=1.5):
 
 
 class FakeTCP:
+    """A socket stand-in for the command channel: records what is sent and
+    feeds received JSON lines from an internal queue.
+
+    Attributes:
+        rx: queue of byte chunks to return from recv().
+        sent: list of parsed JSON objects that were sent via sendall().
+        closed: True after shutdown/close.
+        stop_ack: when True, auto-feed a STOP_ALL ACK on receiving STOP_ALL.
+        block: optional threading.Event that stalls sendall() until set.
+    """
+
     def __init__(self, stop_ack=False):
         self.rx, self.sent = queue.Queue(), []
         self.closed = False
@@ -48,6 +64,7 @@ class FakeTCP:
     def getpeername(self): return ('192.168.4.1', 8888)
 
     def feed(self, obj):
+        """Enqueue one JSON object as a newline-terminated line."""
         self.rx.put(json.dumps(obj).encode() + b'\n')
 
     def recv(self, size):
@@ -78,7 +95,10 @@ class FakeTCP:
 
 
 class FakeVideo(FakeTCP):
-    """支持任意分片和阻塞读；关闭或注入异常可打断读取，无真实网络。"""
+    """A socket stand-in for the video channel: supports arbitrary framing and
+    blocking reads; close or an injected exception can interrupt reads, with no
+    real network."""
+
     def __init__(self):
         super().__init__()
         self.buffer = b''
@@ -95,12 +115,15 @@ class FakeVideo(FakeTCP):
         return result
 
     def frame(self, fid, body=JPEG):
+        """Enqueue one framed video record, split into 3-byte chunks."""
         record = VIDEO_REC.pack(VIDEO_MAGIC, fid, len(body)) + body
         for i in range(0, len(record), 3):
             self.rx.put(record[i:i + 3])
 
 
 class ClientTests(unittest.TestCase):
+    """Failure-path tests for RoverClient (all offline, mocked sockets)."""
+
     def setUp(self):
         self.client = RoverClient()
 
@@ -108,6 +131,7 @@ class ClientTests(unittest.TestCase):
         self.client.close()
 
     def connect(self, tcp=None, gen=7):
+        """Patch create_connection, connect, then feed a sensor with `gen`."""
         tcp = tcp or FakeTCP()
         with patch('rover_comm.client.socket.create_connection', return_value=tcp):
             self.client.connect('test', video_port=None)
@@ -117,14 +141,16 @@ class ClientTests(unittest.TestCase):
         return tcp
 
     def test_one_way_heartbeat_preserves_watchdog_without_ping(self):
+        """The heartbeat keeps the watchdog alive without any PING command."""
         tcp = self.connect()
         self.assertTrue(eventually(lambda: {'type': 'heartbeat'} in tcp.sent))
         self.assertFalse(any(o.get('cmd') == 'PING' for o in tcp.sent))
         self.assertFalse(hasattr(self.client, 'ping'))
         self.assertFalse(hasattr(self.client, 'last_rtt_ms'))
-        self.assertTrue(self.client.connected)  # 无需任何心跳 ACK。
+        self.assertTrue(self.client.connected)  # no heartbeat ACK is required.
 
     def test_stop_bypasses_full_queue_and_invalidates_old_work(self):
+        """STOP clears a full queue and invalidates the previous generation."""
         tcp = self.connect()
         session = self.client._session
         with self.client._state_lock, session.condition:
@@ -143,6 +169,7 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(self.client.send_json({'cmd': 'MOTOR'}))
 
     def test_stop_requires_new_matching_ack_not_old_success(self):
+        """A fresh S3 ACK is required; an old success does not count."""
         tcp = self.connect()
         tcp.feed({'type': 'sensor', 'gen': 7, 'cmd_ack': {'id': 3, 'status': 0}})
         tcp.feed({'ack': 'STOP_ALL', 'status': 0})
@@ -152,6 +179,7 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(self.client.stop_and_wait(timeout=0.5))
 
     def test_reconnect_has_no_old_workers_queue_or_generation(self):
+        """Reconnecting resets generation and the old workers do not leak."""
         old_tcp = self.connect()
         old = self.client._session
         new_tcp = self.connect(gen=None)
@@ -164,6 +192,7 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(old_tcp.closed)
 
     def test_malformed_json_and_telemetry_do_not_kill_rx(self):
+        """Bad JSON and malformed telemetry never kill the receive loop."""
         tcp = self.connect()
         received = []
         self.client.on_sensor = received.append
@@ -174,11 +203,13 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(self.client.connected)
 
     def test_unterminated_oversized_json_closes_connection(self):
+        """An oversized unterminated line closes the connection."""
         tcp = self.connect()
         tcp.rx.put(b'x' * 16385)
         self.assertTrue(eventually(lambda: not self.client.connected))
 
     def test_callback_exception_is_contained(self):
+        """A user callback exception is logged but never breaks the session."""
         tcp = self.connect()
         self.client.on_sensor = Mock(side_effect=RuntimeError('callback failure'))
         with self.assertLogs('rover_comm.client', level='ERROR'):
@@ -187,6 +218,7 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(self.client.connected)
 
     def test_batch_is_all_or_none_and_disallows_nan(self):
+        """Batches are atomic; NaN and >4 commands are rejected."""
         self.connect()
         self.assertFalse(self.client.send_json_batch([{'cmd': 'PID'}], expected_session=object()))
         with self.assertRaises(ValueError):
@@ -195,7 +227,8 @@ class ClientTests(unittest.TestCase):
             self.client.send_json_batch([{'cmd': 'PID'}] * 5)
 
     def test_video_connect_failure_keeps_command_channel(self):
-        """开启视频后连接失败不致命；OFF 可打断退避并阻止重连。"""
+        """A video dial failure is non-fatal; OFF interrupts backoff and blocks
+        reconnect."""
         tcp = FakeTCP()
         attempts = []
 
@@ -220,6 +253,7 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(tcp.closed)
 
     def test_close_cancels_inflight_connect(self):
+        """close() cancels a connect that is still waiting to return."""
         entered, release = threading.Event(), threading.Event()
         tcp = FakeTCP()
         errors = []
@@ -244,7 +278,8 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(tcp.closed)
 
     def test_idle_default_connection_never_opens_video(self):
-        """跨过旧的 5s 超时 + 2s 重连周期，命令连接仍保持且从未拨号视频。"""
+        """Across the old 5 s timeout + 2 s reconnect cycle, the command link
+        stays up and video is never dialed."""
         tcp = FakeTCP()
         with patch('rover_comm.client.socket.create_connection', return_value=tcp) as create:
             self.client.connect('test')
@@ -254,6 +289,7 @@ class ClientTests(unittest.TestCase):
             self.assertIsNone(self.client._video)
 
     def test_none_disables_video_and_failed_batch_does_not_enable_it(self):
+        """video_port=None disables video and no video worker is spawned."""
         self.connect()
         self.assertFalse(self.client.video_on())
         self.assertTrue(self.client.video_off())
@@ -261,10 +297,11 @@ class ClientTests(unittest.TestCase):
         self.assertFalse(any(t.name == 'rover-video' for t in self.client._session.threads))
 
     def test_video_queue_rejection_leaves_demand_unchanged(self):
+        """When the queue rejects VIDEO_ON, video demand must stay off."""
         tcp = FakeTCP()
         with patch('rover_comm.client.socket.create_connection', return_value=tcp) as create:
             self.client.connect('test')
-            self.assertFalse(self.client.video_on())  # 尚无遥测代次。
+            self.assertFalse(self.client.video_on())  # no telemetry generation yet.
             tcp.feed({'type': 'sensor', 'gen': 7})
             self.assertTrue(self.client.wait_ready(1))
             with self.client._state_lock, self.client._session.condition:
@@ -275,7 +312,8 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(create.call_count, 1)
 
     def test_stop_cancels_queued_video_on_without_opening_video(self):
-        """STOP 清掉尚未发送的 VIDEO_ON 时，接收线程不能残留视频需求。"""
+        """A STOP that clears an un-sent VIDEO_ON must not leave a lingering
+        video demand on the receiver thread."""
         tcp = FakeTCP()
         with patch('rover_comm.client.socket.create_connection', return_value=tcp) as create:
             self.client.connect('test')
@@ -291,7 +329,8 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(create.call_count, 1)
 
     def test_video_custom_port_guard_off_on_and_retry(self):
-        """SDK/GUI 的原始 JSON 和便捷 API 共享按需生命周期，坏 JPEG 仍拦截。"""
+        """SDK/GUI raw JSON and convenience APIs share the on-demand lifecycle;
+        bad JPEGs are still blocked."""
         tcp, first, second = FakeTCP(), FakeVideo(), FakeVideo()
         frames, calls = [], []
         self.client.on_frame = lambda fid, body: frames.append(fid)
@@ -308,7 +347,7 @@ class ClientTests(unittest.TestCase):
             first.frame(1, b'\xff\xd8\xff\xd9')
             first.frame(2)
             self.assertTrue(eventually(lambda: frames == [2]))
-            self.assertTrue(self.client.video_on())  # 重复 ON 不创建第二连接。
+            self.assertTrue(self.client.video_on())  # repeated ON does not open a 2nd link.
             self.assertEqual(len(calls), 2)
             first.rx.put(OSError('read timeout'))
             self.assertTrue(eventually(lambda: first.closed))
@@ -322,7 +361,8 @@ class ClientTests(unittest.TestCase):
             self.assertFalse(hasattr(self.client, 'video_stats'))
 
     def test_off_on_discards_inflight_video_connect(self):
-        """OFF/ON 发生在 connect 未返回时，旧 socket 必须关闭且不能覆盖新连接。"""
+        """An OFF/ON during an in-flight video connect must close the old socket
+        and never let it overwrite the new connection."""
         tcp, old_video, new_video = FakeTCP(), FakeVideo(), FakeVideo()
         entered, release = threading.Event(), threading.Event()
         attempts = []
@@ -357,7 +397,8 @@ class ClientTests(unittest.TestCase):
                 release.set()
 
     def test_bad_video_headers_and_partial_frame_close_only_video(self):
-        """错 magic、非法长度、半帧 EOF 都不能污染下一条记录或断开控制链路。"""
+        """A bad magic, illegal length, or half-frame EOF must never pollute the
+        next record or break the command channel."""
         records = [VIDEO_REC.pack(0, 1, 4),
                    VIDEO_REC.pack(VIDEO_MAGIC, 1, 0),
                    VIDEO_REC.pack(VIDEO_MAGIC, 1, MAX_VIDEO_BYTES + 1),
@@ -382,8 +423,11 @@ class ClientTests(unittest.TestCase):
 
 
 class VideoTests(unittest.TestCase):
+    """Framing and marker-guard tests for the video channel."""
+
     def test_record_framing_roundtrip(self):
-        """TCP 视频定界：8B 头 magic+fid+len（大端）→ JPEG 体（TCP 自带校验）。"""
+        """TCP video framing: 8-byte header magic+fid+len (big-endian) -> JPEG
+        body (TCP supplies integrity)."""
         magic, fid, body = VIDEO_MAGIC, 7, JPEG
         record = VIDEO_REC.pack(magic, fid, len(body)) + body
         self.assertEqual(len(record), 8 + len(body))
@@ -393,6 +437,7 @@ class VideoTests(unittest.TestCase):
         self.assertTrue(1 <= n <= MAX_VIDEO_BYTES)
 
     def test_marker_guard_requires_sof_and_checks_multiscan(self):
+        """The marker guard requires SOF and validates multi-scan structure."""
         self.assertTrue(jpeg_structure_ok(JPEG))
         self.assertFalse(jpeg_structure_ok(b'\xff\xd8' + JPEG[15:]))
         self.assertFalse(jpeg_structure_ok(JPEG + b'junk'))
@@ -400,6 +445,7 @@ class VideoTests(unittest.TestCase):
         self.assertTrue(jpeg_structure_ok(JPEG[:-2] + JPEG[15:]))
 
     def test_missing_distance_is_invalid_and_bad_vectors_rejected(self):
+        """Missing distances are marked invalid and malformed vectors raise."""
         self.assertNotEqual(_sensor_from_json({}).dist_front_status, 0)
         for bad in ({'imu': None}, {'imu': {'quat': [1]}}, {'wheels': {'odometer': [0, 0, 0, None]}}):
             with self.assertRaises(ValueError):
@@ -407,6 +453,8 @@ class VideoTests(unittest.TestCase):
 
 
 class SDKTests(unittest.TestCase):
+    """Offline tests for the peo SDK actions (mocked client)."""
+
     def setUp(self):
         _stop_requested.clear()
         self.temp = tempfile.TemporaryDirectory()
@@ -431,6 +479,7 @@ class SDKTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_public_fresh_is_bool_and_honors_s3_stale(self):
+        """peo.fresh is a bool and honors the S3 link_stale flag."""
         peo._bridge._on_sensor(SensorData())
         self.assertIs(peo.fresh, True)
         peo._bridge._on_sensor(SensorData(link_stale=True))
@@ -440,6 +489,7 @@ class SDKTests(unittest.TestCase):
         self.assertIsNone(peo.vl53.front_mm)
 
     def test_stop_is_callable_after_cancel_and_timeout_is_visible(self):
+        """stop() stays callable after cancellation and surfaces a timeout."""
         peo._request_stop()
         self.fake.stop_all.assert_called_once()
         peo.stop()
@@ -450,6 +500,7 @@ class SDKTests(unittest.TestCase):
             peo.drive_all(20)
 
     def test_repeated_targets_are_resent_and_all_validated_first(self):
+        """Repeated targets are re-sent, and the whole batch is validated first."""
         peo.drive_all(20)
         peo.stop()
         peo.drive_all(20)
@@ -460,6 +511,7 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(self.fake.send_json_batch.call_count, 2)
 
     def test_camera_zero_timeout_stale_and_off_reset(self):
+        """read_raw(0) respects staleness and off() resets the mailbox."""
         peo.cam.on()
         peo.cam._on_frame(1, JPEG)
         self.assertEqual(peo.cam.read_raw(0), (JPEG, 1))
@@ -471,6 +523,7 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(peo.cam.read_raw(0), (None, -1))
 
     def test_reject_bad_led_pid_and_resolution(self):
+        """Invalid LED colors, PID values, and resolutions are rejected."""
         for color in ((256, 0, 0), (True, 0, 0), (1.5, 0, 0)):
             with self.assertRaises(ValueError): peo.ws2812(*color)
         with self.assertRaises(ValueError): peo.ws2812(1, 2, 3, 356)
@@ -480,6 +533,7 @@ class SDKTests(unittest.TestCase):
         self.fake.send_json.assert_not_called()
 
     def test_failed_connect_and_passive_disconnect_release_lease(self):
+        """A failed connect and a passive disconnect both release the lease."""
         bridge = _Bridge()
         bridge.client = Mock(connected=False)
         bridge.client.connect.side_effect = ConnectionError('offline')
@@ -493,6 +547,7 @@ class SDKTests(unittest.TestCase):
         self.assertFalse(bridge.fresh)
 
     def test_config_corruption_and_tick_reset(self):
+        """Corrupt config files load empty; a tick reset clears the recovery flag."""
         bridge = _Bridge()
         Path(bridge._config_path()).write_text('[]')
         bridge._load_config()
@@ -503,6 +558,7 @@ class SDKTests(unittest.TestCase):
         self.assertFalse(bridge._recovered)
 
     def test_config_monitor_reapplies_after_stale_recovery(self):
+        """The config monitor re-applies PID/resolution after stale recovery."""
         bridge = _Bridge()
         bridge.client = Mock(connected=True)
         bridge.client.send_json_batch.return_value = True
@@ -522,6 +578,7 @@ class SDKTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec('cv2') and importlib.util.find_spec('numpy'),
                          'vision dependencies unavailable')
     def test_small_real_jpeg_decode_is_cached_but_copies_are_independent(self):
+        """A real JPEG decode is cached but returned copies are independent."""
         import cv2
         import numpy as np
         ok, data = cv2.imencode('.jpg', np.zeros((120, 160, 3), dtype=np.uint8))
@@ -542,6 +599,8 @@ class SDKTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('PySide6'), 'GUI dependencies unavailable')
 class GUITests(unittest.TestCase):
+    """Headless GUI mechanics tests (offscreen platform)."""
+
     @classmethod
     def setUpClass(cls):
         from PySide6.QtWidgets import QApplication
@@ -557,6 +616,7 @@ class GUITests(unittest.TestCase):
         _stop_requested.clear()
 
     def test_shell_busy_prevents_script_and_completion_uses_whole_matches(self):
+        """A busy shell blocks script start; completion uses whole matches."""
         win = self.window
         win.ide_edit.setPlainText('pass')
         win._shell_busy.set()
@@ -570,6 +630,7 @@ class GUITests(unittest.TestCase):
         self.assertEqual(win.shell_input.text(), 'print(')
 
     def test_output_queue_is_bounded_and_drain_has_budget(self):
+        """The output queue is bounded and a drain call has a fixed budget."""
         from app.gui import _StreamRelay
         win = self.window
         relay = _StreamRelay(win._shell_out_q)
@@ -580,6 +641,7 @@ class GUITests(unittest.TestCase):
         self.assertEqual(win._shell_out_q.qsize(), before - 64)
 
     def test_video_mailbox_coalesces_notifications(self):
+        """The frame mailbox coalesces many notifications into one."""
         win = self.window
         def producer():
             for i in range(100): win._queue_frame(i, JPEG)

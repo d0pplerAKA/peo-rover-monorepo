@@ -1,13 +1,20 @@
 """
-PEO Rover 上位机入口
-运行：python -m app.main  或  python app/main.py（两种都支持）
+app.main - PEO Rover ground-station entry point.
+
+Run either way:
+    python -m app.main
+    python app/main.py
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import os
 import sys
 
-# 兼容直接运行本文件（VS Code ▶ 按钮 / python app/main.py）：
-# 此时 __package__ 为 None，sys.path[0] 是 app/ 目录而非项目根，
-# 把项目根手动插到 sys.path 开头，from app.gui import ... 才能解析。
+# Support running this file directly (VS Code ▶ button / python app/main.py):
+# in that case __package__ is None and sys.path[0] is the app/ directory, not
+# the project root, so we prepend the project root to make `from app.gui ...`
+# resolvable.
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,22 +25,28 @@ from app.gui import MainWindow
 
 
 def _qt_message_filter(mode, ctx, msg: str):
-    """兜底静默 Qt 图像解码噪音：坏帧已在组装层（SOI/EOI 守卫）与
-    GUI 层（字节预检 + isNull）拦截，此处滤掉漏网报错防 stderr 刷屏。"""
+    """Silence Qt image-decoding noise as a last resort: bad frames are already
+    blocked at the assembly layer (SOI/EOI guard) and the GUI layer (byte pre-
+    check + isNull); this filters any remaining reports to avoid stderr spam."""
     if msg.startswith("qt.gui.imageio."):
         return
     sys.stderr.write(msg + "\n")
 
 
-_STDERR_LOG = None   # 模块级持有文件对象：防止 GC 关闭导致 fd 2 悬空（EBADF）
+_STDERR_LOG = None   # held at module level: prevents the GC from closing the
+                     # file object and leaving fd 2 dangling (EBADF)
 
 
 def _redirect_c_stderr() -> None:
-    """libjpeg 的解码警告直接 fprintf(stderr)（C 运行时句柄），Python 层
-    替换 sys.stderr 拦不住。OS 级把 fd 2 重定向到项目根 stderr.log：
-    不刷用户屏幕、错误可回溯；GUI 自身日志走 Qt 消息系统不受影响。
+    """Redirect fd 2 to stderr.log at the project root.
 
-    文件对象必须模块级持有，否则 GC 关闭 → fd 2 悬空 → EBADF 刷屏。
+    libjpeg writes its decode warnings with fprintf(stderr) (a C runtime
+    handle), which replacing sys.stderr in Python cannot intercept. Redirecting
+    at the OS level keeps the user's screen clean while the errors remain
+    traceable; GUI logging through the Qt message system is unaffected.
+
+    The file object must be held at module level, otherwise the GC closes it
+    and fd 2 dangles (spamming EBADF).
     """
     global _STDERR_LOG
     log_path = os.path.join(
@@ -43,7 +56,7 @@ def _redirect_c_stderr() -> None:
         _STDERR_LOG = open(log_path, "a", encoding="utf-8", buffering=1)
         os.dup2(_STDERR_LOG.fileno(), 2)
     except OSError:
-        pass   # 重定向失败不阻止启动
+        pass   # a redirect failure must not prevent startup
 
 
 def main():
@@ -59,6 +72,7 @@ if __name__ == "__main__":
     main()
 
 
+# Kept example snippet (a plain string expression at module level — inert):
 '''
 import peo
 peo.connect()

@@ -1,4 +1,9 @@
-"""SDK 冒烟测试（离线：不连真车，验证 API 结构与内部机制）。"""
+"""sdk_test - SDK smoke test (offline: no real vehicle; verifies the API
+structure and internal mechanics).
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
+"""
 import os
 import sys
 import tempfile
@@ -8,13 +13,13 @@ atexit.register(_test_config.cleanup)
 os.environ["PEO_CONFIG_PATH"] = os.path.join(_test_config.name, "config.json")
 
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, _root)                          # rover_comm 所在工程根
-sys.path.insert(0, os.path.join(_root, "sdk"))     # peo 包
+sys.path.insert(0, _root)                          # project root (rover_comm)
+sys.path.insert(0, os.path.join(_root, "sdk"))     # peo package
 
 import peo
 from peo import ScriptStopped, NotConnected, CamOff
 
-# 1) 模块结构与命名空间
+# 1) module structure and namespaces
 assert hasattr(peo, "connect") and hasattr(peo, "delay")
 for ns in ("mpu", "vl53", "wheels", "sys", "cam"):
     assert hasattr(peo, ns), f"缺命名空间 {ns}"
@@ -23,7 +28,7 @@ for act in ("led", "drive_all", "drive", "set_pid", "stop",
     assert hasattr(peo, act), f"缺动作 {act}"
 print("1) SDK 结构与命名空间 ✓")
 
-# 2) 未连接行为：属性 None、动作抛 NotConnected
+# 2) unconnected behavior: attributes None, actions raise NotConnected
 assert peo.vl53.front_mm is None and peo.mpu.quat is None
 try:
     peo.drive_all(30)
@@ -37,7 +42,7 @@ except CamOff:
     pass
 print("2) 未连接行为 ✓  None 属性 + NotConnected/CamOff 异常")
 
-# 3) 传感器快照 → 属性映射（模拟 50Hz 更新）
+# 3) sensor snapshot -> attribute mapping (simulate a 50 Hz update)
 from rover_comm.protocol import SensorData
 s = SensorData(dist_front_mm=150, dist_left_mm=999, dist_right_mm=42,
                dist_front_status=0, dist_left_status=1, dist_right_status=0,
@@ -53,7 +58,7 @@ assert peo.mpu.quat == (0.99, 0.01, 0.02, 0.03)
 assert peo._bridge.fresh and peo.fresh is True
 print("3) 传感器属性映射 ✓  mm/cm/s/四元数/fresh")
 
-# 4) drive 变参语义（mock 验证发送内容）
+# 4) drive variadic semantics (mock verifies what is sent)
 sent = []
 class FakeClient:
     connected = True
@@ -73,32 +78,33 @@ def _reset_drive():
     sent.clear()
 
 _reset_drive()
-peo.drive(2, 30)                    # 只改 M2（数据更新，其余保持）
+peo.drive(2, 30)                    # only M2 (data update; others unchanged)
 assert sent == [
     {"cmd": "MOTOR_CLOSED", "motor": 2, "speed_d100": 3000},
 ], sent
 n_before = len(sent)
-peo.drive(2, 30)                    # 重复目标也发送：STOP/拒绝后不能静默跳过
+peo.drive(2, 30)                    # repeated target is also sent: STOP/reject
+                                    # must not silently skip
 assert len(sent) == n_before + 1, "重复目标必须重新提交"
 
 _reset_drive()
-peo.drive(0, 100, 1, 100, 2, 100, 3, 100)   # 四轮同速
+peo.drive(0, 100, 1, 100, 2, 100, 3, 100)   # all four at the same speed
 assert [o["speed_d100"] for o in sent] == [10000] * 4, sent
 
 _reset_drive()
-peo.drive(0, 100, 1, 100, 2, -100, 3, -100)  # 原地转向（负速度）
+peo.drive(0, 100, 1, 100, 2, -100, 3, -100)  # spin in place (negative speeds)
 assert [o["speed_d100"] for o in sent] == [10000, 10000, -10000, -10000], sent
 
 _reset_drive()
-peo.drive(0, 0, 1, 100, 2, 0, 3, 0)          # 显式四轮（含 0）
+peo.drive(0, 0, 1, 100, 2, 0, 3, 0)          # explicit four wheels (with 0)
 assert [o["speed_d100"] for o in sent] == [0, 10000, 0, 0], sent
 
-# 非法：奇数参数 / 电机越界 / 重复指定
+# invalid: odd argument count / motor out of range / duplicate motor
 for bad_args, exc in [
-    ((1, 100, 2), ValueError),          # 不成对
-    ((9, 100), ValueError),             # 越界
-    ((1, 100, 1, 50), ValueError),      # 重复
-    ((True, 100), ValueError),          # bool 不算 int
+    ((1, 100, 2), ValueError),          # not in pairs
+    ((9, 100), ValueError),             # out of range
+    ((1, 100, 1, 50), ValueError),      # duplicate
+    ((True, 100), ValueError),          # bool is not an int
 ]:
     try:
         peo.drive(*bad_args)
@@ -107,7 +113,7 @@ for bad_args, exc in [
         pass
 print("4) drive 变参语义 ✓  单轮=数据更新 / 四轮 / 原地转向 / 非法参数校验")
 
-# 5) delay 停止标志
+# 5) delay stop flag
 import threading
 peo._clear_stop_flag()
 def _stopper():
@@ -123,18 +129,18 @@ except ScriptStopped:
 peo._clear_stop_flag()
 print("5) delay 停止标志 ✓  协作式终止")
 
-# 6) 配置读写 + set_pid 新语义
+# 6) config read/write + set_pid semantics
 sent.clear()
-peo.set_pid(kp=1.5, ki=0.05)            # 双关键字
+peo.set_pid(kp=1.5, ki=0.05)            # both keywords
 assert sent[-1] == {"cmd": "PID", "kp": 1.5, "ki": 0.05}, sent
-peo.set_pid(2.0, 0.02)                  # 双位置参数合法
+peo.set_pid(2.0, 0.02)                  # two positional args are legal
 assert sent[-1] == {"cmd": "PID", "kp": 2.0, "ki": 0.02}, sent
-peo.set_pid(kp=3.0)                     # 只设 kp：ki 保持缓存 0.02
+peo.set_pid(kp=3.0)                     # only kp: ki keeps cached 0.02
 assert sent[-1] == {"cmd": "PID", "kp": 3.0, "ki": 0.02}, sent
-peo.set_pid(ki=0.5)                     # 只设 ki：kp 保持缓存 3.0
+peo.set_pid(ki=0.5)                     # only ki: kp keeps cached 3.0
 assert sent[-1] == {"cmd": "PID", "kp": 3.0, "ki": 0.5}, sent
 try:
-    peo.set_pid(0.25)                   # 位置单参 = 非法（歧义）
+    peo.set_pid(0.25)                   # single positional arg = invalid (ambiguous)
     raise AssertionError("set_pid(0.25) 应抛 TypeError")
 except TypeError:
     pass
@@ -142,16 +148,17 @@ cfg_path = peo._bridge._config_path()
 import json
 cfg = json.load(open(cfg_path, encoding="utf-8"))
 assert cfg["pid"] == {"kp": 3.0, "ki": 0.5}, cfg
-os.remove(cfg_path)   # 清理测试产物
+os.remove(cfg_path)   # clean up the test artifact
 print("6) set_pid 分离语义 ✓  kp=/ki= 独立 / 双参 / 位置单参非法 / 配置缓存")
 
-# 7) 报错消息本地化（默认英文；GUI 注入 app.i18n 后随语言切换）
+# 7) error message localization (English by default; follows the GUI language
+#    after app.i18n is injected)
 peo._bridge._connected = False
 try:
     peo.drive_all(30)
 except NotConnected as e:
     assert "not connected" in str(e), e
-# 模拟 GUI 语言 = 中文
+# simulate the GUI language = Chinese
 import types
 fake_i18n = types.ModuleType("app.i18n")
 fake_i18n.current_language = lambda: "zh"
@@ -160,7 +167,7 @@ try:
     peo.drive_all(30)
 except NotConnected as e:
     assert "未连接" in str(e), e
-del sys.modules["app.i18n"]      # 还原独立运行
+del sys.modules["app.i18n"]      # restore standalone behavior
 try:
     peo.drive_all(30)
 except NotConnected as e:

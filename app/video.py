@@ -1,5 +1,9 @@
 """
-app.video — 视频显示 widget（QImage 直接解码 JPEG，零 OpenCV 依赖）
+app.video - video display widget (decodes JPEG directly with QImage, no
+OpenCV dependency).
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import time
 
@@ -11,19 +15,26 @@ from app.i18n import tr
 
 
 class VideoWidget(QWidget):
-    """显示 TCP 8890 收到的 JPEG 帧（等比缩放，居中）。"""
+    """Display the JPEG frames received over TCP 8890, scaled to fit, centered.
+
+    Attributes:
+        _pixmap: the currently displayed QPixmap (None = placeholder).
+        _frame_id: id of the last shown frame (-1 = none yet).
+        _frame_times: recent frame arrival timestamps (rolling window) used to
+            compute the true fps.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixmap = None
         self._frame_id = -1
-        self._frame_times = []   # 最近帧时间戳（滚动窗口，算真实 fps）
+        self._frame_times = []   # recent arrival timestamps (rolling window)
         self.setMinimumSize(280, 140)
 
     def _current_fps(self) -> float:
+        """Rolling fps over the last 30 frame arrivals (0 until 2+ frames)."""
         if not self._frame_times or time.monotonic() - self._frame_times[-1] > 1.0:
             return 0.0
-        """按最近 30 帧的到达时间算滚动 fps（首帧后才有值）。"""
         if len(self._frame_times) >= 2:
             span = self._frame_times[-1] - self._frame_times[0]
             if span > 0:
@@ -31,7 +42,8 @@ class VideoWidget(QWidget):
         return 0.0
 
     def show_image(self, frame_id: int, img: QImage):
-        """显示已解码帧（解码由 GUI 主线程统一做，坏帧在此之前已被拦截）。"""
+        """Display an already-decoded frame (decoding is done once on the GUI
+        main thread; bad frames are blocked before reaching here)."""
         self._frame_times.append(time.monotonic())
         if len(self._frame_times) > 30:
             self._frame_times.pop(0)
@@ -40,19 +52,23 @@ class VideoWidget(QWidget):
         self.update()
 
     def show_jpeg(self, frame_id: int, jpeg: bytes):
-        """兼容旧调用：内部解码（Qt 会把损坏帧错误打到 stderr；新代码走 show_image）。"""
+        """Legacy helper: decodes internally (Qt prints corrupt-frame errors to
+        stderr); new code should use show_image instead."""
         img = QImage.fromData(jpeg, "JPEG")
         if img.isNull():
             return
         self.show_image(frame_id, img)
 
     def clear(self):
+        """Reset to the placeholder (no frame, id -1, empty timing window)."""
         self._pixmap = None
         self._frame_id = -1
         self._frame_times.clear()
         self.update()
 
     def paintEvent(self, _event):
+        """Paint the current frame scaled to fit, centered; or the "waiting"
+        placeholder text when no frame is present."""
         p = QPainter(self)
         p.fillRect(self.rect(), Qt.black)
         if self._pixmap is not None:

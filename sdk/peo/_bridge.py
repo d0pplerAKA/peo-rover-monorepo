@@ -1,4 +1,8 @@
-"""SDK connection/snapshot bridge; one monitor per connection lifetime."""
+"""SDK connection/snapshot bridge; one monitor per connection lifetime.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
+"""
 import json
 import math
 import os
@@ -10,27 +14,46 @@ from rover_comm.client import RoverClient
 from rover_comm.control import ControlLock
 from ._i18n import tr
 
-FRESH_MS = 250
-_stop_requested = threading.Event()
+FRESH_MS = 250                     # a sensor snapshot is "fresh" within 250 ms
+_stop_requested = threading.Event()   # cooperative script-cancellation flag
 
 
 class ScriptStopped(Exception):
-    """Cooperative script cancellation."""
+    """Raised when the IDE stop button cancels a running script."""
 
 
 class NotConnected(Exception):
-    """No active connection."""
+    """Raised when an action needs a connection but none is active."""
 
 
 class LinkLost(Exception):
-    """Disconnected, or a command could not be queued safely."""
+    """Raised when the connection dropped, or a command could not be queued
+    safely."""
 
 
 class CamOff(Exception):
-    """A decoded camera read was requested while video is off."""
+    """Raised when a decoded camera read is requested while video is off."""
 
 
 class _Bridge:
+    """Wires the SDK action functions to a RoverClient plus a 50 Hz sensor
+    snapshot, the control lease, and the on-disk PID/resolution cache.
+
+    Attributes:
+        client: the underlying RoverClient (TCP command/telemetry/video).
+        _snap: the latest SensorData snapshot (None until first packet).
+        _snap_t: monotonic time of the latest snapshot (seconds).
+        _lock: guards _snap/_snap_t.
+        _lease: local ControlLock serializing the GUI vs SDK.
+        _lifecycle: serializes connect/disconnect calls.
+        _config_lock: guards config-file writes.
+        _config: cached {'pid': {...}, 'cam_res': ...} from the config file.
+        _recovered: True once config was re-sent after a fresh recovery edge.
+        _connected: whether the bridge thinks a connection is active.
+        _host: the hostname/IP last connected to.
+        _monitor_stop/_monitor_t: the config-reapply monitor thread.
+    """
+
     def __init__(self):
         self.client = RoverClient()
         self._snap = None
@@ -49,6 +72,9 @@ class _Bridge:
         self.client.on_disconnected = self._on_disconnected
 
     def connect(self, host='peo_rover.local'):
+        """Connect to the ESP32 (acquires the local lease, loads cached config,
+        starts the config monitor). Raises ScriptStopped if a stop was already
+        requested."""
         if _stop_requested.is_set():
             raise ScriptStopped(tr('script stopped', '脚本已停止'))
         with self._lifecycle:
@@ -70,6 +96,7 @@ class _Bridge:
                 raise
 
     def disconnect(self):
+        """Stop the monitor and close the client; releases the lease."""
         self._monitor_stop.set()
         self.client.close()
         self._on_disconnected()
@@ -81,6 +108,8 @@ class _Bridge:
         self._lease.release()
 
     def _on_sensor(self, sensor):
+        """Store the newest snapshot; a backwards system-tick jump (uint32
+        rollover is forward) marks the vehicle as reset (needs config re-send)."""
         with self._lock:
             if self._snap is not None:
                 old_tick, tick = int(self._snap.sys_tick_ms), int(sensor.sys_tick_ms)
@@ -91,6 +120,7 @@ class _Bridge:
             self._snap_t = time.monotonic()
 
     def _on_disconnected(self):
+        """Clear connection state, release the lease, and reset the camera."""
         self._connected = False
         self._recovered = False
         self._monitor_stop.set()
@@ -102,19 +132,26 @@ class _Bridge:
         cam._reset()
 
     def _snapshot(self):
+        """Return the latest snapshot, or None when not connected."""
         with self._lock:
             return self._snap if self._connected else None
 
     @property
     def fresh(self):
+        """True when connected, a snapshot exists, the S3 link is not stale,
+        and the snapshot arrived within FRESH_MS."""
         with self._lock:
             return bool(self._connected and self._snap is not None and not self._snap.link_stale
                         and time.monotonic() - self._snap_t < FRESH_MS / 1000)
 
     def _config_path(self):
+        """Path of the JSON config cache (~/.peo_rover_config.json, or the
+        PEO_CONFIG_PATH override)."""
         return os.environ.get('PEO_CONFIG_PATH') or os.path.join(os.path.expanduser('~'), '.peo_rover_config.json')
 
     def _load_config(self):
+        """Load and validate the PID/resolution cache; invalid/missing entries
+        are dropped rather than crashing."""
         try:
             with open(self._config_path(), encoding='utf-8') as stream:
                 config = json.load(stream)
@@ -133,6 +170,7 @@ class _Bridge:
         self._config = clean
 
     def _save_config(self):
+        """Atomically write the config cache (temp file + os.replace)."""
         temporary = None
         with self._config_lock:
             try:
@@ -152,6 +190,7 @@ class _Bridge:
                         pass
 
     def _push_config(self, session=None):
+        """Re-send the cached PID and resolution to the vehicle."""
         commands = []
         pid = self._config.get('pid')
         if pid:
@@ -160,6 +199,8 @@ class _Bridge:
         return self.client.send_json_batch(commands, expected_session=session)
 
     def _start_monitor(self):
+        """Start a background thread that re-applies PID/resolution whenever the
+        link recovers from stale (fresh recovery edge)."""
         stop = self._monitor_stop = threading.Event()
         session = self.client._session
 
@@ -177,6 +218,8 @@ class _Bridge:
         self._monitor_t.start()
 
     def _check_send(self):
+        """Pre-flight checks before sending: not stopped, connected, and a
+        current telemetry generation is known. Raises the matching exception."""
         if _stop_requested.is_set():
             raise ScriptStopped(tr('script stopped', '脚本已停止'))
         if not self._connected or not self.client.connected:
@@ -187,12 +230,15 @@ class _Bridge:
             raise ScriptStopped(tr('script stopped', '脚本已停止'))
 
     def send(self, obj):
+        """Send one JSON command after pre-flight checks; True on success."""
         self._check_send()
         if not self.client.send_json(obj):
             raise LinkLost(tr('Command not queued: disconnected or busy', '命令未入队：连接中断或队列忙'))
         return True
 
     def send_batch(self, commands):
+        """Send a batch of drive commands; on local overload, request STOP so a
+        previous motion target is never left running silently."""
         self._check_send()
         if not self.client.send_json_batch(commands):
             # Avoid leaving a previous motion target running after local overload.
@@ -200,6 +246,8 @@ class _Bridge:
             raise LinkLost(tr('Drive batch not queued; STOP requested', '四轮命令未入队，已请求停车'))
 
     def emergency_stop(self):
+        """Send a priority STOP and wait for a fresh S3 ACK; raises TimeoutError
+        if unconfirmed. Stays callable after script cancellation."""
         # Must remain callable from a ScriptStopped exception handler.
         if not self.client.connected:
             raise NotConnected(tr('not connected', '未连接'))

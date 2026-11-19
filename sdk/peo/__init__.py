@@ -1,10 +1,12 @@
 """
-peo — PEO Rover 组员 SDK（组员唯一入口，PROTOCOL.md §2.4 组员编程模型）
+peo - PEO Rover team SDK (the single entry point for team members;
+PROTOCOL.md §2.4 team programming model).
 
-三原语：数据属性（读）+ 动作函数（写）+ 延时（节奏）。判断/循环是组员自己的
-原生 Python 代码，SDK 不提供任何逻辑封装。
+Three primitives: read data attributes + call action functions + delay for
+pacing. Decisions and loops are the team member's own native Python code; the
+SDK provides no logic wrappers.
 
-用法：
+Usage:
     import peo
     peo.connect("peo_rover.local")
 
@@ -16,6 +18,9 @@ peo — PEO Rover 组员 SDK（组员唯一入口，PROTOCOL.md §2.4 组员编�
     peo.cam.on()
     img, seq = peo.cam.read()
     peo.cam.off()
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 import time as _time
 import math as _math
@@ -25,83 +30,104 @@ from ._bridge import _bridge, ScriptStopped, NotConnected, LinkLost, CamOff, \
 from ._i18n import tr
 from .cam import cam
 
-# 传感器数据命名空间（只读，约 25Hz 后台刷新；无数据/链路断时值为 None，
-# 用 peo.fresh 判断链路是否活着）
+# Sensor data namespaces (read-only; refreshed in the background at ~25 Hz).
+# When no data is available / the link is down, values are None — use
+# peo.fresh to tell whether the link is alive.
 
 class _MPU:
+    """Read-only IMU namespace (orientation quaternion + acceleration)."""
+
     @property
     def quat(self):
+        """Orientation quaternion (w, x, y, z), or None without data."""
         s = _bridge._snapshot()
         return None if s is None else (s.quat_w, s.quat_x, s.quat_y, s.quat_z)
 
     @property
     def accel(self):
+        """Acceleration in g (x, y, z), or None without data."""
         s = _bridge._snapshot()
         return None if s is None else (s.accel_x, s.accel_y, s.accel_z)
 
 
 class _VL53:
+    """Read-only namespace for the three VL53 distance sensors."""
+
     @property
     def front_mm(self):
+        """Front distance in mm, or None without data."""
         s = _bridge._snapshot()
         return None if s is None else s.dist_front_mm
 
     @property
     def left_mm(self):
+        """Left distance in mm, or None without data."""
         s = _bridge._snapshot()
         return None if s is None else s.dist_left_mm
 
     @property
     def right_mm(self):
+        """Right distance in mm, or None without data."""
         s = _bridge._snapshot()
         return None if s is None else s.dist_right_mm
 
     @property
     def front_ok(self):
+        """True when the front sensor reports a valid reading, or None."""
         s = _bridge._snapshot()
         return None if s is None else (s.dist_front_status == 0)
 
     @property
     def left_ok(self):
+        """True when the left sensor reports a valid reading, or None."""
         s = _bridge._snapshot()
         return None if s is None else (s.dist_left_status == 0)
 
     @property
     def right_ok(self):
+        """True when the right sensor reports a valid reading, or None."""
         s = _bridge._snapshot()
         return None if s is None else (s.dist_right_status == 0)
 
 
 class _Wheels:
+    """Read-only namespace for wheel speed, odometer, and motor current."""
+
     @property
     def speed_cm_s(self):
-        """四轮速度 cm/s（协议 0.01cm/s 定点 → 浮点）。"""
+        """Four wheel speeds in cm/s (protocol 0.01 cm/s fixed point -> float)."""
         s = _bridge._snapshot()
         return None if s is None else [v / 100.0 for v in s.speed_d100]
 
     @property
     def odometer(self):
+        """Four wheel odometer values, or None without data."""
         s = _bridge._snapshot()
         return None if s is None else list(s.odometer)
 
     @property
     def current_mA(self):
+        """Four motor currents in mA (signed), or None without data."""
         s = _bridge._snapshot()
         return None if s is None else list(s.current_mA)
 
     @property
     def bus_voltage_mV(self):
+        """Power bus voltages in mV, or None without data."""
         s = _bridge._snapshot()
         return None if s is None else list(s.bus_voltage_mV)
 
 
 class _Sys:
+    """Read-only namespace for ESP32 system stats (CPU % and RAM %)."""
+
     def __init__(self):
         self._cpu0 = None
         self._cpu1 = None
         self._ram = None
 
     def _update(self, info):
+        """Refresh cached stats from the latest sys_info dict (or None)."""
         self._cpu0 = info.get("cpu0") if info else None
         self._cpu1 = info.get("cpu1") if info else None
         free = info.get("ram_free") if info else None
@@ -111,16 +137,19 @@ class _Sys:
 
     @property
     def cpu0(self):
+        """Core 0 utilization percent (pulled on each read), or None."""
         self._update(_bridge.client.sys_info)
         return self._cpu0
 
     @property
     def cpu1(self):
+        """Core 1 utilization percent (pulled on each read), or None."""
         self._update(_bridge.client.sys_info)
         return self._cpu1
 
     @property
     def ram(self):
+        """RAM usage percent (pulled on each read), or None."""
         self._update(_bridge.client.sys_info)
         return self._ram
 
@@ -131,23 +160,27 @@ wheels = _Wheels()
 sys = _Sys()
 
 
-# ---------------- 生命周期 ----------------
+# ---------------- Lifecycle ----------------
 
 def connect(host="peo_rover.local") -> None:
-    """连接 ESP32（TCP 8888 命令/遥测 + TCP 8890 视频 + 心跳 + 单实例锁）。
+    """Connect to the ESP32 (TCP 8888 command/telemetry + TCP 8890 video +
+    heartbeat + single-instance lease).
 
-    连接成功后自动下发缓存的 PID 与分辨率配置；F407 软复位后自动重发。
+    The cached PID and resolution are sent automatically after connecting and
+    re-sent after an F407 soft reset.
     """
     _bridge.connect(host)
 
 
 def disconnect() -> None:
+    """Close the connection and release the single-instance lease."""
     _bridge.disconnect()
 
 
 def delay(ms: float) -> None:
-    """阻塞延时（上位机 Event.wait，精度受系统调度影响）。若期间被 IDE 停止按钮打断，
-    抛 ScriptStopped 终止脚本线程。"""
+    """Block for ms milliseconds (Event.wait; precision depends on the OS
+    scheduler). If the IDE stop button fires during the wait, raises
+    ScriptStopped to end the script thread."""
     if _stop_requested.is_set():
         raise ScriptStopped(tr("script stopped", "脚本已停止"))
     if not _math.isfinite(ms) or ms < 0:
@@ -158,22 +191,25 @@ def delay(ms: float) -> None:
 
 
 def _clear_stop_flag() -> None:
+    """Clear the cooperative stop flag (used by the IDE before running)."""
     _stop_requested.clear()
 
 
 def _request_stop() -> None:
+    """Set the stop flag and queue a priority STOP; never wait for ACK on the
+    GUI thread."""
     _stop_requested.set()
     _bridge.client.stop_all()   # priority queue; never wait for ACK on the GUI thread
 
 
-# ---------------- 动作 ----------------
+# ---------------- Actions ----------------
 
 def led(on: bool | None = None) -> None:
-    """控制板载 LED。
+    """Control the onboard LED.
 
-    on=True  -> LED_ON（点亮，绝对状态）
-    on=False -> LED_OFF（熄灭，绝对状态）
-    on=None  -> LED_TOGGLE（翻转，默认）
+    on=True  -> LED_ON  (turn on, absolute state)
+    on=False -> LED_OFF (turn off, absolute state)
+    on=None  -> LED_TOGGLE (toggle, the default)
     """
     if on is not None and type(on) is not bool:
         raise ValueError("led() argument must be bool or None")
@@ -186,21 +222,23 @@ def led(on: bool | None = None) -> None:
 
 
 def drive_all(speed_cm_s: float) -> None:
-    """四轮同速（闭环 cm/s）。等价 peo.drive(0,v, 1,v, 2,v, 3,v)。"""
+    """Drive all four wheels at the same closed-loop speed (cm/s). Equivalent
+    to peo.drive(0,v, 1,v, 2,v, 3,v)."""
     _drive_four([speed_cm_s] * 4)
 
 
 def drive(*pairs) -> None:
-    """变参马达控制：peo.drive(motor, speed_cm_s, ...) 成对传入，
-    **只发指定的电机（数据更新）**，未指定的电机在 F407 端保持当前转速。
+    """Variadic motor control: peo.drive(motor, speed_cm_s, ...) takes
+    (motor, speed) pairs and sends ONLY the motors you name (data update);
+    unnamed motors keep their current target on the F407.
 
-    例：
-        peo.drive(0, 100, 1, 100, 2, 100, 3, 100)   四轮同速前进
-        peo.drive(0, 100, 1, 100, 2, -100, 3, -100) 原地转向
-        peo.drive(1, 30)                            只改 M1（其余保持）
+    Examples:
+        peo.drive(0, 100, 1, 100, 2, 100, 3, 100)    all four forward
+        peo.drive(0, 100, 1, 100, 2, -100, 3, -100)  spin in place
+        peo.drive(1, 30)                             only M1 (others unchanged)
 
-    motor ∈ 0~3（重复指定同一轮报错）。速度单位 cm/s，可为负（反转）。
-    全停用 peo.stop()（发 STOP_ALL）。
+    motor is 0..3 (repeating the same motor is an error). Speed is cm/s and may
+    be negative (reverse). To halt everything use peo.stop() (sends STOP_ALL).
     """
     if len(pairs) % 2 != 0:
         raise ValueError(tr(
@@ -239,21 +277,24 @@ def drive(*pairs) -> None:
 
 
 def motor(*pairs) -> None:
-    """开环 PWM 直驱（千分比），绕过速度闭环——闭环 PID 参数异常时的保底手段。
-    **只发指定的电机（数据更新）**，未指定的电机在 F407 端保持当前 PWM。
+    """Open-loop PWM direct drive (per-mille), bypassing the speed loop — the
+    fallback when the closed-loop PID is misbehaving. Sends ONLY the motors you
+    name (data update); unnamed motors keep their current PWM on the F407.
 
-    speed 单位 = 千分比（per-mille）：-1000 全速反转 ~ +1000 全速正转，
-    0 = coast（滑行）。正=前进，负=反转。**不是 cm/s**（闭环 drive() 才是 cm/s）。
+    speed unit = per-mille: -1000 full reverse .. +1000 full forward, 0 = coast.
+    Positive = forward, negative = reverse. NOT cm/s (closed-loop drive() is
+    cm/s).
 
-    例：
-        peo.motor(0, 500, 1, 500, 2, 500, 3, 500)     四轮半速前进（开环）
-        peo.motor(0, -800, 1, -800, 2, -800, 3, -800) 四轮后退
-        peo.motor(0, 500, 1, 500, 2, -500, 3, -500)   原地转向（开环）
-        peo.motor(1, 800)                             只改 M1（其余保持）
+    Examples:
+        peo.motor(0, 500, 1, 500, 2, 500, 3, 500)     four wheels half forward
+        peo.motor(0, -800, 1, -800, 2, -800, 3, -800) four wheels reverse
+        peo.motor(0, 500, 1, 500, 2, -500, 3, -500)   spin in place
+        peo.motor(1, 800)                             only M1 (others unchanged)
 
-    motor ∈ 0~3（重复指定同一轮报错）。speed 须为 -1000~1000 的整数（非 bool）。
-    发 MOTOR 会让 F407 切到开环模式；发 MOTOR_CLOSED（drive/drive_all）切回闭环。
-    全停用 peo.stop()。
+    motor is 0..3 (repeating the same motor is an error). speed must be an int
+    in -1000..1000 (not a bool). Sending MOTOR switches the F407 to open loop;
+    sending MOTOR_CLOSED (drive/drive_all) switches back to closed loop. Use
+    peo.stop() to halt.
     """
     if len(pairs) % 2 != 0:
         raise ValueError(tr(
@@ -287,8 +328,9 @@ def motor(*pairs) -> None:
 def _drive_four(speeds: list) -> None:
     """Validate all wheels before atomically publishing one local queue batch.
 
-    The four UART commands are still independent on the vehicle. Repeated targets
-    are resent: queue acceptance is not execution, and STOP/reset invalidates them.
+    The four UART commands are still independent on the vehicle. Repeated
+    targets are resent: queue acceptance is not execution, and STOP/reset
+    invalidates them.
     """
     d100 = []
     for value in speeds:
@@ -303,14 +345,16 @@ def _drive_four(speeds: list) -> None:
 
 
 def set_pid(*args, kp=None, ki=None) -> None:
-    """排入四轮共享 PI 增益命令并写配置缓存；返回不代表 F407 已执行。
+    """Queue a shared four-wheel PI-gain command and write the config cache;
+    returning does not mean the F407 has applied it.
 
-    合法形式：
-        peo.set_pid(kp=0.3)         只设 kp（ki 保持当前值）
-        peo.set_pid(ki=0.01)        只设 ki（kp 保持当前值）
-        peo.set_pid(0.3, 0.01)      同时设（位置传两参）
-    非法形式：
-        peo.set_pid(0.25)           位置单参有歧义（不知道是 kp 还是 ki）→ 报错
+    Valid forms:
+        peo.set_pid(kp=0.3)         set only kp (ki keeps its current value)
+        peo.set_pid(ki=0.01)        set only ki (kp keeps its current value)
+        peo.set_pid(0.3, 0.01)      set both (two positional args)
+    Invalid:
+        peo.set_pid(0.25)           a single positional arg is ambiguous (kp or
+                                    ki?) -> TypeError
     """
     if len(args) == 1:
         raise TypeError(tr(
@@ -346,19 +390,20 @@ def set_pid(*args, kp=None, ki=None) -> None:
 def stop() -> None:
     """Priority STOP; require a new successful S3 ACK, retry once on timeout.
 
-    Raises TimeoutError if unconfirmed. This is S3 acceptance, not F407 execution.
-    Remains available after IDE cancellation.
+    Raises TimeoutError if unconfirmed. This is S3 acceptance, not F407
+    execution. Remains available after IDE cancellation.
     """
     _bridge.emergency_stop()
 
 
 def reset_odometer() -> None:
-    """清零四轮里程。"""
+    """Reset all four wheel odometers to zero."""
     _bridge.send({"cmd": "ODOMETER_RESET"})
 
 
 def ws2812(r: int, g: int, b: int, brightness: int = 100) -> None:
-    """WS2812 灯珠颜色 + 亮度（S3 本地命令，RMT 直驱）。
+    """Set the WS2812 status LED color + brightness (an S3-local command driven
+    directly over RMT).
 
     r/g/b must be integers 0..255; brightness must be an integer 0..100.
     """
@@ -370,14 +415,17 @@ def ws2812(r: int, g: int, b: int, brightness: int = 100) -> None:
 
 
 def sys_reset() -> None:
-    """请求 F407 软复位（NVIC_SystemReset），不重启 S3。链路恢复时，
-    SDK 检测 fresh 恢复沿自动重发 PID/分辨率。"""
+    """Request an F407 soft reset (NVIC_SystemReset), leaving the S3 running.
+    When the link recovers, the SDK detects the fresh edge and re-sends the
+    cached PID/resolution automatically."""
     _bridge.send({"cmd": "SYS_RESET"})
 
 
-# ---------------- 顶层只读属性 ----------------
+# ---------------- Top-level read-only attributes ----------------
 
 def __getattr__(name):
+    """Resolve top-level read-only attributes (fresh, control_mode, versions,
+    lock) on demand from the current snapshot."""
     if name == "fresh":
         return _bridge.fresh
     if name == "control_mode":

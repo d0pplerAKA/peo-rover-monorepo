@@ -1,4 +1,12 @@
-"""Latest-frame camera mailbox. Raw reads need no decoder; BGR reads use cv2."""
+"""Latest-frame camera mailbox for the team SDK.
+
+Raw reads return JPEG bytes (no decoder needed); BGR reads decode lazily with
+cv2. Only the newest frame is kept, so a slow consumer never lags on stale
+imagery.
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
+"""
 import math
 import threading
 import time
@@ -6,11 +14,27 @@ import time
 from ._bridge import _bridge, CamOff, ScriptStopped, _stop_requested
 from ._i18n import tr
 
-_FRAME_FRESH_MS = 1000
+_FRAME_FRESH_MS = 1000        # a frame is "fresh" if received within 1 s
 _RESOLUTIONS = ('QQVGA', 'QVGA', 'VGA', 'SVGA')
 
 
 class Cam:
+    """Single-slot mailbox that keeps only the latest decoded video frame.
+
+    Receiving threads write raw JPEG bytes; readers can either grab the raw
+    bytes (read_raw) or decode to a BGR ndarray (read, needs cv2).
+
+    Attributes:
+        _latest: (jpeg_bytes, frame_id) of the newest frame, or (None, -1).
+        _last_t: monotonic time the newest frame arrived (seconds).
+        _lock: condition guarding _latest/_last_t/_on.
+        _decode_lock: serializes cv2 decoding (decode only once per frame).
+        _decoded_raw: the raw bytes the cached _decoded image came from.
+        _decoded: cached decoded BGR ndarray (or None).
+        _on: whether video streaming is currently enabled.
+        on_new_frame: optional callback called (frame_id, jpeg) on arrival.
+    """
+
     def __init__(self):
         self._latest = (None, -1)
         self._last_t = 0.0
@@ -22,6 +46,9 @@ class Cam:
         _bridge.client.on_frame = self._on_frame
 
     def _on_frame(self, frame_id, jpeg):
+        """Receiving-thread hook: store the newest frame, wake waiters, and fire
+        the on_new_frame callback (its errors are swallowed so they can never
+        break the receive chain)."""
         with self._lock:
             if not self._on:
                 return
@@ -36,6 +63,7 @@ class Cam:
                 pass
 
     def _reset(self):
+        """Clear all frame state (called on disconnect) and un-set video."""
         with self._lock:
             self._on = False
             self._latest = (None, -1)
@@ -45,6 +73,9 @@ class Cam:
             self._decoded_raw = self._decoded = None
 
     def _latest_raw(self, timeout_ms, *, cancel=True):
+        """Wait up to timeout_ms for a fresh raw frame; return (jpeg, fid) or
+        (None, -1). If cancel is True, a requested script stop raises
+        ScriptStopped instead of blocking."""
         if not math.isfinite(timeout_ms) or timeout_ms < 0:
             raise ValueError('timeout_ms must be finite and non-negative')
         deadline = time.monotonic() + timeout_ms / 1000
@@ -54,7 +85,8 @@ class Cam:
                     raise ScriptStopped(tr('script stopped', '脚本已停止'))
                 if not self._on:
                     return None, -1
-                # Inspect once even for timeout=0; never recycle indefinitely stale imagery.
+                # Inspect once even for timeout=0; never recycle indefinitely
+                # stale imagery.
                 if self._latest[0] is not None and time.monotonic() - self._last_t < _FRAME_FRESH_MS / 1000:
                     return self._latest
                 remaining = deadline - time.monotonic()
@@ -63,17 +95,20 @@ class Cam:
                 self._lock.wait(min(remaining, 0.05))
 
     def on(self):
+        """Ask the ESP32 to start streaming video and mark the mailbox on."""
         _bridge.send({'cmd': 'VIDEO_ON'})
         with self._lock:
             self._on = True
 
     def off(self):
+        """Ask the ESP32 to stop streaming and reset the mailbox."""
         try:
             _bridge.send({'cmd': 'VIDEO_OFF'})
         finally:
             self._reset()
 
     def set_resolution(self, res):
+        """Switch camera resolution (QQVGA/QVGA/VGA/SVGA) and cache it."""
         if res not in _RESOLUTIONS:
             raise ValueError('resolution must be QQVGA, QVGA, VGA or SVGA')
         _bridge.send({'cmd': 'CAM_RES', 'res': res})
@@ -113,12 +148,14 @@ class Cam:
 
     @property
     def fresh(self):
+        """True if video is on and a frame arrived within the freshness window."""
         with self._lock:
             return bool(self._on and self._latest[0] is not None
                         and time.monotonic() - self._last_t < _FRAME_FRESH_MS / 1000)
 
     @property
     def seq(self):
+        """The wire frame id of the newest frame (-1 if none)."""
         with self._lock:
             return self._latest[1]
 

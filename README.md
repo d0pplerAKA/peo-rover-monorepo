@@ -1,4 +1,55 @@
-# PEO Rover 上位机
+# PEO Rover 上位机 / Upper Computer
+
+> **一句话定位 / One-line role**：上位机是组员和车之间的「控制台」——能看车（视频）、看数据（遥测）、发命令（GUI 控制台），更重要的是能写 Python 脚本来自动化控制车（peo SDK）。
+>
+> The upper computer is the "console" between the team and the rover — you can see the rover (video), see its data (telemetry), send commands (GUI console), and above all write Python scripts to drive it automatically (peo SDK).
+
+---
+
+## 工程意义 / Why This Project Exists
+
+**中文**：组员大多没有嵌入式背景，直接写 C 固件不现实。上位机把「控制一台车」这件事抽象成一组 Python 动作函数（`peo.drive()`、`peo.stop()`、`peo.cam.read()` …），组员像写单片机代码一样「动作 → 延时 → 动作」，实时通过 WiFi 下发命令。它同时提供一个桌面 GUI：看视频、看遥测仪表盘、手动急停，方便现场调试。
+
+**English**: Most team members have no embedded background, so writing C firmware directly is unrealistic. The upper computer abstracts "driving a rover" into a set of Python action functions (`peo.drive()`, `peo.stop()`, `peo.cam.read()` …) — team members write scripts in a blocking style ("act → delay → act") and the commands stream out over WiFi in real time. It also provides a desktop GUI: video view, telemetry dashboard, and a manual emergency stop for field debugging.
+
+## 功能与作用 / What It Does
+
+| 功能 Function | 说明 Description |
+|---|---|
+| 桌面 GUI | 视频显示 + 遥测仪表盘 + 控制台 + 急停（空格键） |
+| peo SDK | 组员写 Python 脚本调用 `peo.*` 动作函数实时下发命令 |
+| 命令/遥测 | TCP 8888 收发 JSON 命令 + 50 Hz 遥测 |
+| 视频接收 | TCP 8890 收 JPEG，FrameAssembler 拼帧解码 |
+| PID 调参 | `peo.set_pid()` 下发 + 本地 config.json 缓存 |
+
+## 与其它三端的联系 / Connections to the Other Three Nodes
+
+```
+        ┌──────────────────────────────────────┐
+        │  上位机 Upper Computer (PC)        ★  │
+        │  PySide6 GUI + peo SDK（组员脚本）    │
+        └──────────────────┬───────────────────┘
+                WiFi STA   │ TCP 8888 命令/遥测
+                            │ TCP 8890 视频
+        ┌──────────────────▼───────────────────┐
+        │     ESP32-S3（WiFi 桥 Bridge）        │
+        └──────────────────┬───────────────────┘
+                            │ USART2
+        ┌──────────────────▼───────────────────┐
+        │  STM32F407（主控 Main Controller）    │
+        └──────────────────┬───────────────────┘
+                            │ USART3
+        ┌──────────────────▼───────────────────┐
+        │   ESP32-C3（手柄 BLE 桥 Gamepad）     │
+        └──────────────────────────────────────┘
+```
+
+- **↔ ESP32-S3**：唯一出口——WiFi STA 连 S3 热点，TCP 8888 命令/遥测、TCP 8890 视频。
+- **↔ STM32F407 / ESP32-C3**：无直接连接，一切经 S3 中转。
+
+---
+
+## 技术细节 / Technical Details
 
 更新：2026-11-16。PySide6 桌面监控/组员 IDE，以及可独立安装的 `peo` Python SDK。上位机通过单个 TCP 8888 连接收发命令/遥测，通过 TCP 8890 接收 JPEG 视频（2026-11-16 起视频流完全走 TCP）；S3 负责桥接与停车屏障，F407 执行电机和传感器操作。
 

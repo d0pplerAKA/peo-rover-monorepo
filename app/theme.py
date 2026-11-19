@@ -1,12 +1,19 @@
 """
-app.theme — 全局暗色 QSS（固定暗色主题，不再切换）
+app.theme - fixed dark QSS stylesheet for the whole application.
 
-用法：
+The theme is dark-only (light/dark switching was removed by decision).
+
+Usage:
     from app.theme import apply_theme
     apply_theme(app)
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
 """
 from PySide6.QtWidgets import QApplication
 
+# Global dark stylesheet. Each hex value is the background / text / border
+# color of a widget role; dark colors keep contrast high on a workbench.
 DARK_QSS = """
 QWidget {
     background: #1e1f24;
@@ -34,7 +41,7 @@ QPushButton {
 QPushButton:hover { background: #383c46; }
 QPushButton:pressed { background: #24272e; }
 QPushButton:disabled { color: #6a6f7a; background: #26282f; }
-/* 急停按钮（安全设施：红色突出，Tab1 唯一命令按钮） */
+/* Emergency stop button (safety feature: highlighted red, the only command button on Tab 1) */
 QPushButton#stopBtn {
     background: #8b2c2c;
     border: 1px solid #c04040;
@@ -80,5 +87,9 @@ QToolTip {
 
 
 def apply_theme(app: QApplication):
-    """应用全局暗色主题。"""
+    """Apply the fixed dark theme to the whole application.
+
+    Args:
+        app: the QApplication instance whose stylesheet is replaced.
+    """
     app.setStyleSheet(DARK_QSS)

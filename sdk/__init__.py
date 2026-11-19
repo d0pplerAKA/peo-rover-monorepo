@@ -1,1 +1,5 @@
-"""PEO Rover 组员 SDK 包（peo 的父包，本身不含逻辑）。"""
+"""sdk - parent package of the peo team SDK (holds no logic itself).
+
+Copyright (c) 2026 Danny
+SPDX-License-Identifier: MIT
+"""
