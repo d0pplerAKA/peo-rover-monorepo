@@ -7,10 +7,13 @@
  */
 /*
  * 3 hardware I2C buses, 3 UARTs, 4 quadrature encoders, 8 motor PWMs.
- * User assignment: LED PA1, button PA0; W25Q16BV on PA15/PB3/PB4/PB5 (SPI1).
+ * User assignment: RGB LED PC0(R)/PC1(G)/PC2(B), key PC13 (reserved);
+ * onboard W25Q128 on PB12/PB13/PB14/PB15 (SPI2, plain SPI, unallocated);
+ * ST7789-class LCD on PB3(SCL)/PB5(SDA)/PB4(DC)/PD7(CS)/PD4(RST)/PD3(PWR)
+ *   driven through SPI3 (AF6) by the TFT_SPI component.
  * Encoder numbering: 1=TIM1, 2=TIM3, 3=TIM4, 4=TIM8.
- * PWM numbering: 1/2=TIM5, 3/4=TIM9, 5/6=TIM12, 7=TIM10, 8=TIM11.
- * PB14/PB15 belong to motor PWM: SPI2 TFT cannot use these pins.
+ * PWM numbering: 1/2=TIM5(CH3/4), 3/4=TIM9, 5/6=TIM5(CH1/2), 7=TIM10, 8=TIM11.
+ * PB12/PB13/PB14/PB15 belong to the onboard W25Q128 flash: keep unallocated.
  * SD socket must remain unused (PC9 is I2C3 SDA).
  * Existing sensor addresses, geometry and USART2 DMA mapping retained.
  * Pinmap macros do not initialize RCC/GPIO/timers: update driver code
@@ -42,7 +45,7 @@
 #define PEO_PM_SYSCLK_HZ        (168000000UL)   /* SYSCLK after PLL */
 #define PEO_PM_HSE_HZ           (8000000UL)     /* board crystal; MUST match HSE_VALUE! */
 #define PEO_PM_TIM_APB2_HZ      (168000000UL)   /* TIM1 / TIM8 / TIM9 / TIM10 / TIM11 */
-#define PEO_PM_TIM_APB1_HZ      (84000000UL)    /* TIM2 / TIM3 / TIM4 / TIM5 / TIM12 */
+#define PEO_PM_TIM_APB1_HZ      (84000000UL)    /* TIM2 / TIM3 / TIM4 / TIM5 */
 
 #define PEO_PM_PWM_FREQ_HZ      (20000U)        /* motor PWM frequency */
 #define PEO_PM_ARR_APB2         (PEO_PM_TIM_APB2_HZ / PEO_PM_PWM_FREQ_HZ)   /* period counts = 8400; hardware ARR = 8399 */
@@ -129,7 +132,7 @@
    (TIM_EncoderMode_TI12, rising/rising) with ARR = 0xFFFF full 16-bit range.
    Read as 16-bit DELTA (int16_t)(now - last) which self-handles wraparound
    -> NO overflow interrupt on ANY encoder timer.
-   PWM was split onto its own timers in v1.8/v1.9 (TIM5/9/10/11/12, section 5).
+   PWM was split onto its own timers in v1.8/v1.9 (TIM5/9/10/11, section 5).
 
    M1 (TIM1, PE9/PE11)  - pure encoder, ARR = 0xFFFF
    M2 (TIM3, PA6/PA7)   - pure encoder, ARR = 0xFFFF
@@ -187,7 +190,7 @@
 /* ============================================================================
    5. MOTOR PWM x8 (two inputs per DRV8871 motor driver)
    M1: TIM5 PA2/PA3; M2: TIM9 PE5/PE6;
-   M3: TIM12 PB14/PB15; M4: TIM10 PB8 + TIM11 PB9.
+   M3: TIM5 PA0/PA1; M4: TIM10 PB8 + TIM11 PB9.
    PWM1 mode, PSC=0. Legacy PEO_PM_ARR_APBx means period COUNTS;
    write hardware ARR = PEO_PM_ARR_APBx - 1. Enable CCR preload.
    CCR=0 is 0%; CCR=period counts is 100% in edge-aligned PWM1.
@@ -238,26 +241,26 @@
 #define PEO_PM_PWM4_PHYS_PIN             (5U)  /* LQFP100 package lead number for PWM4 motor-driver output; not a GPIO bit mask. */
 #define PEO_PM_PWM4_TIM_HZ               PEO_PM_TIM_APB2_HZ  /* Timer input clock frequency in Hz for PWM4 motor-driver output. */
 
-/* PWM5: TIM12_CH1, PB14, LQFP100 pin 53. */
-#define PEO_PM_PWM5_TIM                  TIM12  /* Hardware timer assigned to PWM5 motor-driver output. */
+/* PWM5: TIM5_CH1, PA0, LQFP100 pin 23. */
+#define PEO_PM_PWM5_TIM                  TIM5  /* Hardware timer assigned to PWM5 motor-driver output. */
 #define PEO_PM_PWM5_CH                   TIM_Channel_1  /* Timer channel selector for PWM5 motor-driver output. */
-#define PEO_PM_PWM5_PORT                 GPIOB  /* GPIO peripheral containing the PWM5 motor-driver output pin. */
-#define PEO_PM_PWM5_PIN                  GPIO_Pin_14  /* GPIO bit mask selecting the PWM5 motor-driver output pin. */
-#define PEO_PM_PWM5_SRC                  GPIO_PinSource14  /* Pin index for alternate-function routing of PWM5 motor-driver output. */
+#define PEO_PM_PWM5_PORT                 GPIOA  /* GPIO peripheral containing the PWM5 motor-driver output pin. */
+#define PEO_PM_PWM5_PIN                  GPIO_Pin_0  /* GPIO bit mask selecting the PWM5 motor-driver output pin. */
+#define PEO_PM_PWM5_SRC                  GPIO_PinSource0  /* Pin index for alternate-function routing of PWM5 motor-driver output. */
 /* Alternate-function selector connecting PWM5 motor-driver output to its peripheral. */
-#define PEO_PM_PWM5_AF                   GPIO_AF_TIM12
-#define PEO_PM_PWM5_PHYS_PIN             (53U)  /* LQFP100 package lead number for PWM5 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM5_AF                   GPIO_AF_TIM5
+#define PEO_PM_PWM5_PHYS_PIN             (23U)  /* LQFP100 package lead number for PWM5 motor-driver output; not a GPIO bit mask. */
 #define PEO_PM_PWM5_TIM_HZ               PEO_PM_TIM_APB1_HZ  /* Timer input clock frequency in Hz for PWM5 motor-driver output. */
 
-/* PWM6: TIM12_CH2, PB15, LQFP100 pin 54. */
-#define PEO_PM_PWM6_TIM                  TIM12  /* Hardware timer assigned to PWM6 motor-driver output. */
+/* PWM6: TIM5_CH2, PA1, LQFP100 pin 24. */
+#define PEO_PM_PWM6_TIM                  TIM5  /* Hardware timer assigned to PWM6 motor-driver output. */
 #define PEO_PM_PWM6_CH                   TIM_Channel_2  /* Timer channel selector for PWM6 motor-driver output. */
-#define PEO_PM_PWM6_PORT                 GPIOB  /* GPIO peripheral containing the PWM6 motor-driver output pin. */
-#define PEO_PM_PWM6_PIN                  GPIO_Pin_15  /* GPIO bit mask selecting the PWM6 motor-driver output pin. */
-#define PEO_PM_PWM6_SRC                  GPIO_PinSource15  /* Pin index for alternate-function routing of PWM6 motor-driver output. */
+#define PEO_PM_PWM6_PORT                 GPIOA  /* GPIO peripheral containing the PWM6 motor-driver output pin. */
+#define PEO_PM_PWM6_PIN                  GPIO_Pin_1  /* GPIO bit mask selecting the PWM6 motor-driver output pin. */
+#define PEO_PM_PWM6_SRC                  GPIO_PinSource1  /* Pin index for alternate-function routing of PWM6 motor-driver output. */
 /* Alternate-function selector connecting PWM6 motor-driver output to its peripheral. */
-#define PEO_PM_PWM6_AF                   GPIO_AF_TIM12
-#define PEO_PM_PWM6_PHYS_PIN             (54U)  /* LQFP100 package lead number for PWM6 motor-driver output; not a GPIO bit mask. */
+#define PEO_PM_PWM6_AF                   GPIO_AF_TIM5
+#define PEO_PM_PWM6_PHYS_PIN             (24U)  /* LQFP100 package lead number for PWM6 motor-driver output; not a GPIO bit mask. */
 #define PEO_PM_PWM6_TIM_HZ               PEO_PM_TIM_APB1_HZ  /* Timer input clock frequency in Hz for PWM6 motor-driver output. */
 
 /* PWM7: TIM10_CH1, PB8, LQFP100 pin 95. */
@@ -283,8 +286,8 @@
 #define PEO_PM_PWM8_TIM_HZ               PEO_PM_TIM_APB2_HZ  /* Timer input clock frequency in Hz for PWM8 motor-driver output. */
 #define PEO_PM_PWM1_2_AF GPIO_AF_TIM5  /* Alternate-function selector connecting PWM1 motor-driver output to its peripheral. */
 #define PEO_PM_PWM3_4_AF GPIO_AF_TIM9  /* Alternate-function selector connecting PWM3 motor-driver output to its peripheral. */
-#define PEO_PM_PWM5_6_AF GPIO_AF_TIM12  /* Alternate-function selector connecting PWM5 motor-driver output to its peripheral. */
-#define PEO_PM_PWM7_8_AF GPIO_AF_TIM10  /* Alternate-function selector connecting PWM7 motor-driver output to its peripheral. */
+#define PEO_PM_PWM5_6_AF GPIO_AF_TIM5  /* Alternate-function selector connecting PWM5 motor-driver output to its peripheral. */
+#define PEO_PM_PWM7_8_AF GPIO_AF_TIM10  /* Alternate-function selector connecting PWM7 and PWM8 motor-driver outputs to their peripherals. */
 /* TIM10 and TIM11 both use GPIO AF3; per-channel AF macros above preferred. */
 
 /* ============================================================================
@@ -387,16 +390,16 @@
    GPIO outputs, active-low reset per sensor. Held LOW at power-up to keep all
    three at the factory default 0x52, then released one at a time so
    each can be re-addressed (see section 7) before the next is released.
-     XSHUT front = PC0    XSHUT left = PC1    XSHUT right = PC2
+     XSHUT front = PC3    XSHUT left = PC4    XSHUT right = PC5
    Push-pull output, no pull-up needed (VL53L1X has an internal XSHUT pull-up).
    ============================================================================ */
 
 /** VL53L1X XSHUT (active-low; low = held in reset) **/
 /* GPIO peripheral containing the three VL53L1X range sensors reset/shutdown signal pin. */
 #define PEO_PM_VL53_XSHUT_PORT              GPIOC
-#define PEO_PM_VL53_FRONT_XSHUT_PIN         GPIO_Pin_0  /* GPIO bit mask selecting the front VL53L1X sensor reset/shutdown signal pin. */
-#define PEO_PM_VL53_LEFT_XSHUT_PIN          GPIO_Pin_1  /* GPIO bit mask selecting the left VL53L1X sensor reset/shutdown signal pin. */
-#define PEO_PM_VL53_RIGHT_XSHUT_PIN         GPIO_Pin_2  /* GPIO bit mask selecting the right VL53L1X sensor reset/shutdown signal pin. */
+#define PEO_PM_VL53_FRONT_XSHUT_PIN         GPIO_Pin_3  /* GPIO bit mask selecting the front VL53L1X sensor reset/shutdown signal pin. */
+#define PEO_PM_VL53_LEFT_XSHUT_PIN          GPIO_Pin_4  /* GPIO bit mask selecting the left VL53L1X sensor reset/shutdown signal pin. */
+#define PEO_PM_VL53_RIGHT_XSHUT_PIN         GPIO_Pin_5  /* GPIO bit mask selecting the right VL53L1X sensor reset/shutdown signal pin. */
 
 /* ============================================================================
    9b. VL53L1X INT x3 + MPU6050 INT  (data-ready interrupt outputs)  [v2.6]
@@ -436,80 +439,87 @@
 #define PEO_PM_VL53_RIGHT_INT_EXTI_SRC      EXTI_PinSource2  /* Pin-number selector for routing right VL53L1X sensor into EXTI. */
 
 #define PEO_PM_MPU_INT_EXTI_LINE            EXTI_Line3  /* Interrupt-line bit mask for MPU6050 data-ready signal. */
+#define PEO_PM_MPU_INT_EXTI_PSRC            EXTI_PortSourceGPIOE  /* GPIO port selector for routing MPU6050 data-ready signal into EXTI. */
 #define PEO_PM_MPU_INT_EXTI_SRC             EXTI_PinSource3  /* Pin-number selector for routing MPU6050 data-ready signal into EXTI. */
 
 
 /* ============================================================================
-   10. EXTERNAL FLASH - W25Q16BV (SPI1, APB2)
-   Flash pin   Signal     Board connection     MCU LQFP100 pin
-       1       /CS        PA15                 77
-       2       DO         PB4 / SPI1_MISO      90
-       3       /WP        +3.3 V (no GPIO)
-       4       GND        GND
-       5       DI         PB5 / SPI1_MOSI      91
-       6       CLK        PB3 / SPI1_SCK       89
-       7       /HOLD      +3.3 V (no GPIO)
-       8       VCC        +3.3 V
-
-   Use SPI1 AF5 on PB3/PB4/PB5. PA15 is software-controlled GPIO CS,
-   NOT an AF pin: push-pull output, idle HIGH, active LOW.
-   Set the PA15 output latch HIGH before enabling output mode.
-   Configure SPI master with software NSS management (SPI_NSS_Soft).
-   Enable GPIOA/GPIOB on AHB1 and SPI1 on APB2 before initialization.
-   Release JTAG functions on PA15/PB3/PB4 and do not enable SWO on PB3;
-   retain SWD on PA13/PA14. This pinmap does not initialize the flash.
+   10. ONBOARD FLASH - W25Q128 (SPI2, plain SPI, unallocated)
+   ----------------------------------------------------------------------------
+   The current board carries a W25Q128 SPI NOR flash soldered to
+   PB12 (/CS), PB13 (CLK), PB14 (DO), PB15 (DI); /WP and /HOLD are
+   tied to 3V3 on the board (plain SPI mode, no Dual/Quad). This
+   firmware does not use the flash, so PB12..PB15 stay unallocated and
+   SPI2 stays disabled in RCC. Never assign any peripheral to
+   PB12..PB15 while this flash is fitted.
    ============================================================================ */
-#define PEO_PM_FLASH_SPI                  SPI1  /* Hardware SPI peripheral reserved for external W25Q16BV flash. */
-/* Alternate-function selector connecting external W25Q16BV flash to its peripheral. */
-#define PEO_PM_FLASH_SPI_AF               GPIO_AF_SPI1
-#define PEO_PM_FLASH_SPI_RCC              RCC_APB2Periph_SPI1  /* APB2 clock-enable bit for the reserved external flash SPI controller. */
-/* GPIO clock-enable mask needed by the external flash wiring. */
-#define PEO_PM_FLASH_GPIO_RCC             (RCC_AHB1Periph_GPIOA | RCC_AHB1Periph_GPIOB)
-#define PEO_PM_FLASH_CS_PORT              GPIOA  /* GPIO peripheral containing the external W25Q16BV flash chip-select signal pin. */
-#define PEO_PM_FLASH_CS_PIN               GPIO_Pin_15  /* GPIO bit mask selecting the external W25Q16BV flash chip-select signal pin. */
-/* LQFP100 package lead number for external W25Q16BV flash chip-select signal; not a GPIO bit mask. */
-#define PEO_PM_FLASH_CS_PHYS_PIN          (77U)
-#define PEO_PM_FLASH_CS_ACTIVE_LEVEL      Bit_RESET  /* Electrical level that selects the flash device: low. */
-#define PEO_PM_FLASH_CS_IDLE_LEVEL        Bit_SET  /* Electrical level that deselects the flash device: high. */
-#define PEO_PM_FLASH_SCK_PORT             GPIOB  /* GPIO peripheral containing the external W25Q16BV flash SPI clock signal pin. */
-#define PEO_PM_FLASH_SCK_PIN              GPIO_Pin_3  /* GPIO bit mask selecting the external W25Q16BV flash SPI clock signal pin. */
-/* Pin index for alternate-function routing of external W25Q16BV flash SPI clock signal. */
-#define PEO_PM_FLASH_SCK_SRC              GPIO_PinSource3
-/* LQFP100 package lead number for external W25Q16BV flash SPI clock signal; not a GPIO bit mask. */
-#define PEO_PM_FLASH_SCK_PHYS_PIN         (89U)
-#define PEO_PM_FLASH_MISO_PORT            GPIOB  /* GPIO peripheral containing the external W25Q16BV flash SPI data from flash pin. */
-#define PEO_PM_FLASH_MISO_PIN             GPIO_Pin_4  /* GPIO bit mask selecting the external W25Q16BV flash SPI data from flash pin. */
-/* Pin index for alternate-function routing of external W25Q16BV flash SPI data from flash. */
-#define PEO_PM_FLASH_MISO_SRC             GPIO_PinSource4
-/* LQFP100 package lead number for external W25Q16BV flash SPI data from flash; not a GPIO bit mask. */
-#define PEO_PM_FLASH_MISO_PHYS_PIN        (90U)
-#define PEO_PM_FLASH_MOSI_PORT            GPIOB  /* GPIO peripheral containing the external W25Q16BV flash SPI data to flash pin. */
-#define PEO_PM_FLASH_MOSI_PIN             GPIO_Pin_5  /* GPIO bit mask selecting the external W25Q16BV flash SPI data to flash pin. */
-/* Pin index for alternate-function routing of external W25Q16BV flash SPI data to flash. */
-#define PEO_PM_FLASH_MOSI_SRC             GPIO_PinSource5
-/* LQFP100 package lead number for external W25Q16BV flash SPI data to flash; not a GPIO bit mask. */
-#define PEO_PM_FLASH_MOSI_PHYS_PIN        (91U)
+#define PEO_PM_FLASH_W25Q128_SPI_PORT       SPI2  /* Hardware SPI peripheral wired to the onboard W25Q128 flash. */
+#define PEO_PM_FLASH_W25Q128_PIN_PORT       GPIOB  /* GPIO peripheral carrying the onboard W25Q128 flash SPI signals. */
+#define PEO_PM_FLASH_W25Q128_PIN_SCLK       GPIO_Pin_13  /* Onboard flash CLK (SPI2_SCK, AF5). */
+#define PEO_PM_FLASH_W25Q128_PIN_MISO       GPIO_Pin_14  /* Onboard flash DO (SPI2_MISO, AF5). */
+#define PEO_PM_FLASH_W25Q128_PIN_MOSI       GPIO_Pin_15  /* Onboard flash DI (SPI2_MOSI, AF5). */
+#define PEO_PM_FLASH_W25Q128_PIN_CS_PORT    GPIOB  /* GPIO peripheral carrying the onboard W25Q128 flash chip-select. */
+#define PEO_PM_FLASH_W25Q128_PIN_CS         GPIO_Pin_12  /* Onboard flash /CS (software NSS, idle high). */
 
 /* ============================================================================
+   10b. SPI LCD DISPLAY (ST7789-class 172x320 panel, driven by TFT_SPI component)
+   ----------------------------------------------------------------------------
+   The board FPC LCD connector carries a 172x320 IPS panel with an
+   ST7789-class controller. The wiring below is the VERIFIED configuration
+   ported from the cube_solver project, which ran on this same FPC:
+     LCD_SCL  PB3(89)  SPI3_SCK,  AF6
+     LCD_SDA  PB5(91)  SPI3_MOSI, AF6   (write-only; no MISO line is used)
+     LCD_DC   PB4(90)  GPIO output      (data/command select)
+     LCD_CS   PD7(88)  GPIO output      (software chip-select, per-byte pulse)
+     LCD_RST  PD4(85)  GPIO output      (active-low reset)
+     LCD_PWR  PD3(84)  GPIO output      (backlight PMOS Q1 gate: LOW = ON)
+   SPI3 (AF6) was verified end-to-end on this panel; SPI1 can also reach
+   these pins (AF5) but was never tested on the real hardware and stays off.
+   PB3/PB4 are JTAG pins by default: AF6 + GPIO-output programming releases
+   JTAG, so debug through SWD (PA13/PA14) only - SWO on PB3 is unavailable.
+   The panel runs with display inversion ON, so RAM 0xFFFF shows black and
+   0x0000 shows white (see COMPONENTS/TFT_SPI/include/tft_spi.h color notes).
+   The driver uses polled SPI3 byte transfers; SPI3's DMA1 Stream 7 is free.
+   ============================================================================ */
+#define PEO_PM_LCD_SPI          SPI3  /* Hardware SPI peripheral wired to the LCD FPC. */
+#define PEO_PM_LCD_AF           GPIO_AF_SPI3  /* AF selector for the LCD SCLK/MOSI pins. */
+#define PEO_PM_LCD_SCL_PORT     GPIOB  /* LCD clock. */
+#define PEO_PM_LCD_SCL_PIN      GPIO_Pin_3
+#define PEO_PM_LCD_SCL_SRC      GPIO_PinSource3  /* AF routing index for LCD_SCL. */
+#define PEO_PM_LCD_SDA_PORT     GPIOB  /* LCD data (write-only MOSI). */
+#define PEO_PM_LCD_SDA_PIN      GPIO_Pin_5
+#define PEO_PM_LCD_SDA_SRC      GPIO_PinSource5  /* AF routing index for LCD_SDA. */
+#define PEO_PM_LCD_DC_PORT      GPIOB  /* LCD data/command select (GPIO output). */
+#define PEO_PM_LCD_DC_PIN       GPIO_Pin_4
+#define PEO_PM_LCD_CS_PORT      GPIOD  /* LCD chip-select, software-controlled. */
+#define PEO_PM_LCD_CS_PIN       GPIO_Pin_7
+#define PEO_PM_LCD_RST_PORT     GPIOD  /* LCD reset (active-low). */
+#define PEO_PM_LCD_RST_PIN      GPIO_Pin_4
+#define PEO_PM_LCD_PWR_PORT     GPIOD  /* LCD backlight PMOS Q1 gate: low = backlight ON. */
+#define PEO_PM_LCD_PWR_PIN      GPIO_Pin_3
+/* ============================================================================
    11. USER-RESERVED GPIO AND DEBUG
-   LED PA1(24), button PA0(23), per user assignment (not board-label inference).
-   PA15(77), PB3(89), PB4(90), PB5(91): W25Q16BV SPI1, see section 10.
+   RGB LED PC0(15)=RED, PC1(16)=GREEN, PC2(17)=BLUE - active-low (sink to light).
+   USER key PC13(7) - onboard key; it shorts to GND, so enable the
+   internal pull-up when a key driver is ever implemented.
    SWD PA13(72)/PA14(76), NRST(14): retain debug/reset.
    USB PA11/PA12 retained. SD socket unused: PC9 belongs to I2C3.
-   Use polling for the reserved button: its PA0/EXTI0 line is already assigned
-   to the VL53 front INT on PE0. No button driver is initialized here.
+   Use polling for the reserved key (EXTI13 is free). No key driver
+   is initialized here.
    ============================================================================ */
-#define PEO_PM_LED_PORT GPIOA  /* GPIO peripheral containing the onboard active-low status LED pin. */
-#define PEO_PM_LED_PIN GPIO_Pin_1  /* GPIO bit mask selecting the onboard active-low status LED pin. */
-#define PEO_PM_LED_ON_LEVEL Bit_RESET /* Existing active-low convention retained. */
-#define PEO_PM_BUTTON_PORT GPIOA  /* GPIO peripheral containing the reserved user button pin. */
-#define PEO_PM_BUTTON_PIN GPIO_Pin_0  /* GPIO bit mask selecting the reserved user button pin. */
+#define PEO_PM_LED_PORT         GPIOC  /* GPIO peripheral containing the onboard RGB LED pins. */
+#define PEO_PM_LED_RED          GPIO_Pin_0  /* Red channel (active-low). */
+#define PEO_PM_LED_GREEN        GPIO_Pin_1  /* Green channel (active-low). */
+#define PEO_PM_LED_BLUE         GPIO_Pin_2  /* Blue channel (active-low). */
+#define PEO_PM_LED_ON_LEVEL     Bit_RESET /* Existing active-low convention retained. */
+#define PEO_PM_USER_KEY_PORT    GPIOC  /* GPIO peripheral containing the reserved user key pin. */
+#define PEO_PM_USER_KEY         GPIO_Pin_13  /* Reserved onboard USER key; not used by firmware. */
 
 /* ============================================================================
    12. INTERRUPT HANDLER NAMES (StdPeriph, startup_stm32f40xx.s)
    ----------------------------------------------------------------------------
    ALL four encoders are pure (ARR = 0xFFFF), read as 16-bit DELTA - no
-   encoder timer needs an Update interrupt. The PWM timers (TIM5/9/10/11/12)
+   encoder timer needs an Update interrupt. The PWM timers (TIM5/9/10/11)
    are edge-aligned with no interrupt either. Encoder/PWM operation needs no timer IRQ; other application timers
    (for example the ESP32 report timer) may still use interrupts.
    ============================================================================ */
@@ -522,7 +532,10 @@
    ----------------------------------------------------------------------------
    | Peripheral | Direction | Stream / Channel | IRQ channel (see nvic.h) |
    |------------|-----------|------------------|--------------------------|
-   SPI2 TFT is not allocated: PB14/PB15 are motor PWM outputs.
+   | USART2     | RX        | DMA1 Stream5 Ch4 | ESP32 link (PD6)         |
+   | USART2     | TX        | DMA1 Stream6 Ch4 | ESP32 link (PD5)         |
+   | USART3     | RX        | DMA1 Stream1 Ch4 | Gamepad link (PD9)       |
+   SPI2 is not allocated: PB12-PB15 belong to the onboard W25Q128 flash.
    ----------------------------------------------------------------------------
    ============================================================================ */
 

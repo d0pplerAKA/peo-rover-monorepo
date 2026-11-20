@@ -6,9 +6,9 @@
 
 ## 1. Project Overview
 
-The F407 (STM32F407VGT6, Keil MDK + ST Standard Peripheral Library, C) handles everything that touches the physical world. It has two upstream links: USART2 to the ESP32-S3 (upper-computer commands relayed over WiFi) and USART3 directly to the ESP32-C3 (Xbox gamepad state frames). The upstream nodes only decide *how the rover should move*; this firmware turns those decisions into motor motion and measures the physical world back.
+The F407 (STM32F429VIT6 core board — pin-to-pin compatible with the F407VGT6 — Keil MDK + ST Standard Peripheral Library, C) handles everything that touches the physical world. It has two upstream links: USART2 to the ESP32-S3 (upper-computer commands relayed over WiFi) and USART3 directly to the ESP32-C3 (Xbox gamepad state frames). The upstream nodes only decide *how the rover should move*; this firmware turns those decisions into motor motion and measures the physical world back.
 
-The firmware = `main.c` + 17 components under `COMPONENTS/`, all feature-trimmed by macro switches centralized in `sensor_hub.h`.
+The firmware = `main.c` + 19 components under `COMPONENTS/`, all feature-trimmed by macro switches centralized in `sensor_hub.h`. The board also carries a 172×320 ST7789-class TFT data display, plus on-board W25Q128 SPI flash, an RGB LED and a USER key.
 
 ## 2. Why This Project Exists
 
@@ -29,6 +29,7 @@ The firmware = `main.c` + 17 components under `COMPONENTS/`, all feature-trimmed
 | Sensor acquisition | MPU6050 (100 Hz) / INA3221×2 (10 Hz) / VL53L1X×3 (~13 Hz), off at boot, toggled by gamepad Y/X/A |
 | Telemetry | TIM14 50 Hz whole-frame upload of the 116-byte `SensorData_t` |
 | Onboard LED | boot-complete indicator + upper-computer LED commands (0x01/0x09/0x0A) |
+| Onboard TFT | 172×320 ST7789-class data display: boot screen + 10 Hz live dashboard (power / speeds / attitude / distances / uptime) |
 | Debug UART | USART1 115200 with printf redirection |
 
 ## 4. Connections to the Other Three Nodes
@@ -46,7 +47,7 @@ The firmware = `main.c` + 17 components under `COMPONENTS/`, all feature-trimmed
                                         │ USART2 921600 (esp_link frames)
                        ┌───────────────▼──────────────────┐
                        │  STM32F407 (controller, this) ★  │
-                       │  motors + loop + sensors + lock   │
+                       │ motors+loop+sensors+lock+display │
                        └───────────────┬──────────────────┘
                                         │ USART3 115200 (gamepad frames 100 Hz)
                        ┌───────────────▼──────────────────┐
@@ -63,7 +64,7 @@ The firmware = `main.c` + 17 components under `COMPONENTS/`, all feature-trimmed
 
 ## 5. Main Implementation
 
-### 5.1 Component structure (main.c + 17 components)
+### 5.1 Component structure (main.c + 19 components)
 
 | Component | Responsibility |
 |---|---|
@@ -77,8 +78,10 @@ The firmware = `main.c` + 17 components under `COMPONENTS/`, all feature-trimmed
 | MPU6050 | eMPL DMP attitude glue (WHO_AM_I check, self-test, EXTI3 FIFO callback) |
 | INA3221 | 2×INA3221 (0x40/0x41) continuous conversion + TIM7 10 Hz polling |
 | TOF400C | 3×VL53L1X (sequential XSHUT release + re-addressing) + EXTI result reads |
-| I2C / NVIC / RCC / TIMER / DELAY / USART / BUILTIN_LED | bus, interrupt, clock, timestamp, debug console, LED infrastructure |
-| PEO_PINMAP.H | single source of board facts (clock tree/pins/timers/encoder constants/I2C addresses, 551-line macro header) |
+| TFT_SPI | ST7789-class 172×320 SPI display driver: single framebuffer + circular-DMA self-refresh scan, 5×7 font, Draw API |
+| TFT_UI | on-screen views: boot screen + dirty-region 10 Hz dashboard (power / speed / attitude / distances / uptime) |
+| I2C / NVIC / RCC / TIMER / DELAY / USART / BUILTIN_LED | bus, interrupt, clock (incl. SPI3), timestamp, debug console, LED infrastructure |
+| PEO_PINMAP.H | single source of board facts (clock tree/pins/timers/encoder constants/I2C addresses/TFT FPC, 564-line macro header) |
 
 ### 5.2 Frame protocol (esp_link)
 
@@ -121,9 +124,18 @@ Command set (0x02 deprecated):
 
 All sensors are **init-only at boot and off by default**; the gamepad keys turn them on. Data converges in SENSOR_HUB and is uploaded as one 50 Hz frame.
 
+### 5.6 Onboard TFT data display (TFT_SPI + TFT_UI)
+
+- **Hardware**: ST7789-class 172×320 IPS panel on the board FPC. SPI3/AF6: PB3=SCK, PB5=MOSI, PB4=D/C (GPIO), PD7=CS (GPIO), PD4=RST, PD3=backlight (PMOS gate, active-low). Net color semantics are intuitive RGB565; with the RGB LED at the observer's upper right, (0,0) is the observer's top-left corner.
+- **Architecture (CPU writes memory, the screen refreshes itself)**: one framebuffer `tft_spi_framebuf[172][320]` (110,080 B ZI). Init writes the screen once (8-bit polled SPI3: full ST7789 sequence + whole-area window + one RAMWR), then flips SPI3 to 16-bit and arms DMA1 Stream7/Ch0 (SPI3_TX) in circular mode — NDTR equals the window pixel count (320×172), so the DMA reload and the panel's address-counter wrap (ST7789 datasheet 8.12) stay in lockstep forever: zero interrupts, zero re-arming. One full scan takes ≤42 ms at 21 MHz.
+- **Power-up is stripe-free by construction**: the backlight PMOS gate floats before the driver owns it, so `TFT_SPI_Init()` runs earliest in `main()` and forces the backlight off; the ST7789 does not clear its GRAM on reset, so `TFT_SPI_Config()` polls the whole framebuffer (zero-init = black) into the panel RAM **before** the backlight ever turns on; only then does the DMA take over and the backlight light a clean black screen.
+- **Draw API** (memory-only, boundary-clipped): FillScreen / FillRectangle / DrawPixel / DrawChar / DrawString / DrawNumber / RGB565 with a built-in 5×7 font (95 glyphs, scale 1–3). `TFT_SPI_RGB565()` packs 8-8-8 RGB channels into RGB565.
+- **UI**: `TFT_UI_ShowBoot()` paints the boot screen (title at 3×, protocol version, build date, the six module-switch lines mirroring the serial banner, green BOOT OK), shown ~2 s. `TFT_UI_ShowDashboard()` then refreshes every 100 ms (10 Hz) from the sensor-hub snapshot: voltage / total current on top (3×, yellow/cyan), four wheel speeds + pitch/roll/yaw in the middle, FRONT/LEFT/RIGHT distances below, green uptime (seconds, 2 decimals) as the footer.
+- **Refresh discipline**: dirty-region only — static labels are painted once; each value field keeps its last value and is cleared+redrawn only when it changes (typical tick ~0.1 ms). No delay call anywhere in the display path; value text is right-aligned inside fixed-width fields so unit labels never drift.
+
 ## 6. What Each Feature Affects and Constrains
 
-- **Macro matrix** (`sensor_hub.h`): `MOTOR=1 / CONTROL=0 / ENCODER=CONTROL / TOF=1 / INA=1 / MPU=1`. The current default is the **open-loop configuration** — with `CONTROL=0`: encoders are not initialized (ENCODER auto-follows), `MOTOR_CLOSED` is rejected at compile time, and both the upper-computer MOTOR command and the gamepad fall back to `MOTOR_SetSpeed` direct drive (no speed feedback). Switching open/closed loop only requires the MOTOR+CONTROL macros; ENCODER follows automatically.
+- **Macro matrix** (`sensor_hub.h`): `MOTOR=1 / CONTROL=0 / ENCODER=CONTROL / TOF=1 / INA=1 / MPU=1 / TFT=1`. The current default is the **open-loop configuration** — with `CONTROL=0`: encoders are not initialized (ENCODER auto-follows), `MOTOR_CLOSED` is rejected at compile time, and both the upper-computer MOTOR command and the gamepad fall back to `MOTOR_SetSpeed` direct drive (no speed feedback). Switching open/closed loop only requires the MOTOR+CONTROL macros; ENCODER follows automatically.
 - **Closed-loop dependencies**: the speed loop needs MOTOR + CONTROL + ENCODER all enabled; the `MOTOR` command switches to open-loop mode and `MOTOR_CLOSED` switches back — modes are toggled live by commands.
 - **Lock arbitration constraints**: in manual mode the upper computer cannot move the rover (only STOP/LED/reset); the lock flip forces a stop to avoid a speed jump across the handover.
 - **Sensor toggles are manual-mode-only**: autonomous mode skips toggle logic; all off at boot.
@@ -131,10 +143,11 @@ All sensors are **init-only at boot and off by default**; the gamepad keys turn 
 - **Dual deadman links**: S3 silent (>500 ms without a valid frame, including the 200 ms empty-frame heartbeat) → stop; C3 silent (>500 ms without a frame, or connected=0/input_fresh=0) → stop — the F407 never depends on upstream being alive.
 - **PID is shared across all four wheels**: one Kp/Ki pair controls all wheels; per-wheel gains are not supported.
 - **DRV8871 has no nFAULT routed**: stall/over-current is inferred indirectly from INA3221 current monitoring.
+- **TFT display cost and constraints**: the framebuffer is 110,080 B of ZI (≈107.5 KB of RAM); Microlib's printf has no %f, so the dashboard formats fixed-point values by hand; PB3/PB4 release their JTAG roles (JTDO/NJTRST) to become SPI3 SCK and D/C; the display path adds no delays — the 100 ms refresh only writes memory and the DMA scan paints it asynchronously; a region edited mid-scan may show a one-pass mix (tearing), invisible for dashboard text.
 
 ## 7. Tech Stack & Build
 
-- MCU: STM32F407VGT6 (DevEBox board); Keil MDK + ST Standard Peripheral Library (StdPeriph), C.
+- MCU: STM32F429VIT6 core board (51.82×36 mm, all GPIO broken out, pin-to-pin F407-compatible; 8 MHz HSE, Type-C 5 V supply, on-board W25Q128 SPI flash / RGB LED / USER key / 172×320 TFT FPC). Keil device = STM32F429VITx + 2 MB flash algorithm; Keil MDK + ST Standard Peripheral Library (StdPeriph), C.
 - Debug: ST-Link (SWD) + USART1 printf.
 - Build: open `peo_rover_f407.uvprojx` in Keil MDK; CLI: `UV4.exe -b peo_rover_f407.uvprojx -j0`.
 

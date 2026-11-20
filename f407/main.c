@@ -37,10 +37,16 @@
 #include "COMPONENTS/MOTOR/include/motor.h"
 #include "COMPONENTS/TOF400C/include/tof400c.h"
 #include "COMPONENTS/BUILTIN_LED/builtin_led.h"
+#include "COMPONENTS/TFT_SPI/include/tft_spi.h"
+#include "COMPONENTS/TFT_UI/include/tft_ui.h"
 #include "COMPONENTS/SENSOR_HUB/include/sensor_hub.h"
 #include "COMPONENTS/INA3221/include/ina3221.h"
 #include "COMPONENTS/ESP_LINK/include/esp_link.h"
 #include "COMPONENTS/GAMEPAD/include/gamepad.h"
+
+/* Dashboard refresh stamp: initialized after the boot screen is drawn so the
+   screen shows startup info ~2 s before live telemetry takes over. */
+static uint32_t s_last_tft_ms = 0;
 
 /* How this firmware shares work:
  * main() performs startup and repeatedly handles commands. An interrupt handler
@@ -69,11 +75,26 @@ int main(void)
     /* 3. SysTick timestamps plus DWT delays (get_tick / mdelay for the motion driver). */
     TIMER_Init();
 
+    /* 3b. Early TFT GPIO/SPI3 setup: the backlight PMOS gate (PD3) floats
+           before the display driver owns it, and a floating gate can light
+           the uninitialized panel (power-up stripes). Init() only configures
+           pins/SPI and forces the backlight off - no delays. */
+#if PEO_ENABLE_TFT
+    TFT_SPI_Init();
+#endif
+
     /* 4. Debug console */
     USART_DBG_Init(PEO_PM_DBG_BAUDRATE);     /* 115200, PA9/PA10 USB-TTL */
 
     /* 4b. On-board LED D2 (PA1) */
     BUILTIN_LED_Init();
+
+    /* 4c. TFT panel startup (ST7789 sequence + DMA scan + backlight on;
+           ~0.6 s total including the first-scan wait; GPIO/SPI3 were set up
+           early in step 3b to kill the floating backlight). */
+#if PEO_ENABLE_TFT
+    TFT_SPI_Config();
+#endif
 
     /* 5. Quadrature encoders (TIM1/3/4/8, 16-bit delta read) */
 #if PEO_ENABLE_ENCODER
@@ -97,6 +118,9 @@ int main(void)
 
 #if PEO_ENABLE_MPU6050
     MPU6050_Init();
+    MPU6050_Start();    /* TEMPORARY bench hook: no gamepad connected, so start the
+                           DMP right away for dashboard verification. Remove once
+                           the A-button toggle path is confirmed. */
 #endif
 
     /* 8. Start the optional 1 kHz TIM6 controller after the hardware it uses.
@@ -115,10 +139,28 @@ int main(void)
     /* 9. Boot banner: diagnostics for clocks, build, settings, sensors, and enabled modules. */
     print_boot_banner();
 
+    /* 9b. On-screen boot screen (title, version, build date, module states),
+           kept visible ~2 s before the live dashboard takes over. */
+#if PEO_ENABLE_TFT
+    TFT_UI_ShowBoot();
+    s_last_tft_ms = TIMER_GetTick() + 1500U;
+#endif
+
     BUILTIN_LED_On();        /* Running indicator: turn on the LED after system startup completes. */
 
     while (1)
     {
+#if PEO_ENABLE_TFT
+        /* 10. Live dashboard refresh every 100 ms (10 Hz) so 100 Hz sensor
+               data (MPU DMP) reads smoothly; framebuffer writes only - the
+               circular DMA scan paints them within one 84 ms pass. */
+        if ((int32_t)(TIMER_GetTick() - s_last_tft_ms) >= 100)
+        {
+            s_last_tft_ms = TIMER_GetTick();
+            TFT_UI_ShowDashboard();
+        }
+#endif
+
         /* Handle the separate STOP request first, even when the ordinary command queue is full. */
         if (ESP_LINK_StopPending())
         {

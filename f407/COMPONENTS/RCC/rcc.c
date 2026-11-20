@@ -24,6 +24,6 @@
 void RCC_Clock_Init(void)
 {
     RCC_AHB1PeriphClockCmd(PEO_RCC_AHB1_EN, ENABLE);   /* Enable GPIOA through GPIOE and DMA1 clocks. */
-    RCC_APB1PeriphClockCmd(PEO_RCC_APB1_EN, ENABLE);   /* Enable TIM3/4/5/6/7/12/14, I2C1/2/3, and USART2/3 clocks. */
+    RCC_APB1PeriphClockCmd(PEO_RCC_APB1_EN, ENABLE);   /* Enable TIM3/4/5/6/7/14, I2C1/2/3, USART2/3, and SPI3 clocks. */
     RCC_APB2PeriphClockCmd(PEO_RCC_APB2_EN, ENABLE);   /* Enable TIM1/8/9/10/11, USART1, and SYSCFG clocks. */
 }

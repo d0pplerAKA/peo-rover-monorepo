@@ -14,7 +14,7 @@
  * PWM mapping (PEO_PINMAP.H section 5; all channels use 20 kHz):
  *   M1 -> TIM5  CH3/CH4 = PA2/PA3        (APB1; period counts 4200, ARR 4199)
  *   M2 -> TIM9  CH1/CH2 = PE5/PE6        (APB2; period counts 8400, ARR 8399)
- *   M3 -> TIM12 CH1/CH2 = PB14/PB15      (APB1; period counts 4200, ARR 4199)
+ *   M3 -> TIM5  CH1/CH2 = PA0/PA1        (APB1; period counts 4200, ARR 4199)
  *   M4 -> TIM10 CH1(PB8) + TIM11 CH1(PB9) (APB2; period counts 8400, ARR 8399)
  *
  * DRV8871 direction logic (simplified module, IN1/IN2 only):

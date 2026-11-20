@@ -28,9 +28,9 @@ static const motor_pwm_ch_t pwm_ch[8] = {  /* Eight timer-output descriptions, o
     /* M2:IN1/IN2 = TIM9 CH1/CH2 (PE5/PE6), APB2 */
     { TIM9,  1, PEO_PM_ARR_APB2 },
     { TIM9,  2, PEO_PM_ARR_APB2 },
-    /* M3:IN1/IN2 = TIM12 CH1/CH2 (PB14/PB15), APB1 */
-    { TIM12, 1, PEO_PM_ARR_APB1 },
-    { TIM12, 2, PEO_PM_ARR_APB1 },
+    /* M3:IN1/IN2 = TIM5 CH1/CH2 (PA0/PA1), APB1 */
+    { TIM5,  1, PEO_PM_ARR_APB1 },
+    { TIM5,  2, PEO_PM_ARR_APB1 },
     /* M4: IN1 = TIM10 CH1 (PB8), IN2 = TIM11 CH1 (PB9) */
     { TIM10, 1, PEO_PM_ARR_APB2 },
     { TIM11, 1, PEO_PM_ARR_APB2 },
@@ -109,7 +109,7 @@ static void gpio_af_init(GPIO_TypeDef *port, uint16_t pin,
 /**
  * @brief Start a timer that defines the motor PWM repetition period.
  *
- * Called by MOTOR_Init for the five PWM timers. Uses an up counter with no prescaling
+ * Called by MOTOR_Init for the four PWM timers. Uses an up counter with no prescaling
  * and enables automatic reload buffering.
  * @param tim Timer peripheral to configure.
  * @param arr Counts per PWM period; hardware auto-reload register receives arr-1.
@@ -169,7 +169,7 @@ static void oc_init(TIM_TypeDef *tim, uint8_t channel)
 /**
  * @brief Prepare eight PWM outputs for four DRV8871 drivers and coast all wheels.
  *
- * Called by main before CONTROL starts. Configures GPIO routing and five timers at 20
+ * Called by main before CONTROL starts. Configures GPIO routing and four timers at 20
  * kHz; clock enabling belongs to RCC.
  * @note No arguments are required.
  * @retval None This function does not return a value.
@@ -187,9 +187,8 @@ void MOTOR_Init(void)
     gpio_af_init(PEO_PM_PWM8_PORT, PEO_PM_PWM8_PIN, PEO_PM_PWM8_SRC, PEO_PM_PWM7_8_AF);
 
     /* Timers: time-base + OC channels. */
-    timer_pwm_init(TIM5,  PEO_PM_ARR_APB1);  oc_init(TIM5,  3);  oc_init(TIM5,  4);
+    timer_pwm_init(TIM5,  PEO_PM_ARR_APB1);  oc_init(TIM5,  1);  oc_init(TIM5,  2);  oc_init(TIM5,  3);  oc_init(TIM5,  4);
     timer_pwm_init(TIM9,  PEO_PM_ARR_APB2);  oc_init(TIM9,  1);  oc_init(TIM9,  2);
-    timer_pwm_init(TIM12, PEO_PM_ARR_APB1);  oc_init(TIM12, 1);  oc_init(TIM12, 2);
     timer_pwm_init(TIM10, PEO_PM_ARR_APB2);  oc_init(TIM10, 1);
     timer_pwm_init(TIM11, PEO_PM_ARR_APB2);  oc_init(TIM11, 1);
 

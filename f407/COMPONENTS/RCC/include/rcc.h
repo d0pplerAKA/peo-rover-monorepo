@@ -31,8 +31,7 @@
    |-------------------|------|----------------------------|-------------------|
    | GPIOA-E           | AHB1 | RCC_AHB1Periph_GPIOx      | All assigned GPIO   |
    | TIM3, TIM4        | APB1 | RCC_APB1Periph_TIMx       | Encoders M2/M3      |
-   | TIM5              | APB1 | RCC_APB1Periph_TIM5       | PWM M1            |
-   | TIM12             | APB1 | RCC_APB1Periph_TIM12      | PWM M3            |
+   | TIM5              | APB1 | RCC_APB1Periph_TIM5       | PWM M1/M3          |
    | TIM6              | APB1 | RCC_APB1Periph_TIM6       | 1 kHz control loop|
    | TIM7              | APB1 | RCC_APB1Periph_TIM7       | INA3221 polling      |
    | I2C1              | APB1 | RCC_APB1Periph_I2C1       | MPU6050 (dedicated)|
@@ -44,13 +43,17 @@
    | USART1            | APB2 | RCC_APB2Periph_USART1     | debug console     |
    | USART2            | APB1 | RCC_APB1Periph_USART2     | ESP32 link (PD5/6) |
    | USART3            | APB1 | RCC_APB1Periph_USART3     | Gamepad (PD8/9)  |
+   | SPI3              | APB1 | RCC_APB1Periph_SPI3       | TFT display (PB3/5) |
    | SYSCFG            | APB2 | RCC_APB2Periph_SYSCFG     | sensor EXTI routing |
    ----------------------------------------------------------------------------
    NOT enabled (and why):
      AHB2 (USB OTG FS): USB not used (PA11/PA12 idle).
      AHB3 (FSMC):      not used.
-     APB1 SPI3/CAN/DAC and APB2 SDIO: unused.
-     APB2 SPI1: pins are reserved for external Flash, but its clock is not enabled.
+     APB1 CAN/DAC and APB2 SDIO: unused.
+     APB1 TIM12: not used (M3 PWM moved to TIM5).
+     APB2 SPI1 and APB1 SPI2: not used (the old board's W25Q16BV is gone and
+     the onboard W25Q128 on PB12-PB15 is left unallocated; the LCD FPC pins
+     PB3/4/5 run SPI3 AF6, never SPI1 AF5).
    ============================================================================ */
 
 /** Aggregate: every AHB1 peripheral this design needs **/
@@ -69,13 +72,13 @@
                             RCC_APB1Periph_TIM5   | \
                             RCC_APB1Periph_TIM6   | \
                             RCC_APB1Periph_TIM7   | \
-                            RCC_APB1Periph_TIM12  | \
                             RCC_APB1Periph_TIM14  | \
                             RCC_APB1Periph_I2C1   | \
                             RCC_APB1Periph_I2C2   | \
                             RCC_APB1Periph_I2C3   | \
                             RCC_APB1Periph_USART2 | \
-                            RCC_APB1Periph_USART3)
+                            RCC_APB1Periph_USART3 | \
+                            RCC_APB1Periph_SPI3)
 
 /** Aggregate: every APB2 peripheral this design needs **/
 /* Combined APB2 clock-enable mask for high-speed-bus timers, debug USART, and EXTI routing. */

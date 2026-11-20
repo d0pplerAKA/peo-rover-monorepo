@@ -6,9 +6,9 @@
 
 ## 1. 工程总览
 
-F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物理世界直接相关的动作。它的上游有两路：USART2 连 ESP32-S3（上位机命令经 WiFi 桥透传），USART3 直连 ESP32-C3（Xbox 手柄状态帧）。上游只管「想怎么走」，真正把指令变成电机动作、把物理世界测回来的，是本工程。
+F407（STM32F429VIT6 核心板——与 F407VGT6 引脚全兼容——Keil MDK + ST 标准库，C 语言）负责一切与物理世界直接相关的动作。它的上游有两路：USART2 连 ESP32-S3（上位机命令经 WiFi 桥透传），USART3 直连 ESP32-C3（Xbox 手柄状态帧）。上游只管「想怎么走」，真正把指令变成电机动作、把物理世界测回来的，是本工程。
 
-固件结构 = `main.c` + 17 个组件（`COMPONENTS/`），全部通过宏开关（集中在 `sensor_hub.h`）裁剪功能。
+固件结构 = `main.c` + 19 个组件（`COMPONENTS/`），全部通过宏开关（集中在 `sensor_hub.h`）裁剪功能。板上还带一块 172×320 ST7789 类 TFT 数据显示屏，以及板载 W25Q128 SPI flash、RGB LED 与 USER 按键。
 
 ## 2. 工程意义
 
@@ -29,6 +29,7 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
 | 传感器采集 | MPU6050（100Hz）/ INA3221×2（10Hz）/ VL53L1X×3（~13Hz），上电默认关、手柄 Y/X/A 开启 |
 | 遥测上报 | TIM14 50Hz 整帧上报 116B `SensorData_t` |
 | 板载 LED | 启动完成指示 + 上位机 LED 命令（0x01/0x09/0x0A） |
+| 板载 TFT 屏 | 172×320 ST7789 类数据屏：开机启动屏 + 10Hz 实时仪表盘（电源/轮速/姿态/距离/运行时长） |
 | 调试串口 | USART1 115200 printf 重定向 |
 
 ## 4. 与其它三端的联系
@@ -46,7 +47,7 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
                                         │ USART2 921600（esp_link 帧）
                        ┌───────────────▼──────────────────┐
                        │   STM32F407（主控，本工程） ★     │
-                       │  电机 + 闭环 + 传感器 + 锁仲裁     │
+                       │ 电机+闭环+传感器+屏显+锁仲裁      │
                        └───────────────┬──────────────────┘
                                         │ USART3 115200（手柄帧 100Hz）
                        ┌───────────────▼──────────────────┐
@@ -63,7 +64,7 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
 
 ## 5. 主要实现
 
-### 5.1 组件结构（main.c + 17 组件）
+### 5.1 组件结构（main.c + 19 组件）
 
 | 组件 | 职责 |
 |---|---|
@@ -77,8 +78,10 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
 | MPU6050 | eMPL DMP 姿态胶水（WHO_AM_I 校验、自检、EXTI3 FIFO 回调） |
 | INA3221 | 2 片 INA3221（0x40/0x41）连续转换 + TIM7 10Hz 轮询 |
 | TOF400C | 3 片 VL53L1X（XSHUT 顺序释放重编址）+ EXTI 结果读取 |
-| I2C / NVIC / RCC / TIMER / DELAY / USART / BUILTIN_LED | 总线、中断、时钟、时间戳、调试台、LED 基础设施 |
-| PEO_PINMAP.H | 板级事实单点（时钟树/引脚/定时器/编码器常数/I2C 地址，551 行宏） |
+| TFT_SPI | ST7789 类 172×320 SPI 屏驱动：单帧缓冲 + 循环 DMA 自刷屏扫描，5×7 字库，绘图 API |
+| TFT_UI | 屏幕视图：开机启动屏 + 脏区刷新 10Hz 仪表盘（电源/轮速/姿态/距离/运行时长） |
+| I2C / NVIC / RCC / TIMER / DELAY / USART / BUILTIN_LED | 总线、中断、时钟（含 SPI3）、时间戳、调试台、LED 基础设施 |
+| PEO_PINMAP.H | 板级事实单点（时钟树/引脚/定时器/编码器常数/I2C 地址/TFT FPC，564 行宏） |
 
 ### 5.2 帧协议（esp_link）
 
@@ -121,9 +124,18 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
 
 全部**上电 Init-only、默认关**，手柄按键开启；数据汇聚 SENSOR_HUB 后 50Hz 整帧上报。
 
+### 5.6 板载 TFT 数据屏（TFT_SPI + TFT_UI）
+
+- **硬件**：板载 FPC 口的 ST7789 类 172×320 IPS 屏。SPI3/AF6：PB3=SCK、PB5=MOSI、PB4=D/C（GPIO）、PD7=CS（GPIO）、PD4=RST、PD3=背光（PMOS 栅极，低电平亮）。净颜色语义 = 直观 RGB565；RGB LED 位于观察者右上方时，(0,0) 为观察者左上角。
+- **架构（CPU 只写内存，屏幕自刷）**：单帧缓冲 `tft_spi_framebuf[172][320]`（110,080 字节 ZI）。初始化阶段只写屏一次（8bit 轮询 SPI3：ST7789 完整启动序列 + 整屏窗口 + 一次 RAMWR），随后 SPI3 切 16bit、启用 DMA1 Stream7/Ch0（SPI3_TX）循环模式——NDTR 等于窗口像素数（320×172），DMA 重装与面板地址计数器回卷（ST7789 手册 8.12）永久锁步：零中断、零重装。21MHz 下整屏一圈 ≤42ms。
+- **开机无色条（结构性保证）**：背光 PMOS 栅极在驱动接管前是浮空的，所以 `TFT_SPI_Init()` 在 `main()` 最早执行并把背光拉灭；ST7789 复位不清 GRAM，因此 `TFT_SPI_Config()` 在**背光点亮之前**把整块帧缓冲（零初始化 = 黑）用 CPU 轮询写进面板 RAM；之后 DMA 才接管、背光才亮起——第一眼必是干净黑屏。
+- **绘图 API**（只写内存、边界裁剪）：FillScreen / FillRectangle / DrawPixel / DrawChar / DrawString / DrawNumber / RGB565，内置 5×7 字库（95 个字形，缩放 1–3 倍）。`TFT_SPI_RGB565()` 把 8-8-8 RGB 打包成 RGB565。
+- **UI**：`TFT_UI_ShowBoot()` 画开机启动屏（标题 3 倍大字、协议版本、构建日期、与串口 banner 对齐的六行模块开关、绿色 BOOT OK），显示约 2 秒；随后 `TFT_UI_ShowDashboard()` 每 100ms（10Hz）从传感器快照刷新仪表盘：上=电压/总电流（3 倍大字，黄/青）、中=四轮速度 + 俯仰/横滚/偏航、下=FRONT/LEFT/RIGHT 三路距离、底部绿色运行时长（秒，两位小数）。
+- **刷新纪律**：脏区刷新——静态标签只画一次；每个数值字段缓存上帧值、变了才「清除+重画」（典型 tick ~0.1ms）。显示路径全程无延时调用；数值右对齐贴固定宽度字段，单位标签永不漂移。
+
 ## 6. 功能的影响与制约
 
-- **宏开关矩阵**（`sensor_hub.h`）：`MOTOR=1 / CONTROL=0 / ENCODER=CONTROL / TOF=1 / INA=1 / MPU=1`。当前默认 = **开环配置**——`CONTROL=0` 时：编码器不初始化（ENCODER 自动跟随）、`MOTOR_CLOSED` 命令被编译期守卫拒绝、上位机 MOTOR 与手柄都走 `MOTOR_SetSpeed` 开环直驱（无速度反馈）。开闭环切换只需改 MOTOR+CONTROL 两个宏，ENCODER 自动跟随。
+- **宏开关矩阵**（`sensor_hub.h`）：`MOTOR=1 / CONTROL=0 / ENCODER=CONTROL / TOF=1 / INA=1 / MPU=1 / TFT=1`。当前默认 = **开环配置**——`CONTROL=0` 时：编码器不初始化（ENCODER 自动跟随）、`MOTOR_CLOSED` 命令被编译期守卫拒绝、上位机 MOTOR 与手柄都走 `MOTOR_SetSpeed` 开环直驱（无速度反馈）。开闭环切换只需改 MOTOR+CONTROL 两个宏，ENCODER 自动跟随。
 - **闭环依赖**：速度闭环 = MOTOR + CONTROL + ENCODER 三者同时开启；`MOTOR` 命令会切开环模式、`MOTOR_CLOSED` 切回闭环——两种模式由命令实时切换。
 - **锁仲裁的制约**：手操态下上位机无法移动车（只能 STOP/LED/复位）；锁切换瞬间强制停车（防控制权交接时速度突变）。
 - **传感器 toggle 只在手操态**：自主态跳过 toggle 逻辑，上电默认全关。
@@ -131,10 +143,11 @@ F407（STM32F407VGT6，Keil MDK + ST 标准库，C 语言）负责一切与物�
 - **deadman 双链路**：S3 失联（>500ms 无有效帧，含 200ms 空帧心跳）停车；C3 失联（>500ms 无帧或 connected=0/input_fresh=0）停车——F407 不依赖任何上游存活。
 - **PID 四轮共享**：一套 Kp/Ki 控制四轮，不支持单轮独立增益。
 - **DRV8871 无 nFAULT 引出**：堵转/过流靠 INA3221 电流监测间接判断。
+- **TFT 屏的代价与制约**：帧缓冲 110,080 字节 ZI（约 107.5KB RAM）；MicroLIB 的 printf 无 %f，仪表盘浮点显示全部手写定点格式化；PB3/PB4 释放了 JTAG 角色（JTDO/NJTRST）用作 SPI3 SCK 与 D/C；显示路径零延时——100ms 刷新只写内存、DMA 扫描异步上屏；扫描中修改的区域可能出现一圈的新旧混合（撕裂），对仪表盘文字不可见。
 
 ## 7. 技术栈与构建
 
-- MCU：STM32F407VGT6（DevEBox 开发板）；Keil MDK + ST 标准库（StdPeriph），C 语言。
+- MCU：STM32F429VIT6 核心板（51.82×36mm、全 GPIO 引出、与 F407 引脚全兼容；8MHz HSE、Type-C 5V 供电，板载 W25Q128 SPI flash / RGB LED / USER 按键 / 172×320 TFT FPC）。Keil 器件已切 STM32F429VITx + 2MB 烧录算法；Keil MDK + ST 标准库（StdPeriph），C 语言。
 - 调试：ST-Link（SWD）+ USART1 串口 printf。
 - 构建：Keil MDK 打开 `peo_rover_f407.uvprojx` 编译；命令行 `UV4.exe -b peo_rover_f407.uvprojx -j0`。
 

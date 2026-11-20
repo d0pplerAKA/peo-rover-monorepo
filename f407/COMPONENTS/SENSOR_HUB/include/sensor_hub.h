@@ -57,9 +57,10 @@
 #define PEO_ENABLE_MOTOR      1    /* Enable motor PWM, needed for either open-loop or closed-loop driving. */
 #define PEO_ENABLE_CONTROL    0    /* Enable the 1 kHz PI speed controller and encoder speed measurements. */
 #define PEO_ENABLE_ENCODER    PEO_ENABLE_CONTROL  /* Enable encoders automatically whenever CONTROL is enabled. */
-#define PEO_ENABLE_TOF400C    1  /* Build switch: initialize ranging hardware and allow the Y-button sampling toggle. */
-#define PEO_ENABLE_INA3221    1  /* Build switch: initialize current monitors and allow the X-button polling toggle. */
+#define PEO_ENABLE_TOF400C    0  /* Build switch: initialize ranging hardware and allow the Y-button sampling toggle. */
+#define PEO_ENABLE_INA3221    0  /* Build switch: initialize current monitors and allow the X-button polling toggle. */
 #define PEO_ENABLE_MPU6050    1  /* Build switch: initialize attitude hardware and allow the A-button DMP toggle. */
+#define PEO_ENABLE_TFT        1  /* Build switch: initialize the ST7789 data display (SPI3, PB3/5 + PB4/PD3/4/7). */
 
 /* F407 firmware version sent in SensorData so the host can check peer
    compatibility (earlier notes called this a three-endpoint version check). */

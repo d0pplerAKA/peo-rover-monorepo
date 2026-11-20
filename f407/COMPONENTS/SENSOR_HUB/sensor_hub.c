@@ -291,7 +291,9 @@ void print_boot_banner(void)
            PEO_ENABLE_CONTROL ? "ON " : "OFF",
            PEO_ENABLE_TOF400C ? "ON " : "OFF",
            PEO_ENABLE_INA3221 ? "ON " : "OFF");
-    printf("    MPU6050=%s   LED=ON\r\n", PEO_ENABLE_MPU6050 ? "ON " : "OFF");
+    printf("    MPU6050=%s   TFT=%s   LED=ON\r\n",
+           PEO_ENABLE_MPU6050 ? "ON " : "OFF",
+           PEO_ENABLE_TFT     ? "ON " : "OFF");
     printf("=================================================\r\n");
     printf("\r\n");
 }
