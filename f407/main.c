@@ -118,9 +118,6 @@ int main(void)
 
 #if PEO_ENABLE_MPU6050
     MPU6050_Init();
-    MPU6050_Start();    /* TEMPORARY bench hook: no gamepad connected, so start the
-                           DMP right away for dashboard verification. Remove once
-                           the A-button toggle path is confirmed. */
 #endif
 
     /* 8. Start the optional 1 kHz TIM6 controller after the hardware it uses.
