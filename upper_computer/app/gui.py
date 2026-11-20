@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QLabel, QLineEdit, QPushButton, QGroupBox, QTextEdit, QSplitter,
     QPlainTextEdit, QComboBox, QApplication, QTabWidget, QFileDialog,
+    QSizePolicy,
 )
 
 from rover_comm.client import RoverClient
@@ -442,7 +443,11 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.btn_stop)
         rv.addStretch(1)
         splitter.addWidget(right)
-        splitter.setSizes([640, 360])
+        # Give the control column the spare width: the dashboard values need
+        # stable, full display space; the video column keeps its minimum.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([400, 880])
         return w
 
     def _build_conn_group(self):
@@ -485,13 +490,26 @@ class MainWindow(QMainWindow):
         grid.setContentsMargins(6, 2, 6, 4)
         grid.setVerticalSpacing(3)
 
+        # Layout-stable dashboard: value-label text length must never drive
+        # the layout (and thus the window) width. Ignored horizontal policy
+        # detaches sizeHint from the layout; stretched columns then share the
+        # window width so every field keeps stable, full display space.
+        _ign = QSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
         self.lbl_dist_f = QLabel("—")
+        self.lbl_dist_f.setSizePolicy(_ign)
         self.lbl_dist_l = QLabel("—")
+        self.lbl_dist_l.setSizePolicy(_ign)
         self.lbl_dist_r = QLabel("—")
+        self.lbl_dist_r.setSizePolicy(_ign)
         self.lbl_spd = [QLabel("—") for _ in range(4)]
         self.lbl_cur = [QLabel("—") for _ in range(4)]
+        for lbl in self.lbl_spd + self.lbl_cur:
+            lbl.setSizePolicy(_ign)
         self.lbl_imu = QLabel("—")
+        self.lbl_imu.setSizePolicy(_ign)
         self.lbl_ack = QLabel("—")
+        self.lbl_ack.setSizePolicy(_ign)
 
         self._sensor_labels = []          # (QLabel title, tr key); _retranslate refreshes
         r = 0
@@ -513,6 +531,12 @@ class MainWindow(QMainWindow):
         # ACK echo row
         t = QLabel(); grid.addWidget(t, r, 0); grid.addWidget(self.lbl_ack, r, 1, 1, 5)
         self._sensor_labels.append((t, "cmd_ack"))
+
+        # All columns share spare width equally (stretch): at a normal window
+        # size every field gets full display space, while the layout minimum
+        # stays small (title-driven) so the window never gets forced wider.
+        for c in range(grid.columnCount()):
+            grid.setColumnStretch(c, 1)
         return g
 
     # ---------------- Tab 2: team IDE ----------------
